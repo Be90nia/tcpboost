@@ -106,7 +106,7 @@ jobs:
           # 复制补丁文件
           mkdir -p patches
           if [ -d "cp-patches/kernel_patches/${{ env.KERNEL_MAJOR }}" ]; then
-            cp -v cp-patches/kernel_patches/${{ env.KERNEL_MAJOR}}/*.patch patches/ 2>/dev/null || true
+            cp -v cp-patches/kernel_patches/${{ env.KERNEL_MAJOR }}/*.patch patches/ 2>/dev/null || true
           fi
 
           echo "可用补丁:"
