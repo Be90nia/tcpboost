@@ -562,10 +562,12 @@ restore_configs() {
 #   PROXY_XRAY="yes"/"no"
 #   PROXY_SINGBOX="yes"/"no"
 #   PROXY_HY2="yes"/"no"
+#   PACKET_LOSS="low"/"medium"/"high"
 detect_proxy() {
   PROXY_XRAY="no"
   PROXY_SINGBOX="no"
   PROXY_HY2="no"
+  PACKET_LOSS="low"
 
   # 1. 检测 xray 进程
   if pgrep -x "xray" >/dev/null 2>&1; then
@@ -619,6 +621,29 @@ detect_proxy() {
       fi
     fi
   fi
+
+  # 4. 快速丢包检测 — ping 默认网关 20 次
+  local gateway
+  gateway=$(ip route show default 2>/dev/null | awk '{print $3}' | head -1)
+  if [ -n "$gateway" ]; then
+    local loss_pct
+    loss_pct=$(ping -c 20 -W 2 "$gateway" 2>/dev/null | grep -oE '[0-9]+%' | tail -1 | tr -d '%')
+    if [ -n "$loss_pct" ]; then
+      if [ "$loss_pct" -ge 5 ]; then
+        PACKET_LOSS="high"
+        warn "丢包率 ${loss_pct}% (≥5%)，线路质量较差"
+      elif [ "$loss_pct" -ge 1 ]; then
+        PACKET_LOSS="medium"
+        info "丢包率 ${loss_pct}% (1-5%)，线路质量一般"
+      else
+        PACKET_LOSS="low"
+        info "丢包率 ${loss_pct}% (<1%)，线路质量良好"
+      fi
+    fi
+  else
+    # 无法获取网关，跳过丢包检测
+    info "无法检测默认网关，跳过丢包测试"
+  fi
 }
 
 # 智能推荐拥塞控制算法
@@ -632,32 +657,45 @@ smart_recommend() {
   echo "  xray:      ${PROXY_XRAY}"
   echo "  sing-box:  ${PROXY_SINGBOX}"
   echo "  Hysteria2: ${PROXY_HY2}"
+  echo "  丢包等级:  ${PACKET_LOSS}"
   echo ""
 
   local recommend_algo=""
   local recommend_reason=""
 
-  # 推荐逻辑
+  # 推荐逻辑 — 代理类型 + 丢包等级综合判断
   if [ "$PROXY_HY2" = "yes" ]; then
-    # 检测到 Hysteria2 → 确保 brutal 模块可用 + 全局默认 bbr
-    # sing-box 会对 Hy2 socket 自行 setsockopt(brutal)
-    # 全局保持 bbr 对其他流量最优
+    # 检测到 Hysteria2 → 确保 brutal 模块可用 + 全局默认 bbr/bbrplus
     if modprobe tcp_brutal 2>/dev/null; then
       info "已加载 tcp_brutal 内核模块（sing-box 的 Hy2 socket 将自动使用 brutal）"
     else
       warn "tcp_brutal 模块加载失败，Hysteria2 可能无法使用 TCP Brutal"
     fi
-    recommend_algo="bbr"
-    recommend_reason="检测到 Hysteria2，brutal 模块已加载供 sing-box 使用，全局默认 BBRv3 对所有流量最优"
-  elif [ "$PROXY_SINGBOX" = "yes" ]; then
-    recommend_algo="bbr"
-    recommend_reason="检测到 sing-box（无 Hysteria2），BBRv3 延迟最低、通用最优"
+    # 全局默认: 丢包高→bbrplus, 丢包低→bbr
+    if [ "$PACKET_LOSS" = "high" ]; then
+      recommend_algo="bbrplus"
+      recommend_reason="检测到 Hysteria2 + 高丢包(≥5%), brutal 模块供 Hy2 socket 使用, 全局 BBRPlus 抗丢包"
+    else
+      recommend_algo="bbr"
+      recommend_reason="检测到 Hysteria2, brutal 模块供 Hy2 socket 使用, 全局 BBRv3 对其他流量最优"
+    fi
+  elif [ "$PACKET_LOSS" = "high" ]; then
+    # 高丢包不管什么代理 → BBRPlus 抗丢包
+    recommend_algo="bbrplus"
+    recommend_reason="高丢包(≥5%), BBRPlus 抗丢包性能提升 3-4 倍"
+  elif [ "$PACKET_LOSS" = "medium" ]; then
+    # 中丢包 → BBRPlus 优先，bbr 也可接受
+    recommend_algo="bbrplus"
+    recommend_reason="丢包 1-5%, BBRPlus 在丢包场景下表现优于 BBRv3"
   elif [ "$PROXY_XRAY" = "yes" ]; then
     recommend_algo="bbr"
-    recommend_reason="检测到 xray，BBRv3 延迟最低、通用最优"
+    recommend_reason="检测到 xray, 低丢包, BBRv3 延迟最低、通用最优"
+  elif [ "$PROXY_SINGBOX" = "yes" ]; then
+    recommend_algo="bbr"
+    recommend_reason="检测到 sing-box, 低丢包, BBRv3 延迟最低、通用最优"
   else
     recommend_algo="bbr"
-    recommend_reason="未检测到代理软件，BBRv3 通用最优"
+    recommend_reason="未检测到代理软件, 低丢包, BBRv3 通用最优"
   fi
 
   echo -e "  ${GREEN}推荐算法: ${recommend_algo}${NC}"
@@ -762,21 +800,23 @@ show_menu() {
   echo "  2) 网络优化 — 保守方案 (≤100Mbps)"
   echo "  3) 网络优化 — 均衡方案 (1Gbps)"
   echo "  4) 网络优化 — 激进方案 (高性能)"
-  echo "  5) 切换拥塞控制算法"
-  echo "  6) 恢复默认配置"
-  echo "  7) 卸载 TCPBoost 内核"
+  echo "  5) 智能推荐算法 (自动检测代理环境)"
+  echo "  6) 手动切换算法"
+  echo "  7) 恢复默认配置"
+  echo "  8) 卸载 TCPBoost 内核"
   echo "  0) 退出"
   echo ""
-  read -p "  请选择 [0-7]: " choice
+  read -p "  请选择 [0-8]: " choice
 
   case "$choice" in
     1) install_kernel ;;
     2) apply_profile_conservative ;;
     3) apply_profile_balanced ;;
     4) apply_profile_aggressive ;;
-    5) menu_switch_algorithm ;;
-    6) restore_configs ;;
-    7) uninstall_kernel ;;
+    5) smart_recommend ;;
+    6) menu_switch_algorithm ;;
+    7) restore_configs ;;
+    8) uninstall_kernel ;;
     0) exit 0 ;;
     *) error "无效选择" ;;
   esac
@@ -811,10 +851,11 @@ main() {
   case "${1:-}" in
     install)  install_kernel ;;
     optimize) apply_profile_balanced ;;
+    auto)     smart_recommend ;;
     status)   show_algorithm_status ;;
     switch)
       if [ -z "${2:-}" ]; then
-        error "用法: $0 switch <bbr|bbrplus|brutal|bbr1|cubic>"
+        error "用法: $0 switch <bbr|bbrplus|brutal|cubic>"
         exit 1
       fi
       switch_algorithm "$2"
