@@ -79,7 +79,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential libncurses-dev bison flex libssl-dev libelf-dev \
-            bc kmod cpio dpkg-dev rpm fakeroot \
+            bc kmod cpio dpkg-dev rpm fakeroot debhelper \
             curl wget git ccache
 
       - name: 设置 ccache
@@ -103,14 +103,23 @@ jobs:
           echo "从 CloudPassenger 仓库获取 BBR 补丁..."
           git clone --depth=1 https://github.com/CloudPassenger/Cloud-Kernel-BBRv3.git cp-patches
 
-          # 复制补丁文件
+          # 递归复制补丁文件（补丁在 net/ 子目录中）
           mkdir -p patches
-          if [ -d "cp-patches/kernel_patches/${{ env.KERNEL_MAJOR }}" ]; then
-            cp -v cp-patches/kernel_patches/${{ env.KERNEL_MAJOR }}/*.patch patches/ 2>/dev/null || true
+          PATCH_DIR="cp-patches/kernel_patches/${{ env.KERNEL_MAJOR }}"
+          if [ -d "$PATCH_DIR" ]; then
+            find "$PATCH_DIR" -name '*.patch' -type f | sort | while read -r f; do
+              cp -v "$f" patches/
+            done
           fi
 
+          PATCH_COUNT=$(ls patches/*.patch 2>/dev/null | wc -l)
+          echo "补丁数量: $PATCH_COUNT"
+          if [ "$PATCH_COUNT" -eq 0 ]; then
+            echo "⚠️ 未找到任何补丁文件，请检查路径: $PATCH_DIR"
+            exit 1
+          fi
           echo "可用补丁:"
-          ls -la patches/ || echo "无额外补丁"
+          ls -la patches/
 
       - name: 应用补丁
         working-directory: linux-src

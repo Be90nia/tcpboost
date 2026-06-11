@@ -555,6 +555,123 @@ restore_configs() {
   fi
 }
 
+# ===== 代理检测与智能推荐 =====
+
+# 检测 VPS 上运行的代理软件
+# 返回值通过全局变量:
+#   PROXY_XRAY="yes"/"no"
+#   PROXY_SINGBOX="yes"/"no"
+#   PROXY_HY2="yes"/"no"
+detect_proxy() {
+  PROXY_XRAY="no"
+  PROXY_SINGBOX="no"
+  PROXY_HY2="no"
+
+  # 1. 检测 xray 进程
+  if pgrep -x "xray" >/dev/null 2>&1; then
+    PROXY_XRAY="yes"
+    info "检测到 xray 进程"
+  fi
+
+  # 2. 检测 sing-box 进程
+  if pgrep -x "sing-box" >/dev/null 2>&1; then
+    PROXY_SINGBOX="yes"
+    info "检测到 sing-box 进程"
+
+    # 3. 检测 sing-box 配置中是否包含 hysteria2 协议
+    # 尝试找到配置文件路径
+    local config_path=""
+    local -a candidates=(
+      "/etc/sing-box/config.json"
+      "/usr/local/etc/sing-box/config.json"
+      "/etc/sing-box/config.jsonc"
+    )
+
+    # 从进程参数中提取配置路径
+    local proc_args
+    proc_args=$(pgrep -a -x "sing-box" 2>/dev/null | head -1) || true
+    if echo "$proc_args" | grep -qE '\-[cC]\s+\S+'; then
+      local arg_config
+      arg_config=$(echo "$proc_args" | grep -oE '\-[cC]\s+\S+' | awk '{print $2}')
+      [ -n "$arg_config" ] && candidates=("$arg_config" "${candidates[@]}")
+    fi
+
+    # 搜索配置文件中的 hysteria2 标识
+    for cfg in "${candidates[@]}"; do
+      if [ -f "$cfg" ]; then
+        config_path="$cfg"
+        break
+      fi
+    done
+
+    if [ -n "$config_path" ] && [ -f "$config_path" ]; then
+      # 检查配置中是否有 hysteria2 类型
+      if grep -qiE '"type"\s*:\s*"hysteria2"' "$config_path" 2>/dev/null; then
+        PROXY_HY2="yes"
+        info "检测到 sing-box 配置包含 Hysteria2 协议"
+      fi
+    else
+      # 找不到配置文件时，检查已加载的内核模块判断
+      # 如果 tcp_brutal 模块已加载，很可能是在用 Hy2
+      if lsmod 2>/dev/null | grep -q "tcp_brutal"; then
+        PROXY_HY2="yes"
+        warn "无法定位 sing-box 配置文件，但 tcp_brutal 模块已加载，推测使用 Hysteria2"
+      fi
+    fi
+  fi
+}
+
+# 智能推荐拥塞控制算法
+# 检测代理环境后推荐最合适的算法并确认切换
+smart_recommend() {
+  info "正在检测代理环境..."
+  detect_proxy
+
+  echo ""
+  echo -e "  ${CYAN}检测结果:${NC}"
+  echo "  xray:      ${PROXY_XRAY}"
+  echo "  sing-box:  ${PROXY_SINGBOX}"
+  echo "  Hysteria2: ${PROXY_HY2}"
+  echo ""
+
+  local recommend_algo=""
+  local recommend_reason=""
+
+  # 推荐逻辑
+  if [ "$PROXY_HY2" = "yes" ]; then
+    # 检测到 Hysteria2 → 确保 brutal 模块可用 + 全局默认 bbr
+    # sing-box 会对 Hy2 socket 自行 setsockopt(brutal)
+    # 全局保持 bbr 对其他流量最优
+    if modprobe tcp_brutal 2>/dev/null; then
+      info "已加载 tcp_brutal 内核模块（sing-box 的 Hy2 socket 将自动使用 brutal）"
+    else
+      warn "tcp_brutal 模块加载失败，Hysteria2 可能无法使用 TCP Brutal"
+    fi
+    recommend_algo="bbr"
+    recommend_reason="检测到 Hysteria2，brutal 模块已加载供 sing-box 使用，全局默认 BBRv3 对所有流量最优"
+  elif [ "$PROXY_SINGBOX" = "yes" ]; then
+    recommend_algo="bbr"
+    recommend_reason="检测到 sing-box（无 Hysteria2），BBRv3 延迟最低、通用最优"
+  elif [ "$PROXY_XRAY" = "yes" ]; then
+    recommend_algo="bbr"
+    recommend_reason="检测到 xray，BBRv3 延迟最低、通用最优"
+  else
+    recommend_algo="bbr"
+    recommend_reason="未检测到代理软件，BBRv3 通用最优"
+  fi
+
+  echo -e "  ${GREEN}推荐算法: ${recommend_algo}${NC}"
+  echo -e "  原因: ${recommend_reason}"
+  echo ""
+  read -p "  是否切换到 ${recommend_algo}？(Y/n): " confirm
+  if [ "$confirm" != "n" ] && [ "$confirm" != "N" ]; then
+    switch_algorithm "$recommend_algo"
+    info "智能推荐完成"
+  else
+    info "已跳过"
+  fi
+}
+
 # ===== 算法管理 =====
 
 show_algorithm_status() {
@@ -592,7 +709,7 @@ switch_algorithm() {
   local algo="$1"
 
   if [ -z "$algo" ]; then
-    echo "请指定算法: bbr | bbrplus | brutal | bbr1 | cubic"
+    echo "请指定算法: bbr | bbrplus | brutal | cubic"
     return 1
   fi
 
@@ -671,17 +788,15 @@ menu_switch_algorithm() {
   echo "  1) bbr     — BBRv3 (推荐通用)"
   echo "  2) bbrplus — BBRPlus (高丢包优化)"
   echo "  3) brutal  — TCP Brutal (Hysteria2 专用)"
-  echo "  4) bbr1    — BBRv1 (兼容性)"
-  echo "  5) cubic   — Cubic (公平性好)"
+  echo "  4) cubic   — Cubic (公平性好)"
   echo ""
-  read -p "  选择算法 [1-5]: " algo_choice
+  read -p "  选择算法 [1-4]: " algo_choice
 
   case "$algo_choice" in
     1) switch_algorithm bbr ;;
     2) switch_algorithm bbrplus ;;
     3) switch_algorithm brutal ;;
-    4) switch_algorithm bbr1 ;;
-    5) switch_algorithm cubic ;;
+    4) switch_algorithm cubic ;;
     *) error "无效选择" ;;
   esac
 }
