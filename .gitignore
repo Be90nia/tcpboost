@@ -1,0 +1,17 @@
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.deb
+*.rpm
+*.tar.gz
+*.patch.orig
+build/

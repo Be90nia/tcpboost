@@ -1,0 +1,252 @@
+name: Build TCPBoost Kernel
+
+on:
+  # 每周一 UTC 04:00 自动构建
+  schedule:
+    - cron: '0 4 * * 1'
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: '内核版本 (如 6.12.73)'
+        required: false
+        default: '6.12.73'
+      force_build:
+        description: '强制构建 (跳过版本检查)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  KERNEL_VERSION: ${{ github.event.inputs.kernel_version || '6.12.73' }}
+  KERNEL_MAJOR: '6.12'
+  CCACHE_DIR: /home/runner/.ccache
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      latest_version: ${{ steps.check.outputs.latest_version }}
+    steps:
+      - name: 检查最新内核版本
+        id: check
+        run: |
+          # 获取 6.12.x 系列最新版本
+          LATEST=$(curl -sf https://www.kernel.org/feeds/kdist.xml | \
+            grep -oP '(?<=<title>stable: )6\.12\.\d+' | head -1)
+          if [ -z "$LATEST" ]; then
+            LATEST="${{ env.KERNEL_VERSION }}"
+          fi
+          echo "latest_version=$LATEST" >> $GITHUB_OUTPUT
+          echo "最新版本: $LATEST"
+
+          if [ "${{ github.event.inputs.force_build }}" = "true" ]; then
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "强制构建模式"
+            exit 0
+          fi
+
+          # 检查是否已有该版本的 Release
+          TAG="v${LATEST}-tcpboost"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "should_build=false" >> $GITHUB_OUTPUT
+            echo "版本 $TAG 已存在, 跳过构建"
+          else
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "版本 $TAG 不存在, 需要构建"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-kernel:
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 720
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            cross_prefix: ''
+            deb_arch: amd64
+    steps:
+      - name: 检出 tcpboost 仓库
+        uses: actions/checkout@v4
+
+      - name: 设置构建环境
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential libncurses-dev bison flex libssl-dev libelf-dev \
+            bc kmod cpio dpkg-dev rpm fakeroot \
+            curl wget git ccache
+
+      - name: 设置 ccache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.ccache
+          key: kernel-${{ needs.check-version.outputs.latest_version }}-${{ matrix.arch }}
+          restore-keys: |
+            kernel-
+
+      - name: 下载内核源码
+        run: |
+          VERSION="${{ needs.check-version.outputs.latest_version }}"
+          echo "下载 Linux ${VERSION} 源码..."
+          curl -fSL "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${VERSION}.tar.xz" -o linux.tar.xz
+          tar -xf linux.tar.xz
+          mv "linux-${VERSION}" linux-src
+
+      - name: 获取 CloudPassenger 补丁
+        run: |
+          echo "从 CloudPassenger 仓库获取 BBR 补丁..."
+          git clone --depth=1 https://github.com/CloudPassenger/Cloud-Kernel-BBRv3.git cp-patches
+
+          # 复制补丁文件
+          mkdir -p patches
+          if [ -d "cp-patches/kernel_patches/${{ env.KERNEL_MAJOR }}" ]; then
+            cp -v cp-patches/kernel_patches/${{ env.KERNEL_MAJOR}}/*.patch patches/ 2>/dev/null || true
+          fi
+
+          echo "可用补丁:"
+          ls -la patches/ || echo "无额外补丁"
+
+      - name: 应用补丁
+        working-directory: linux-src
+        run: |
+          for patch in ../patches/*.patch; do
+            if [ -f "$patch" ]; then
+              echo "应用补丁: $(basename $patch)"
+              patch -p1 < "$patch" || {
+                echo "补丁应用失败: $patch"
+                echo "尝试继续..."
+              }
+            fi
+          done
+
+      - name: 应用 tcpboost 编译配置
+        working-directory: linux-src
+        run: |
+          chmod +x "${{ github.workspace }}/configs/x86_64_apply.sh"
+          bash "${{ github.workspace }}/configs/x86_64_apply.sh" .
+
+          echo ""
+          echo "=== 已启用的 TCP 拥塞控制 ==="
+          grep -E 'CONFIG_TCP_CONG_(BBR|BRUTAL|BBRPLUS)' .config || true
+          echo "=== 默认拥塞控制 ==="
+          grep 'CONFIG_DEFAULT_TCP_CONG' .config || true
+
+      - name: 编译内核
+        working-directory: linux-src
+        run: |
+          export CC="ccache gcc"
+          export HOSTCC="ccache gcc"
+          ccache -M 5G
+          ccache -z
+
+          echo "开始编译 (预计 2-3 小时)..."
+          JOBS=$(nproc)
+          echo "并行任务数: $JOBS"
+
+          make -j${JOBS} bindeb-pkg LOCALVERSION=-tcpboost
+
+          ccache -s
+
+      - name: 编译 RPM 包
+        working-directory: linux-src
+        run: |
+          echo "正在生成 RPM 包..."
+          # 使用 make binrpm-pkg 生成 .rpm
+          make -j$(nproc) binrpm-pkg LOCALVERSION=-tcpboost || {
+            echo "RPM 打包失败, 尝试手动打包..."
+            # 备选方案: 使用 alien 转换 .deb
+            sudo apt-get install -y alien
+            DEB_FILE=$(ls -t ../linux-*-tcpboost_*.deb 2>/dev/null | head -1)
+            if [ -n "$DEB_FILE" ]; then
+              echo "使用 alien 转换: $DEB_FILE"
+              sudo alien --to-rpm "$DEB_FILE"
+            fi
+          }
+
+      - name: 收集构建产物
+        run: |
+          mkdir -p artifacts
+          # 收集 .deb
+          find .. -maxdepth 1 -name "*.deb" -exec mv {} artifacts/ \;
+          # 收集 .rpm
+          find .. -maxdepth 1 -name "*.rpm" -exec mv {} artifacts/ \;
+
+          echo "=== 构建产物 ==="
+          ls -lh artifacts/
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ matrix.arch }}
+          path: artifacts/
+          retention-days: 1
+
+  create-release:
+    needs: [check-version, build-kernel]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: 创建 Release
+        run: |
+          VERSION="${{ needs.check-version.outputs.latest_version }}"
+          TAG="v${VERSION}-tcpboost"
+
+          echo "创建 Release: $TAG"
+          echo "产物列表:"
+          ls -lhR artifacts/
+
+          # 生成 Release Notes
+          cat > RELEASE_NOTES.md <<EOF
+          ## TCPBoost 内核 ${VERSION}
+
+          基于 Linux ${VERSION} 编译，集成以下 TCP 拥塞控制算法：
+
+          - **BBRv3** — Google 最新版，推荐通用场景
+          - **BBRPlus** — 高丢包链路优化
+          - **TCP Brutal** — Hysteria2/sing-box 专用
+          - **BBRv1** — 原版，兼容性好
+
+          ### 支持系统
+
+          | 格式 | 系统 |
+          |------|------|
+          | \`.deb\` | Debian 11/12, Ubuntu 20.04+ |
+          | \`.rpm\` | Rocky 9, Alma 9, CentOS Stream 9 |
+
+          ### 安装方法
+
+          \`\`\`bash
+          bash <(curl -fsSL https://raw.githubusercontent.com/$(echo ${{ github.repository }})/main/tcp.sh)
+          \`\`\`
+
+          ### 验证
+
+          \`\`\`bash
+          # 检查可用算法
+          sysctl net.ipv4.tcp_available_congestion_control
+          # 应显示: bbr bbrplus bbr1
+          \`\`\`
+          EOF
+
+          gh release create "$TAG" artifacts/**/* \
+            --title "TCPBoost Kernel ${VERSION}" \
+            --notes-file RELEASE_NOTES.md \
+            --target main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
