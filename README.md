@@ -8,6 +8,7 @@
 - **多算法集成** — BBRv3、BBRPlus、TCP Brutal、BBRv1 一键切换
 - **双格式支持** — Debian/Ubuntu (.deb) + Rocky/Alma (.rpm)
 - **3 级网络优化** — 保守 / 均衡 / 激进，含 BDP 动态计算
+- **国内外自适应** — 自动检测网络环境，国内使用加速镜像下载
 - **安全可靠** — 配置自动备份，一键恢复
 
 ## 支持系统
@@ -25,12 +26,14 @@
 ## 快速开始
 
 ```bash
-# 交互式菜单
+# 国际网络（GitHub 直连）
 bash <(curl -fsSL https://raw.githubusercontent.com/Be90nia/tcpboost/main/tcp.sh)
 
-# 或 wget
-bash <(wget -qO- https://raw.githubusercontent.com/Be90nia/tcpboost/main/tcp.sh)
+# 国内网络（加速镜像）
+bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/Be90nia/tcpboost/main/tcp.sh)
 ```
+
+> 脚本启动后会自动检测网络环境，国内用户下载内核包时将自动使用加速镜像，无需额外配置。
 
 ## 使用说明
 

@@ -13,12 +13,27 @@ export LANG=en_US.UTF-8
 # ===== 全局变量 =====
 VERSION="1.0.0-dev"
 REPO="Be90nia/tcpboost"
-RELEASE_URL="https://github.com/${REPO}/releases"
 KERNEL_NAME="tcpboost"
 CONF_DIR="/etc/tcpboost"
 BACKUP_DIR="/etc/tcpboost/backup"
 SYSCTL_FILE="/etc/sysctl.d/99-tcpboost.conf"
 LIMITS_FILE="/etc/security/limits.d/tcpboost.conf"
+
+# ===== 镜像源配置 =====
+# GitHub 加速镜像列表（国内环境自动切换）
+# 格式: 镜像前缀 + 原始 GitHub URL
+GH_MIRRORS=(
+  "https://gh-proxy.com"
+  "https://ghfast.top"
+  "https://ghp.ci"
+)
+
+# GitHub 直连 URL 模板
+GH_RELEASE_BASE="https://github.com/${REPO}/releases/download"
+GH_RAW_BASE="https://raw.githubusercontent.com/${REPO}/main"
+
+# 网络环境标记（detect_network 中设置）
+NET_MODE="direct"
 
 # 颜色定义
 RED='\033[0;31m'
@@ -42,17 +57,114 @@ check_root() {
   fi
 }
 
-# 下载工具
-dl() {
+# ===== 网络环境检测 =====
+
+# 判断是否为国内网络环境
+# 策略: 优先测试 GitHub 直连 → 回退 IP 地理位置判断
+is_china() {
+  # 1. 测试 GitHub 直连可达性（5 秒超时）
+  if command -v curl >/dev/null 2>&1; then
+    if curl -sf --connect-timeout 5 --max-time 8 https://github.com >/dev/null 2>&1; then
+      return 1  # GitHub 可达，非国内（或已有代理）
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    if wget -q --timeout=8 -O /dev/null https://github.com >/dev/null 2>&1; then
+      return 1
+    fi
+  fi
+
+  # 2. GitHub 不可达，进一步确认（避免代理环境误判）
+  # 测试国内可达站点，若可达则确认国内环境
+  if command -v curl >/dev/null 2>&1; then
+    if curl -sf --connect-timeout 3 --max-time 5 https://mirrors.aliyun.com >/dev/null 2>&1; then
+      return 0  # 国内镜像可达 + GitHub 不可达 = 国内环境
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    if wget -q --timeout=5 -O /dev/null https://mirrors.aliyun.com >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+
+  # 3. 两者都不可达，可能是离线环境，保守判定为国内
+  return 0
+}
+
+# 检测并设置网络环境
+detect_network() {
+  if is_china; then
+    NET_MODE="mirror"
+    info "检测到国内网络环境，将使用加速镜像"
+  else
+    NET_MODE="direct"
+    info "检测到国际网络环境，将直连 GitHub"
+  fi
+}
+
+# ===== 下载函数 =====
+
+# 单次下载尝试（curl 优先，回退 wget）
+_dl_once() {
   local url="$1" output="$2"
   if command -v curl >/dev/null 2>&1; then
-    curl -fSL --retry 3 --retry-delay 2 -o "$output" "$url"
+    curl -fSL --retry 2 --retry-delay 3 --connect-timeout 10 --max-time 300 -o "$output" "$url" 2>/dev/null
   elif command -v wget >/dev/null 2>&1; then
-    wget -q -O "$output" --tries=3 "$url"
+    wget -q --timeout=300 --tries=2 -O "$output" "$url" 2>/dev/null
   else
     error "需要 curl 或 wget"
     return 1
   fi
+}
+
+# 下载函数 — 支持 GitHub URL 自动镜像回退
+# 对于 github.com 和 raw.githubusercontent.com 的 URL，自动构建镜像链
+# 用法: dl <url> <output_path>
+dl() {
+  local url="$1" output="$2"
+
+  # 构建 URL 尝试列表
+  local -a urls=()
+  urls+=("$url")
+
+  # 如果是 GitHub URL 且为镜像模式，添加加速镜像
+  if [ "$NET_MODE" = "mirror" ]; then
+    case "$url" in
+      https://github.com/*|https://raw.githubusercontent.com/*)
+        for mirror in "${GH_MIRRORS[@]}"; do
+          urls+=("${mirror}/${url}")
+        done
+        ;;
+    esac
+  fi
+
+  # 依次尝试各 URL
+  local tried=0
+  for try_url in "${urls[@]}"; do
+    tried=$((tried + 1))
+    if [ $tried -eq 1 ]; then
+      info "下载: $(basename "$output")"
+    else
+      warn "主源失败，尝试镜像 [$((tried - 1))/${#GH_MIRRORS[@]}]: ${try_url%%/https*}..."
+    fi
+
+    if _dl_once "$try_url" "$output"; then
+      # 验证文件非空
+      if [ -s "$output" ]; then
+        return 0
+      fi
+      warn "下载文件为空，尝试下一个源"
+      rm -f "$output"
+    fi
+  done
+
+  error "所有下载源均失败: $(basename "$output")"
+  return 1
+}
+
+# 获取 GitHub Release 下载 URL
+# 用法: get_release_url <version> <filename>
+get_release_url() {
+  local version="$1" filename="$2"
+  echo "${GH_RELEASE_BASE}/v${version}-tcpboost/${filename}"
 }
 
 # ===== 系统检测 =====
@@ -111,7 +223,24 @@ check_os_version() {
 # 获取最新 Release 版本号
 get_latest_version() {
   local version
-  version=$(curl -sf "${RELEASE_URL}/latest" 2>/dev/null | grep -oP 'tag/\Kv[0-9.]+' | head -1 | sed 's/^v//')
+  local -a api_urls=(
+    "https://github.com/${REPO}/releases/latest"
+  )
+
+  # 国内环境添加镜像
+  if [ "$NET_MODE" = "mirror" ]; then
+    for mirror in "${GH_MIRRORS[@]}"; do
+      api_urls+=("${mirror}/https://github.com/${REPO}/releases/latest")
+    done
+  fi
+
+  for api_url in "${api_urls[@]}"; do
+    version=$(curl -sf --connect-timeout 10 --max-time 15 -L "$api_url" 2>/dev/null | grep -oP 'tag/\Kv[0-9.]+' | head -1 | sed 's/^v//')
+    if [ -n "$version" ]; then
+      break
+    fi
+  done
+
   if [ -z "$version" ]; then
     version="6.12.73"
     warn "无法获取最新版本，使用默认: $version"
@@ -129,13 +258,11 @@ download_kernel() {
 
   case "$PKG_FMT" in
     deb)
-      # 下载 linux-headers, linux-image, linux-libc-dev
       local files="linux-headers-${version}-tcpboost_${version}-tcpboost-1_amd64.deb
                    linux-image-${version}-tcpboost_${version}-tcpboost-1_amd64.deb
                    linux-libc-dev_${version}-tcpboost-1_amd64.deb"
       for f in $files; do
-        info "下载: $f"
-        dl "${RELEASE_URL}/download/v${version}-tcpboost/${f}" "${tmpdir}/${f}" || {
+        dl "$(get_release_url "$version" "$f")" "${tmpdir}/${f}" || {
           error "下载失败: $f"
           rm -rf "$tmpdir"
           exit 1
@@ -143,12 +270,10 @@ download_kernel() {
       done
       ;;
     rpm)
-      # RPM 包下载
       local files="linux-headers-${version}-tcpboost-${version}_tcpboost-1.x86_64.rpm
                    linux-image-${version}-tcpboost-${version}_tcpboost-1.x86_64.rpm"
       for f in $files; do
-        info "下载: $f"
-        dl "${RELEASE_URL}/download/v${version}-tcpboost/${f}" "${tmpdir}/${f}" || {
+        dl "$(get_release_url "$version" "$f")" "${tmpdir}/${f}" || {
           error "下载失败: $f"
           rm -rf "$tmpdir"
           exit 1
@@ -565,6 +690,7 @@ menu_switch_algorithm() {
 
 main() {
   check_root
+  detect_network
 
   # 命令行参数模式
   case "${1:-}" in
