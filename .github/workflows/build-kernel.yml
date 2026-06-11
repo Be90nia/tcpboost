@@ -24,7 +24,7 @@ env:
 
 jobs:
   check-version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
       latest_version: ${{ steps.check.outputs.latest_version }}
@@ -62,8 +62,13 @@ jobs:
   build-kernel:
     needs: check-version
     if: needs.check-version.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 720
+    env:
+      KBUILD_BUILD_USER: "tcpboost"
+      KBUILD_BUILD_HOST: "github-actions"
+      KBUILD_BUILD_TIMESTAMP: ""
+      KDEB_COMPRESS: "xz"
     strategy:
       matrix:
         include:
@@ -80,7 +85,8 @@ jobs:
           sudo apt-get install -y \
             build-essential libncurses-dev bison flex libssl-dev libelf-dev \
             bc kmod cpio dpkg-dev rpm fakeroot debhelper \
-            curl wget git ccache
+            curl wget git ccache \
+            rsync python3 pahole libdw-dev lz4 zstd quilt dh-python
 
       - name: 设置 ccache
         uses: actions/cache@v4
@@ -103,40 +109,40 @@ jobs:
           echo "从 CloudPassenger 仓库获取 BBR 补丁..."
           git clone --depth=1 https://github.com/CloudPassenger/Cloud-Kernel-BBRv3.git cp-patches
 
-          # 递归复制补丁文件（补丁在 net/ 子目录中）
-          mkdir -p patches
+          # 设置 quilt 补丁目录结构
+          mkdir -p linux-src/patches/custom
           PATCH_DIR="cp-patches/kernel_patches/${{ env.KERNEL_MAJOR }}"
           if [ -d "$PATCH_DIR" ]; then
             find "$PATCH_DIR" -name '*.patch' -type f | sort | while read -r f; do
-              cp -v "$f" patches/
+              cp -v "$f" linux-src/patches/custom/
             done
           fi
 
-          PATCH_COUNT=$(ls patches/*.patch 2>/dev/null | wc -l)
+          # 生成 quilt series 文件
+          cd linux-src/patches
+          echo "# Custom Patches (BBRPlus, Brutal)" > series
+          find custom -type f -name "*.patch" -printf "custom/%P\n" | sort >> series
+
+          PATCH_COUNT=$(grep -c '.patch' series 2>/dev/null || echo 0)
           echo "补丁数量: $PATCH_COUNT"
           if [ "$PATCH_COUNT" -eq 0 ]; then
-            echo "⚠️ 未找到任何补丁文件，请检查路径: $PATCH_DIR"
+            echo "⚠️ 未找到任何补丁文件"
             exit 1
           fi
-          echo "可用补丁:"
-          ls -la patches/
+          echo "series 文件内容:"
+          cat series
 
       - name: 应用补丁
         working-directory: linux-src
         run: |
-          for patch in ../patches/*.patch; do
-            if [ -f "$patch" ]; then
-              echo "应用补丁: $(basename $patch)"
-              patch -p1 < "$patch" || {
-                echo "补丁应用失败: $patch"
-                echo "尝试继续..."
-              }
-            fi
-          done
+          quilt push -a
 
       - name: 应用 tcpboost 编译配置
         working-directory: linux-src
         run: |
+          # 使用 localversion 文件替代 LOCALVERSION 参数，避免连字符导致 debian 包版本号问题
+          echo "-tcpboost" > localversion
+
           chmod +x "${{ github.workspace }}/configs/x86_64_apply.sh"
           bash "${{ github.workspace }}/configs/x86_64_apply.sh" .
 
@@ -158,7 +164,8 @@ jobs:
           JOBS=$(nproc)
           echo "并行任务数: $JOBS"
 
-          make -j${JOBS} bindeb-pkg LOCALVERSION=-tcpboost
+          DEB_BUILD_PROFILES=pkg.linux-upstream.nokernelheaders \
+          make -j${JOBS} bindeb-pkg
 
           ccache -s
 
@@ -167,7 +174,7 @@ jobs:
         run: |
           echo "正在生成 RPM 包..."
           # 使用 make binrpm-pkg 生成 .rpm
-          make -j$(nproc) binrpm-pkg LOCALVERSION=-tcpboost || {
+          make -j$(nproc) binrpm-pkg || {
             echo "RPM 打包失败, 尝试手动打包..."
             # 备选方案: 使用 alien 转换 .deb
             sudo apt-get install -y alien
@@ -198,7 +205,7 @@ jobs:
 
   create-release:
     needs: [check-version, build-kernel]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:

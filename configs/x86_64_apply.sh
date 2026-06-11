@@ -82,6 +82,12 @@ fi
 ./scripts/config --module CONFIG_VIRTIO_BLK
 
 # ============================================
+# 禁用签名证书 (CI 环境无证书文件)
+# ============================================
+./scripts/config --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
+./scripts/config --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
+
+# ============================================
 # 固定配置
 # ============================================
 # 确保配置一致性
