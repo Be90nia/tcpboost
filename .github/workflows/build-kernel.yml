@@ -310,7 +310,18 @@ jobs:
           \`\`\`
           EOF
 
-          gh release create "$TAG" artifacts/**/* \
+          # 收集所有产物文件
+          RELEASE_FILES=$(find artifacts/ -type f | sort)
+          if [ -z "$RELEASE_FILES" ]; then
+            echo "❌ 未找到任何产物文件！"
+            exit 1
+          fi
+
+          echo "上传文件列表:"
+          echo "$RELEASE_FILES"
+
+          # shellcheck disable=SC2086
+          gh release create "$TAG" $RELEASE_FILES \
             --title "TCPBoost Kernel ${VERSION}" \
             --notes-file RELEASE_NOTES.md \
             --target main
