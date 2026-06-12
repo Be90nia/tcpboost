@@ -1,10 +1,8 @@
 name: Build TCPBoost Kernel
 
 on:
-  # 每周一 UTC 04:00 自动构建
   schedule:
     - cron: '0 4 * * 1'
-  # 手动触发
   workflow_dispatch:
     inputs:
       kernel_version:
@@ -32,7 +30,6 @@ jobs:
       - name: 检查最新内核版本
         id: check
         run: |
-          # 获取 6.12.x 系列最新版本
           LATEST=$(curl -sf https://www.kernel.org/feeds/kdist.xml | \
             grep -oP '(?<=<title>stable: )6\.12\.\d+' | head -1)
           if [ -z "$LATEST" ]; then
@@ -47,7 +44,6 @@ jobs:
             exit 0
           fi
 
-          # 检查是否已有该版本的 Release
           TAG="v${LATEST}-tcpboost"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "should_build=false" >> $GITHUB_OUTPUT
@@ -104,33 +100,53 @@ jobs:
           tar -xf linux.tar.xz
           mv "linux-${VERSION}" linux-src
 
-      - name: 获取 CloudPassenger 补丁
+      - name: 准备补丁目录结构
         run: |
-          echo "从 CloudPassenger 仓库获取 BBR 补丁..."
-          git clone --depth=1 https://github.com/CloudPassenger/Cloud-Kernel-BBRv3.git cp-patches
-
-          # 设置 quilt 补丁目录结构
+          mkdir -p linux-src/patches/xanmod-bbrv3
           mkdir -p linux-src/patches/custom
+
+          # 1. Xanmod BBRv3 补丁（19个，将主线 BBRv1 替换为 BBRv3）
+          echo "复制 Xanmod BBRv3 补丁..."
+          find "${{ github.workspace }}/patches/xanmod-bbrv3" \
+            -name '*.patch' -type f | sort | while read -r f; do
+            cp -v "$f" linux-src/patches/xanmod-bbrv3/
+          done
+          XANMOD_COUNT=$(find linux-src/patches/xanmod-bbrv3 -name '*.patch' | wc -l)
+          echo "Xanmod BBRv3 补丁数量: $XANMOD_COUNT"
+          if [ "$XANMOD_COUNT" -eq 0 ]; then
+            echo "未找到 Xanmod BBRv3 补丁"
+            exit 1
+          fi
+
+          # 2. CloudPassenger 补丁（BBRv1, BBRPlus, Brutal）
+          echo "从 CloudPassenger 仓库获取自定义补丁..."
+          git clone --depth=1 https://github.com/CloudPassenger/Cloud-Kernel-BBRv3.git cp-patches
           PATCH_DIR="cp-patches/kernel_patches/${{ env.KERNEL_MAJOR }}"
           if [ -d "$PATCH_DIR" ]; then
             find "$PATCH_DIR" -name '*.patch' -type f | sort | while read -r f; do
               cp -v "$f" linux-src/patches/custom/
             done
           fi
-
-          # 生成 quilt series 文件
-          cd linux-src/patches
-          echo "# Custom Patches (BBRPlus, Brutal)" > series
-          find custom -type f -name "*.patch" -printf "custom/%P\n" | sort >> series
-
-          PATCH_COUNT=$(grep -c '.patch' series 2>/dev/null || echo 0)
-          echo "补丁数量: $PATCH_COUNT"
-          if [ "$PATCH_COUNT" -eq 0 ]; then
-            echo "⚠️ 未找到任何补丁文件"
+          CUSTOM_COUNT=$(find linux-src/patches/custom -name '*.patch' | wc -l)
+          echo "CloudPassenger 自定义补丁数量: $CUSTOM_COUNT"
+          if [ "$CUSTOM_COUNT" -eq 0 ]; then
+            echo "未找到 CloudPassenger 补丁"
             exit 1
           fi
-          echo "series 文件内容:"
+
+          # 3. 生成 quilt series 文件（应用顺序关键！）
+          cd linux-src/patches
+          echo "# 阶段 1: Xanmod BBRv3 补丁 — 将主线 BBRv1 替换为 BBRv3" > series
+          find xanmod-bbrv3 -type f -name "*.patch" -printf "xanmod-bbrv3/%P\n" | sort >> series
+          echo "" >> series
+          echo "# 阶段 2: CloudPassenger 自定义补丁 (BBRv1, BBRPlus, Brutal)" >> series
+          find custom -type f -name "*.patch" -printf "custom/%P\n" | sort >> series
+
+          echo ""
+          echo "=== quilt series 文件内容 ==="
           cat series
+          echo ""
+          echo "总补丁数量: $(grep -c '.patch' series)"
 
       - name: 应用补丁
         working-directory: linux-src
@@ -140,37 +156,60 @@ jobs:
       - name: 修复补丁兼容性（6.12 API 适配）
         working-directory: linux-src
         run: |
-          # 1. BBRPlus struct bbr 超出 ICSK_CA_PRIV_SIZE (104 bytes)
-          #    所有 BBRPlus 项目都通过增大 ICSK_CA_PRIV_SIZE 来解决
-          #    参考: UJX6N/bbrplus-6.x_stable, CloudPassenger/Cloud-Kernel-BBRv3
-          echo "修复 ICSK_CA_PRIV_SIZE (104→112 bytes)..."
-          sed -i 's/icsk_ca_priv\[104 \/ sizeof(u64)\]/icsk_ca_priv[112 \/ sizeof(u64)]/' \
+          # 1. ICSK_CA_PRIV_SIZE 增大到 144 bytes
+          # BBRv3 struct bbr 约 144 bytes，BBRPlus 约 112 bytes
+          # 必须取最大值 144 bytes 才能容纳所有算法
+          echo "修复 ICSK_CA_PRIV_SIZE (→ 144 bytes, 兼容 BBRv3 + BBRPlus + bbrplusv3)..."
+          sed -i 's/icsk_ca_priv\[104 \/ sizeof(u64)\]/icsk_ca_priv[144 \/ sizeof(u64)]/' \
+            include/net/inet_connection_sock.h
+          sed -i 's/icsk_ca_priv\[112 \/ sizeof(u64)\]/icsk_ca_priv[144 \/ sizeof(u64)]/' \
             include/net/inet_connection_sock.h
 
-          # 2. CloudPassenger 补丁使用 .tso_segs 回调（Google BBR 补丁集专有 API）
-          #    Linux 6.12 主线使用 .min_tso_segs，签名不同，需要适配
-          echo "修复 BBRv1 补丁 tso_segs → min_tso_segs..."
-          sed -i 's/\.tso_segs.*=.*bbr1_tso_segs,/.min_tso_segs\t= bbr_min_tso_segs,/' net/ipv4/tcp_bbr1.c
-          sed -i '/^__bpf_kfunc static u32 bbr1_tso_segs/,/^}/d' net/ipv4/tcp_bbr1.c
-          sed -i '/BTF_ID_FLAGS(func, bbr1_tso_segs)/d' net/ipv4/tcp_bbr1.c
+          # 2. CloudPassenger BBRv1 补丁 .tso_segs → .min_tso_segs
+          if [ -f net/ipv4/tcp_bbr1.c ]; then
+            echo "修复 BBRv1 补丁 tso_segs → min_tso_segs..."
+            sed -i 's/\.tso_segs.*=.*bbr1_tso_segs,/.min_tso_segs\t= bbr_min_tso_segs,/' net/ipv4/tcp_bbr1.c
+            sed -i '/^__bpf_kfunc static u32 bbr1_tso_segs/,/^}/d' net/ipv4/tcp_bbr1.c
+            sed -i '/BTF_ID_FLAGS(func, bbr1_tso_segs)/d' net/ipv4/tcp_bbr1.c
+          fi
 
-          echo "修复 BBRPlus 补丁 tso_segs → min_tso_segs..."
-          sed -i 's/\.tso_segs.*=.*bbr_tso_segs,/.min_tso_segs\t= bbr_min_tso_segs,/' net/ipv4/tcp_bbrplus.c
-          sed -i '/^__bpf_kfunc static u32 bbr_tso_segs/,/^}/d' net/ipv4/tcp_bbrplus.c
-          sed -i '/BTF_ID_FLAGS(func, bbr_tso_segs)/d' net/ipv4/tcp_bbrplus.c
+          # 3. CloudPassenger BBRPlus 补丁 .tso_segs → .min_tso_segs
+          if [ -f net/ipv4/tcp_bbrplus.c ]; then
+            echo "修复 BBRPlus 补丁 tso_segs → min_tso_segs..."
+            sed -i 's/\.tso_segs.*=.*bbr_tso_segs,/.min_tso_segs\t= bbr_min_tso_segs,/' net/ipv4/tcp_bbrplus.c
+            sed -i '/^__bpf_kfunc static u32 bbr_tso_segs/,/^}/d' net/ipv4/tcp_bbrplus.c
+            sed -i '/BTF_ID_FLAGS(func, bbr_tso_segs)/d' net/ipv4/tcp_bbrplus.c
+          fi
 
           echo "验证修复结果..."
           echo "=== ICSK_CA_PRIV_SIZE ==="
           grep -n 'icsk_ca_priv' include/net/inet_connection_sock.h
           echo "=== BBRv1 min_tso_segs ==="
-          grep -n 'min_tso_segs\|tso_segs\|bbr_min_tso_segs' net/ipv4/tcp_bbr1.c | head -5
+          grep -n 'min_tso_segs\|tso_segs' net/ipv4/tcp_bbr1.c 2>/dev/null | head -5 || echo "(tcp_bbr1.c 不存在)"
           echo "=== BBRPlus min_tso_segs ==="
-          grep -n 'min_tso_segs\|tso_segs\|bbr_min_tso_segs' net/ipv4/tcp_bbrplus.c | head -5
+          grep -n 'min_tso_segs\|tso_segs' net/ipv4/tcp_bbrplus.c 2>/dev/null | head -5 || echo "(tcp_bbrplus.c 不存在)"
+
+      - name: 创建 BBRPlusV3 算法
+        working-directory: linux-src
+        run: |
+          # 基于 BBRv3 tcp_bbr.c 动态创建 bbrplusv3
+          # BBRPlusV3 = BBRv3 基线 + BBRPlus 激进探测思想
+          chmod +x "${{ github.workspace }}/scripts/create_bbrplusv3.sh"
+          bash "${{ github.workspace }}/scripts/create_bbrplusv3.sh" .
+
+          echo ""
+          echo "=== BBRPlusV3 创建验证 ==="
+          if [ -f net/ipv4/tcp_bbrplusv3.c ]; then
+            echo "tcp_bbrplusv3.c 已创建"
+            wc -l net/ipv4/tcp_bbrplusv3.c
+          else
+            echo "tcp_bbrplusv3.c 创建失败"
+            exit 1
+          fi
 
       - name: 应用 tcpboost 编译配置
         working-directory: linux-src
         run: |
-          # 使用 localversion 文件替代 LOCALVERSION 参数，避免连字符导致 debian 包版本号问题
           echo "-tcpboost" > localversion
 
           chmod +x "${{ github.workspace }}/configs/x86_64_apply.sh"
@@ -226,22 +265,17 @@ jobs:
 
           echo "=== 搜索 DEB 文件 ==="
           find . -maxdepth 1 -name "*.deb" -exec echo "找到: {}" \; -exec mv {} artifacts/ \;
-          # bindeb-pkg 产物在 linux-src 上级（即项目根目录）
           find linux-src/.. -maxdepth 1 -name "*.deb" -exec echo "找到: {}" \; -exec mv {} artifacts/ \;
 
           echo "=== 搜索 RPM 文件 ==="
-          # binrpm-pkg 产物在 linux-src/rpmbuild/ 下
           find linux-src/rpmbuild -name "*.rpm" -exec echo "找到: {}" \; -exec mv {} artifacts/ \;
           find . -maxdepth 3 -name "*.rpm" -exec echo "找到: {}" \; -exec mv {} artifacts/ \;
 
           echo "=== 构建产物 ==="
           ls -lh artifacts/
           if [ -z "$(ls -A artifacts/ 2>/dev/null)" ]; then
-            echo "❌ 未找到任何构建产物！"
-            echo "=== 调试：项目根目录文件 ==="
-            ls -lh ../*.deb ../*.rpm 2>/dev/null || true
-            ls -lh ./*.deb ./*.rpm 2>/dev/null || true
-            echo "=== 调试：rpmbuild 目录 ==="
+            echo "未找到任何构建产物！"
+            find .. -name "*.deb" -o -name "*.rpm" 2>/dev/null || true
             find linux-src/rpmbuild -type f 2>/dev/null || true
             exit 1
           fi
@@ -277,43 +311,55 @@ jobs:
           echo "产物列表:"
           ls -lhR artifacts/
 
-          # 生成 Release Notes
-          cat > RELEASE_NOTES.md <<EOF
-          ## TCPBoost 内核 ${VERSION}
-
-          基于 Linux ${VERSION} 编译，集成以下 TCP 拥塞控制算法：
+          cat > RELEASE_NOTES.md <<'RELEASEEOF'
+          ## TCPBoost 内核
+          基于 Linux 编译，集成以下 TCP 拥塞控制算法：
 
           - **BBRv3** — Google 最新版，推荐通用场景
-          - **BBRPlus** — 高丢包链路优化
+          - **BBRPlusV3** — BBRv3 + BBRPlus 激进探测，高丢包链路首选
+          - **BBRPlus** — 高丢包链路优化（原版）
           - **TCP Brutal** — Hysteria2/sing-box 专用
           - **BBRv1** — 原版，兼容性好
+
+          ### BBRPlusV3 算法参数对比
+
+          | 参数 | BBRv3 | BBRPlusV3 | 说明 |
+          |------|-------|-----------|------|
+          | pacing_gain UP | 1.25 | 1.50 | 更激进探测带宽 |
+          | pacing_gain DOWN | 0.91 | 0.75 | 更积极排空队列 |
+          | startup_cwnd_gain | 2.0 | 2.5 | STARTUP 更快填充管道 |
+          | bbr_beta | 30% | 20% | 丢包时减少更少 |
+          | loss_thresh | 2% | 5% | 丢包容忍度提高 |
+          | probe_rtt_mode_ms | 200 | 50 | PROBE_RTT 停留更短 |
+          | ecn_thresh | 50% | 70% | ECN 容忍度提高 |
 
           ### 支持系统
 
           | 格式 | 系统 |
           |------|------|
-          | \`.deb\` | Debian 11/12, Ubuntu 20.04+ |
-          | \`.rpm\` | Rocky 9, Alma 9, CentOS Stream 9 |
+          | `.deb` | Debian 11/12, Ubuntu 20.04+ |
+          | `.rpm` | Rocky 9, Alma 9, CentOS Stream 9 |
 
           ### 安装方法
 
-          \`\`\`bash
-          bash <(curl -fsSL https://raw.githubusercontent.com/$(echo ${{ github.repository }})/main/tcp.sh)
-          \`\`\`
+          ```bash
+          bash <(curl -fsSL https://raw.githubusercontent.com/Be90nia/tcpboost/main/tcp.sh)
+          ```
 
           ### 验证
 
-          \`\`\`bash
-          # 检查可用算法
+          ```bash
           sysctl net.ipv4.tcp_available_congestion_control
-          # 应显示: bbr bbrplus bbr1
-          \`\`\`
-          EOF
+          # 应显示: bbr bbrplus bbrplusv3 bbr1 brutal
+          ```
+          RELEASEEOF
 
-          # 收集所有产物文件
+          # 替换版本号占位符
+          sed -i "s/基于 Linux 编译/基于 Linux ${VERSION} 编译/" RELEASE_NOTES.md
+
           RELEASE_FILES=$(find artifacts/ -type f | sort)
           if [ -z "$RELEASE_FILES" ]; then
-            echo "❌ 未找到任何产物文件！"
+            echo "未找到任何产物文件！"
             exit 1
           fi
 

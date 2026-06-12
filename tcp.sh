@@ -671,22 +671,22 @@ smart_recommend() {
     else
       warn "tcp_brutal 模块加载失败，Hysteria2 可能无法使用 TCP Brutal"
     fi
-    # 全局默认: 丢包高→bbrplus, 丢包低→bbr
+    # 全局默认: 丢包高→bbrplusv3, 丢包低→bbr
     if [ "$PACKET_LOSS" = "high" ]; then
-      recommend_algo="bbrplus"
-      recommend_reason="检测到 Hysteria2 + 高丢包(≥5%), brutal 模块供 Hy2 socket 使用, 全局 BBRPlus 抗丢包"
+      recommend_algo="bbrplusv3"
+      recommend_reason="检测到 Hysteria2 + 高丢包(≥5%), brutal 模块供 Hy2 socket 使用, 全局 BBRPlusV3 抗丢包"
     else
       recommend_algo="bbr"
       recommend_reason="检测到 Hysteria2, brutal 模块供 Hy2 socket 使用, 全局 BBRv3 对其他流量最优"
     fi
   elif [ "$PACKET_LOSS" = "high" ]; then
-    # 高丢包不管什么代理 → BBRPlus 抗丢包
-    recommend_algo="bbrplus"
-    recommend_reason="高丢包(≥5%), BBRPlus 抗丢包性能提升 3-4 倍"
+    # 高丢包不管什么代理 → BBRPlusV3 抗丢包
+    recommend_algo="bbrplusv3"
+    recommend_reason="高丢包(≥5%), BBRPlusV3 抗丢包性能提升 3-4 倍"
   elif [ "$PACKET_LOSS" = "medium" ]; then
-    # 中丢包 → BBRPlus 优先，bbr 也可接受
-    recommend_algo="bbrplus"
-    recommend_reason="丢包 1-5%, BBRPlus 在丢包场景下表现优于 BBRv3"
+    # 中丢包 → BBRPlusV3 优先，bbr 也可接受
+    recommend_algo="bbrplusv3"
+    recommend_reason="丢包 1-5%, BBRPlusV3 在丢包场景下表现优于 BBRv3"
   elif [ "$PROXY_XRAY" = "yes" ]; then
     recommend_algo="bbr"
     recommend_reason="检测到 xray, 低丢包, BBRv3 延迟最低、通用最优"
@@ -747,7 +747,7 @@ switch_algorithm() {
   local algo="$1"
 
   if [ -z "$algo" ]; then
-    echo "请指定算法: bbr | bbrplus | brutal | cubic"
+    echo "请指定算法: bbr | bbrplusv3 | bbrplus | brutal | cubic"
     return 1
   fi
 
@@ -825,18 +825,20 @@ show_menu() {
 menu_switch_algorithm() {
   echo ""
   echo "  可用算法:"
-  echo "  1) bbr     — BBRv3 (推荐通用)"
-  echo "  2) bbrplus — BBRPlus (高丢包优化)"
-  echo "  3) brutal  — TCP Brutal (Hysteria2 专用)"
-  echo "  4) cubic   — Cubic (公平性好)"
+  echo "  1) bbr         — BBRv3 (推荐通用)"
+  echo "  2) bbrplusv3   — BBRPlusV3 (高丢包首选, BBRv3+激进探测)"
+  echo "  3) bbrplus     — BBRPlus (高丢包优化, 原版)"
+  echo "  4) brutal      — TCP Brutal (Hysteria2 专用)"
+  echo "  5) cubic       — Cubic (公平性好)"
   echo ""
-  read -p "  选择算法 [1-4]: " algo_choice
+  read -p "  选择算法 [1-5]: " algo_choice
 
   case "$algo_choice" in
     1) switch_algorithm bbr ;;
-    2) switch_algorithm bbrplus ;;
-    3) switch_algorithm brutal ;;
-    4) switch_algorithm cubic ;;
+    2) switch_algorithm bbrplusv3 ;;
+    3) switch_algorithm bbrplus ;;
+    4) switch_algorithm brutal ;;
+    5) switch_algorithm cubic ;;
     *) error "无效选择" ;;
   esac
 }
@@ -855,7 +857,7 @@ main() {
     status)   show_algorithm_status ;;
     switch)
       if [ -z "${2:-}" ]; then
-        error "用法: $0 switch <bbr|bbrplus|brutal|cubic>"
+        error "用法: $0 switch <bbr|bbrplusv3|bbrplus|brutal|cubic>"
         exit 1
       fi
       switch_algorithm "$2"

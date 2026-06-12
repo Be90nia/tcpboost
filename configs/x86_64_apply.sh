@@ -36,6 +36,17 @@ else
   echo "⚠️ 未检测到 BBRPlus 补丁，跳过 CONFIG_TCP_CONG_BBRPLUS"
 fi
 
+# BBRPlusV3 (BBRv3 + BBRPlus 激进探测, 高丢包链路首选)
+# 基于 Google BBRv3 基线，融合 BBRPlus 激进探测思想
+if grep -q "tcp_bbrplusv3" net/ipv4/Makefile 2>/dev/null || \
+   grep -q "CONFIG_TCP_CONG_BBRPLUSV3" init/Kconfig 2>/dev/null || \
+   [ -f "net/ipv4/tcp_bbrplusv3.c" ]; then
+  echo "检测到 BBRPlusV3 已创建，启用 CONFIG_TCP_CONG_BBRPLUSV3"
+  ./scripts/config --enable CONFIG_TCP_CONG_BBRPLUSV3
+else
+  echo "⚠️ 未检测到 BBRPlusV3，跳过 CONFIG_TCP_CONG_BBRPLUSV3"
+fi
+
 # 默认拥塞控制设为 BBRv3
 ./scripts/config --enable CONFIG_DEFAULT_BBR
 ./scripts/config --set-val CONFIG_DEFAULT_TCP_CONG "bbr"
