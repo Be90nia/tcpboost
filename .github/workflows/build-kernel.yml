@@ -1,8 +1,6 @@
 name: Build TCPBoost Kernel
 
 on:
-  schedule:
-    - cron: '0 4 * * 1'
   workflow_dispatch:
     inputs:
       kernel_version:
@@ -430,6 +428,13 @@ jobs:
 
           echo "上传文件列表:"
           echo "$RELEASE_FILES"
+
+          # Delete existing release+tag if it exists (rebuild scenario)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists, deleting old release..."
+            gh release delete "$TAG" --yes --cleanup-tag
+            echo "Old release deleted."
+          fi
 
           # shellcheck disable=SC2086
           gh release create "$TAG" $RELEASE_FILES \
