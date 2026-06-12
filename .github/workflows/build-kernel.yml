@@ -110,12 +110,10 @@ jobs:
           git clone --depth=1 https://github.com/CloudPassenger/Cloud-Kernel-BBRv3.git cp-patches
 
           # 设置 quilt 补丁目录结构
-          # 注意: 排除 BBRv1 补丁 (0000-net-tcp-bbr1-copy.patch)，因为 Linux 6.12 已移除
-          # struct tcp_congestion_ops.tso_segs 成员，BBRv1 补丁不兼容
           mkdir -p linux-src/patches/custom
           PATCH_DIR="cp-patches/kernel_patches/${{ env.KERNEL_MAJOR }}"
           if [ -d "$PATCH_DIR" ]; then
-            find "$PATCH_DIR" -name '*.patch' -type f | sort | grep -v 'bbr1' | while read -r f; do
+            find "$PATCH_DIR" -name '*.patch' -type f | sort | while read -r f; do
               cp -v "$f" linux-src/patches/custom/
             done
           fi
@@ -138,6 +136,25 @@ jobs:
         working-directory: linux-src
         run: |
           quilt push -a
+
+      - name: 修复补丁兼容性（6.12 tso_segs → min_tso_segs）
+        working-directory: linux-src
+        run: |
+          # CloudPassenger 补丁使用 .tso_segs 回调（Google BBR 补丁集专有 API）
+          # Linux 6.12 主线使用 .min_tso_segs，签名不同，需要适配
+          echo "修复 BBRv1 补丁..."
+          sed -i 's/\.tso_segs.*=.*bbr1_tso_segs,/.min_tso_segs\t= bbr_min_tso_segs,/' net/ipv4/tcp_bbr1.c
+          sed -i '/^__bpf_kfunc static u32 bbr1_tso_segs/,/^}/d' net/ipv4/tcp_bbr1.c
+          sed -i '/BTF_ID_FLAGS(func, bbr1_tso_segs)/d' net/ipv4/tcp_bbr1.c
+
+          echo "修复 BBRPlus 补丁..."
+          sed -i 's/\.tso_segs.*=.*bbr_tso_segs,/.min_tso_segs\t= bbr_min_tso_segs,/' net/ipv4/tcp_bbrplus.c
+          sed -i '/^__bpf_kfunc static u32 bbr_tso_segs/,/^}/d' net/ipv4/tcp_bbrplus.c
+          sed -i '/BTF_ID_FLAGS(func, bbr_tso_segs)/d' net/ipv4/tcp_bbrplus.c
+
+          echo "验证修复结果..."
+          grep -n 'min_tso_segs\|tso_segs\|bbr_min_tso_segs' net/ipv4/tcp_bbr1.c | head -5
+          grep -n 'min_tso_segs\|tso_segs\|bbr_min_tso_segs' net/ipv4/tcp_bbrplus.c | head -5
 
       - name: 应用 tcpboost 编译配置
         working-directory: linux-src
