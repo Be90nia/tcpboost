@@ -182,7 +182,7 @@ jobs:
           echo "=== 默认拥塞控制 ==="
           grep 'CONFIG_DEFAULT_TCP_CONG' .config || true
 
-      - name: 编译内核
+      - name: 编译内核 (DEB)
         working-directory: linux-src
         run: |
           export CC="ccache gcc"
@@ -190,7 +190,7 @@ jobs:
           ccache -M 5G
           ccache -z
 
-          echo "开始编译 (预计 2-3 小时)..."
+          echo "开始编译 DEB 包..."
           JOBS=$(nproc)
           echo "并行任务数: $JOBS"
 
@@ -199,32 +199,52 @@ jobs:
 
           ccache -s
 
-      - name: 编译 RPM 包
+          echo "=== DEB 产物 ==="
+          find .. -maxdepth 1 -name "*.deb" -exec ls -lh {} \;
+          find . -maxdepth 1 -name "*.deb" -exec ls -lh {} \;
+
+      - name: 编译内核 (RPM)
         working-directory: linux-src
         run: |
           echo "正在生成 RPM 包..."
-          # 使用 make binrpm-pkg 生成 .rpm
           make -j$(nproc) binrpm-pkg || {
             echo "RPM 打包失败, 尝试手动打包..."
-            # 备选方案: 使用 alien 转换 .deb
             sudo apt-get install -y alien
-            DEB_FILE=$(ls -t ../linux-*-tcpboost_*.deb 2>/dev/null | head -1)
+            DEB_FILE=$(ls -t ../*.deb 2>/dev/null | head -1)
             if [ -n "$DEB_FILE" ]; then
               echo "使用 alien 转换: $DEB_FILE"
               sudo alien --to-rpm "$DEB_FILE"
             fi
           }
 
+          echo "=== RPM 产物 ==="
+          find rpmbuild -name "*.rpm" -exec ls -lh {} \;
+
       - name: 收集构建产物
         run: |
           mkdir -p artifacts
-          # 收集 .deb
-          find .. -maxdepth 1 -name "*.deb" -exec mv {} artifacts/ \;
-          # 收集 .rpm
-          find .. -maxdepth 1 -name "*.rpm" -exec mv {} artifacts/ \;
+
+          echo "=== 搜索 DEB 文件 ==="
+          find . -maxdepth 1 -name "*.deb" -exec echo "找到: {}" \; -exec mv {} artifacts/ \;
+          # bindeb-pkg 产物在 linux-src 上级（即项目根目录）
+          find linux-src/.. -maxdepth 1 -name "*.deb" -exec echo "找到: {}" \; -exec mv {} artifacts/ \;
+
+          echo "=== 搜索 RPM 文件 ==="
+          # binrpm-pkg 产物在 linux-src/rpmbuild/ 下
+          find linux-src/rpmbuild -name "*.rpm" -exec echo "找到: {}" \; -exec mv {} artifacts/ \;
+          find . -maxdepth 3 -name "*.rpm" -exec echo "找到: {}" \; -exec mv {} artifacts/ \;
 
           echo "=== 构建产物 ==="
           ls -lh artifacts/
+          if [ -z "$(ls -A artifacts/ 2>/dev/null)" ]; then
+            echo "❌ 未找到任何构建产物！"
+            echo "=== 调试：项目根目录文件 ==="
+            ls -lh ../*.deb ../*.rpm 2>/dev/null || true
+            ls -lh ./*.deb ./*.rpm 2>/dev/null || true
+            echo "=== 调试：rpmbuild 目录 ==="
+            find linux-src/rpmbuild -type f 2>/dev/null || true
+            exit 1
+          fi
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
