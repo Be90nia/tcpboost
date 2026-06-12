@@ -137,23 +137,34 @@ jobs:
         run: |
           quilt push -a
 
-      - name: 修复补丁兼容性（6.12 tso_segs → min_tso_segs）
+      - name: 修复补丁兼容性（6.12 API 适配）
         working-directory: linux-src
         run: |
-          # CloudPassenger 补丁使用 .tso_segs 回调（Google BBR 补丁集专有 API）
-          # Linux 6.12 主线使用 .min_tso_segs，签名不同，需要适配
-          echo "修复 BBRv1 补丁..."
+          # 1. BBRPlus struct bbr 超出 ICSK_CA_PRIV_SIZE (104 bytes)
+          #    所有 BBRPlus 项目都通过增大 ICSK_CA_PRIV_SIZE 来解决
+          #    参考: UJX6N/bbrplus-6.x_stable, CloudPassenger/Cloud-Kernel-BBRv3
+          echo "修复 ICSK_CA_PRIV_SIZE (104→112 bytes)..."
+          sed -i 's/icsk_ca_priv\[104 \/ sizeof(u64)\]/icsk_ca_priv[112 \/ sizeof(u64)]/' \
+            include/net/inet_connection_sock.h
+
+          # 2. CloudPassenger 补丁使用 .tso_segs 回调（Google BBR 补丁集专有 API）
+          #    Linux 6.12 主线使用 .min_tso_segs，签名不同，需要适配
+          echo "修复 BBRv1 补丁 tso_segs → min_tso_segs..."
           sed -i 's/\.tso_segs.*=.*bbr1_tso_segs,/.min_tso_segs\t= bbr_min_tso_segs,/' net/ipv4/tcp_bbr1.c
           sed -i '/^__bpf_kfunc static u32 bbr1_tso_segs/,/^}/d' net/ipv4/tcp_bbr1.c
           sed -i '/BTF_ID_FLAGS(func, bbr1_tso_segs)/d' net/ipv4/tcp_bbr1.c
 
-          echo "修复 BBRPlus 补丁..."
+          echo "修复 BBRPlus 补丁 tso_segs → min_tso_segs..."
           sed -i 's/\.tso_segs.*=.*bbr_tso_segs,/.min_tso_segs\t= bbr_min_tso_segs,/' net/ipv4/tcp_bbrplus.c
           sed -i '/^__bpf_kfunc static u32 bbr_tso_segs/,/^}/d' net/ipv4/tcp_bbrplus.c
           sed -i '/BTF_ID_FLAGS(func, bbr_tso_segs)/d' net/ipv4/tcp_bbrplus.c
 
           echo "验证修复结果..."
+          echo "=== ICSK_CA_PRIV_SIZE ==="
+          grep -n 'icsk_ca_priv' include/net/inet_connection_sock.h
+          echo "=== BBRv1 min_tso_segs ==="
           grep -n 'min_tso_segs\|tso_segs\|bbr_min_tso_segs' net/ipv4/tcp_bbr1.c | head -5
+          echo "=== BBRPlus min_tso_segs ==="
           grep -n 'min_tso_segs\|tso_segs\|bbr_min_tso_segs' net/ipv4/tcp_bbrplus.c | head -5
 
       - name: 应用 tcpboost 编译配置

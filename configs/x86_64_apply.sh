@@ -21,6 +21,8 @@ echo "正在应用 tcpboost 内核编译选项..."
 # ============================================
 # BBRv3 (Google BBR 最新版, Linux 6.12 内置)
 ./scripts/config --enable CONFIG_TCP_CONG_BBR
+# BBRv1 (原版 BBR, 4.9+ 内置)
+./scripts/config --enable CONFIG_TCP_CONG_BBR1
 # TCP Brutal (apernet/Hysteria2 专用)
 ./scripts/config --enable CONFIG_TCP_CONG_BRUTAL
 # BBRPlus (dog250 修改版, 高丢包优化)
