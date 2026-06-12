@@ -110,10 +110,12 @@ jobs:
           git clone --depth=1 https://github.com/CloudPassenger/Cloud-Kernel-BBRv3.git cp-patches
 
           # 设置 quilt 补丁目录结构
+          # 注意: 排除 BBRv1 补丁 (0000-net-tcp-bbr1-copy.patch)，因为 Linux 6.12 已移除
+          # struct tcp_congestion_ops.tso_segs 成员，BBRv1 补丁不兼容
           mkdir -p linux-src/patches/custom
           PATCH_DIR="cp-patches/kernel_patches/${{ env.KERNEL_MAJOR }}"
           if [ -d "$PATCH_DIR" ]; then
-            find "$PATCH_DIR" -name '*.patch' -type f | sort | while read -r f; do
+            find "$PATCH_DIR" -name '*.patch' -type f | sort | grep -v 'bbr1' | while read -r f; do
               cp -v "$f" linux-src/patches/custom/
             done
           fi
