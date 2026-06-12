@@ -210,20 +210,32 @@ jobs:
             fi
           done
 
-          # 3. Fix .tso_segs -> .min_tso_segs for 6.12 compat
-          if [ -f net/ipv4/tcp_bbr1.c ]; then
-            echo "Fixing BBRv1 tso_segs -> min_tso_segs..."
-            sed -i 's/\.tso_segs.*=.*bbr1_tso_segs,/.min_tso_segs\t= bbr_min_tso_segs,/' net/ipv4/tcp_bbr1.c
-            sed -i '/^__bpf_kfunc static u32 bbr1_tso_segs/,/^}/d' net/ipv4/tcp_bbr1.c
-            sed -i '/BTF_ID_FLAGS(func, bbr1_tso_segs)/d' net/ipv4/tcp_bbr1.c
-          fi
+          # 3. Fix tso_segs callback for 6.12 compat
+          # In 6.12, tso_segs callback signature changed from
+          #   u32 (*)(struct sock *) -> void (*)(struct sock *, u32, u32)
+          # CloudPassenger patches use the old signature, so remove the
+          # assignment and let the kernel use default behavior.
+          for src in net/ipv4/tcp_bbr1.c net/ipv4/tcp_bbrplus.c; do
+            if [ -f "$src" ]; then
+              algo=$(basename "$src" .c | sed 's/tcp_//')
+              func="${algo}_tso_segs"
+              echo "Fixing $src: removing .tso_segs assignment (6.12 signature change)..."
 
-          if [ -f net/ipv4/tcp_bbrplus.c ]; then
-            echo "Fixing BBRPlus tso_segs -> min_tso_segs..."
-            sed -i 's/\.tso_segs.*=.*bbr_tso_segs,/.min_tso_segs\t= bbr_min_tso_segs,/' net/ipv4/tcp_bbrplus.c
-            sed -i '/^__bpf_kfunc static u32 bbr_tso_segs/,/^}/d' net/ipv4/tcp_bbrplus.c
-            sed -i '/BTF_ID_FLAGS(func, bbr_tso_segs)/d' net/ipv4/tcp_bbrplus.c
-          fi
+              # Remove .tso_segs = xxx_tso_segs from ops struct
+              sed -i "/\.tso_segs.*=.*${func},/d" "$src"
+
+              # Remove the function definition (multi-line)
+              sed -i "/^__bpf_kfunc static u32 ${func}/,/^}/d" "$src"
+              # Also handle non-BPF variant
+              sed -i "/^static u32 ${func}/,/^}/d" "$src"
+
+              # Remove BTF reference
+              sed -i "/BTF_ID_FLAGS(func, ${func})/d" "$src"
+
+              # Remove forward declaration if any
+              sed -i "/static u32 ${func}(/d" "$src"
+            fi
+          done
 
           # 4. Make tcp_tso_autosize non-static for BBRPlus
           if grep -q 'static u32 tcp_tso_autosize' net/ipv4/tcp_output.c; then
