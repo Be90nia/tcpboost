@@ -134,9 +134,15 @@ echo "[5/6] 已调整 ECN/loss 参数"
 # 6. 修改 Kconfig 和 Makefile
 # ============================================
 
-# 添加 Kconfig 选项（在 CONFIG_TCP_CONG_BBR 后面插入）
-if ! grep -q "CONFIG_TCP_CONG_BBRPLUSV3" init/Kconfig 2>/dev/null; then
+# 添加 Kconfig 选项（在 net/ipv4/Kconfig 中 TCP_CONG_BBR 后面插入）
+KCONFIG_FILE="net/ipv4/Kconfig"
+if [ ! -f "$KCONFIG_FILE" ]; then
+  echo "警告: 未找到 $KCONFIG_FILE，跳过 Kconfig 修改"
+else
+if ! grep -q "CONFIG_TCP_CONG_BBRPLUSV3" "$KCONFIG_FILE" 2>/dev/null; then
   # 找到 BBR 的 Kconfig 条目，在其后插入 bbrplusv3
+  # 注意：BBRv3 补丁会把 config TCP_CONG_BBR 改成 BBRv3 的描述
+  # 我们需要在其后面追加 bbrplusv3 的条目
   sed -i '/config TCP_CONG_BBR$/,/^[^[:space:]]/{
     /^[^[:space:]]/a\
 \
@@ -151,8 +157,9 @@ config TCP_CONG_BBRPLUSV3\
 	  Recommended for VPS/proxy scenarios with packet loss 1-5%.\
 	  \
 	  Module will be called tcp_bbrplusv3.
-  }' init/Kconfig
-  echo "已添加 Kconfig 选项"
+  }' "$KCONFIG_FILE"
+  echo "已添加 Kconfig 选项到 $KCONFIG_FILE"
+fi
 fi
 
 # 添加 Makefile 编译目标
@@ -163,11 +170,17 @@ fi
 
 # 修改 ICSK_CA_PRIV_SIZE 以容纳 bbrplusv3
 # BBRv3 struct bbr 约 144 bytes，bbrplusv3 同样大小（我们没改 struct）
-# 但如果已有的 ICSK_CA_PRIV_SIZE < 144，需要增大
-CURRENT_PRIV_SIZE=$(grep -oP 'icsk_ca_priv\[\K\d+' include/net/inet_connection_sock.h 2>/dev/null || echo "0")
-if [ "$CURRENT_PRIV_SIZE" -lt 144 ]; then
-  echo "增大 ICSK_CA_PRIV_SIZE ($CURRENT_PRIV_SIZE → 144)..."
-  sed -i "s/icsk_ca_priv\[$CURRENT_PRIV_SIZE \/ sizeof(u64)\]/icsk_ca_priv[144 \/ sizeof(u64)]/" include/net/inet_connection_sock.h
+# 使用动态检测，兼容任意当前值
+PRIV_FILE="include/net/inet_connection_sock.h"
+if [ -f "$PRIV_FILE" ]; then
+  CURRENT_PRIV_SIZE=$(grep -oP 'icsk_ca_priv\[\K\d+' "$PRIV_FILE" 2>/dev/null || echo "0")
+  NEED=144
+  if [ "$CURRENT_PRIV_SIZE" -lt "$NEED" ]; then
+    echo "增大 ICSK_CA_PRIV_SIZE ($CURRENT_PRIV_SIZE → $NEED)..."
+    sed -i "s/icsk_ca_priv\[$CURRENT_PRIV_SIZE \/ sizeof(u64)\]/icsk_ca_priv[$NEED \/ sizeof(u64)]/" "$PRIV_FILE"
+  else
+    echo "ICSK_CA_PRIV_SIZE 已为 $CURRENT_PRIV_SIZE (≥$NEED)，无需修改"
+  fi
 fi
 
 echo "[6/6] 已修改 Kconfig 和 Makefile"

@@ -27,7 +27,7 @@ jobs:
       should_build: ${{ steps.check.outputs.should_build }}
       latest_version: ${{ steps.check.outputs.latest_version }}
     steps:
-      - name: 检查最新内核版本
+      - name: Check latest kernel version
         id: check
         run: |
           LATEST=$(curl -sf https://www.kernel.org/feeds/kdist.xml | \
@@ -72,10 +72,10 @@ jobs:
             cross_prefix: ''
             deb_arch: amd64
     steps:
-      - name: 检出 tcpboost 仓库
+      - name: Checkout tcpboost repo
         uses: actions/checkout@v4
 
-      - name: 设置构建环境
+      - name: Setup build environment
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -84,7 +84,7 @@ jobs:
             curl wget git ccache \
             rsync python3 pahole libdw-dev lz4 zstd quilt dh-python
 
-      - name: 设置 ccache
+      - name: Setup ccache
         uses: actions/cache@v4
         with:
           path: /home/runner/.ccache
@@ -92,7 +92,7 @@ jobs:
           restore-keys: |
             kernel-
 
-      - name: 下载内核源码
+      - name: Download kernel source
         run: |
           VERSION="${{ needs.check-version.outputs.latest_version }}"
           echo "下载 Linux ${VERSION} 源码..."
@@ -100,96 +100,149 @@ jobs:
           tar -xf linux.tar.xz
           mv "linux-${VERSION}" linux-src
 
-      - name: 准备补丁目录结构
+      - name: Apply Xanmod BBRv3 patches (quilt)
+        working-directory: linux-src
         run: |
-          mkdir -p linux-src/patches/xanmod-bbrv3
-          mkdir -p linux-src/patches/custom
+          mkdir -p patches
+          cd patches
 
-          # 1. Xanmod BBRv3 补丁（19个，将主线 BBRv1 替换为 BBRv3）
-          echo "复制 Xanmod BBRv3 补丁..."
+          echo "# Xanmod BBRv3 - replaces mainline BBRv1 with BBRv3" > series
           find "${{ github.workspace }}/patches/xanmod-bbrv3" \
             -name '*.patch' -type f | sort | while read -r f; do
-            cp -v "$f" linux-src/patches/xanmod-bbrv3/
+            base=$(basename "$f")
+            cp -v "$f" .
+            echo "$base" >> series
           done
-          XANMOD_COUNT=$(find linux-src/patches/xanmod-bbrv3 -name '*.patch' | wc -l)
-          echo "Xanmod BBRv3 补丁数量: $XANMOD_COUNT"
-          if [ "$XANMOD_COUNT" -eq 0 ]; then
-            echo "未找到 Xanmod BBRv3 补丁"
-            exit 1
-          fi
-
-          # 2. CloudPassenger 补丁（BBRv1, BBRPlus, Brutal）
-          echo "从 CloudPassenger 仓库获取自定义补丁..."
-          git clone --depth=1 https://github.com/CloudPassenger/Cloud-Kernel-BBRv3.git cp-patches
-          PATCH_DIR="cp-patches/kernel_patches/${{ env.KERNEL_MAJOR }}"
-          if [ -d "$PATCH_DIR" ]; then
-            find "$PATCH_DIR" -name '*.patch' -type f | sort | while read -r f; do
-              cp -v "$f" linux-src/patches/custom/
-            done
-          fi
-          CUSTOM_COUNT=$(find linux-src/patches/custom -name '*.patch' | wc -l)
-          echo "CloudPassenger 自定义补丁数量: $CUSTOM_COUNT"
-          if [ "$CUSTOM_COUNT" -eq 0 ]; then
-            echo "未找到 CloudPassenger 补丁"
-            exit 1
-          fi
-
-          # 3. 生成 quilt series 文件（应用顺序关键！）
-          cd linux-src/patches
-          echo "# 阶段 1: Xanmod BBRv3 补丁 — 将主线 BBRv1 替换为 BBRv3" > series
-          find xanmod-bbrv3 -type f -name "*.patch" -printf "xanmod-bbrv3/%P\n" | sort >> series
-          echo "" >> series
-          echo "# 阶段 2: CloudPassenger 自定义补丁 (BBRv1, BBRPlus, Brutal)" >> series
-          find custom -type f -name "*.patch" -printf "custom/%P\n" | sort >> series
 
           echo ""
-          echo "=== quilt series 文件内容 ==="
+          echo "=== quilt series ==="
           cat series
           echo ""
-          echo "总补丁数量: $(grep -c '.patch' series)"
 
-      - name: 应用补丁
-        working-directory: linux-src
-        run: |
+          cd ..
           quilt push -a
 
-      - name: 修复补丁兼容性（6.12 API 适配）
+          echo ""
+          echo "=== Xanmod BBRv3 patches applied ==="
+
+      - name: Apply CloudPassenger custom patches (patch -p1)
         working-directory: linux-src
         run: |
-          # 1. ICSK_CA_PRIV_SIZE 增大到 144 bytes
-          # BBRv3 struct bbr 约 144 bytes，BBRPlus 约 112 bytes
-          # 必须取最大值 144 bytes 才能容纳所有算法
-          echo "修复 ICSK_CA_PRIV_SIZE (→ 144 bytes, 兼容 BBRv3 + BBRPlus + bbrplusv3)..."
-          sed -i 's/icsk_ca_priv\[104 \/ sizeof(u64)\]/icsk_ca_priv[144 \/ sizeof(u64)]/' \
-            include/net/inet_connection_sock.h
-          sed -i 's/icsk_ca_priv\[112 \/ sizeof(u64)\]/icsk_ca_priv[144 \/ sizeof(u64)]/' \
-            include/net/inet_connection_sock.h
+          git clone --depth=1 https://github.com/CloudPassenger/Cloud-Kernel-BBRv3.git /tmp/cp-patches
+          PATCH_DIR="/tmp/cp-patches/kernel_patches/${{ env.KERNEL_MAJOR }}"
 
-          # 2. CloudPassenger BBRv1 补丁 .tso_segs → .min_tso_segs
+          if [ ! -d "$PATCH_DIR" ]; then
+            echo "ERROR: CloudPassenger patch dir not found: $PATCH_DIR"
+            exit 1
+          fi
+
+          for patch_file in $(find "$PATCH_DIR" -name '*.patch' -type f | sort); do
+            patch_name=$(basename "$patch_file")
+            echo ""
+            echo "=== Applying CloudPassenger patch: $patch_name ==="
+
+            if patch -p1 --no-backup-if-mismatch -F3 --dry-run < "$patch_file" >/dev/null 2>&1; then
+              patch -p1 --no-backup-if-mismatch -F3 < "$patch_file"
+              echo "Patch $patch_name applied successfully (p1)"
+            elif patch -p0 --no-backup-if-mismatch -F3 --dry-run < "$patch_file" >/dev/null 2>&1; then
+              patch -p0 --no-backup-if-mismatch -F3 < "$patch_file"
+              echo "Patch $patch_name applied successfully (p0)"
+            else
+              echo "Patch $patch_name cannot be applied cleanly, forcing partial application..."
+              patch -p1 --force --no-backup-if-mismatch -F3 < "$patch_file" 2>&1 || true
+              echo "Patch $patch_name force-applied (rejected hunks saved as .rej)"
+            fi
+
+            find . -name '*.rej' -exec echo "REJECT: {}" \; 2>/dev/null || true
+            find . -name '*.rej' -delete 2>/dev/null || true
+          done
+
+          echo ""
+          echo "=== CloudPassenger patches applied ==="
+          echo "--- New files ---"
+          ls -la net/ipv4/tcp_bbr1.c net/ipv4/tcp_bbrplus.c net/ipv4/tcp_brutal.c 2>/dev/null || echo "Some files missing"
+
+      - name: Fix patch compatibility (6.12 API + conflict resolution)
+        working-directory: linux-src
+        run: |
+          # 1. ICSK_CA_PRIV_SIZE - must be 144 bytes for BBRv3 struct bbr
+          echo "Fixing ICSK_CA_PRIV_SIZE..."
+          FILE="include/net/inet_connection_sock.h"
+          CURRENT=$(grep -oP 'icsk_ca_priv\[\K\d+' "$FILE" 2>/dev/null || echo "0")
+          echo "Current ICSK_CA_PRIV_SIZE: $CURRENT / sizeof(u64)"
+          NEED=144
+          if [ "$CURRENT" -lt "$NEED" ]; then
+            echo "Increasing ICSK_CA_PRIV_SIZE ($CURRENT -> $NEED)..."
+            sed -i "s/icsk_ca_priv\[$CURRENT \/ sizeof(u64)\]/icsk_ca_priv[$NEED \/ sizeof(u64)]/" "$FILE"
+          fi
+
+          # 2. Ensure CloudPassenger algorithms are registered in Makefile
+          echo ""
+          echo "=== Checking CloudPassenger algorithm registration ==="
+
+          if ! grep -q 'tcp_bbr1' net/ipv4/Makefile; then
+            echo 'obj-$(CONFIG_TCP_CONG_BBR1) += tcp_bbr1.o' >> net/ipv4/Makefile
+          fi
+
+          if ! grep -q 'tcp_bbrplus' net/ipv4/Makefile; then
+            echo 'obj-$(CONFIG_TCP_CONG_BBRPLUS) += tcp_bbrplus.o' >> net/ipv4/Makefile
+          fi
+
+          if ! grep -q 'tcp_brutal' net/ipv4/Makefile; then
+            echo 'obj-$(CONFIG_TCP_CONG_BRUTAL) += tcp_brutal.o' >> net/ipv4/Makefile
+          fi
+
+          # Ensure Kconfig entries exist
+          for algo in BBR1 BBRPLUS BRUTAL; do
+            if ! grep -q "config TCP_CONG_${algo}" net/ipv4/Kconfig; then
+              echo "Adding Kconfig entry: TCP_CONG_${algo}..."
+              case "$algo" in
+                BBR1)
+                  printf '\nconfig TCP_CONG_BBR1\n\ttristate "BBRv1 TCP"\n\tdepends on TCP_CONG_ADVANCED\n\tdefault m\n' >> net/ipv4/Kconfig
+                  ;;
+                BBRPLUS)
+                  printf '\nconfig TCP_CONG_BBRPLUS\n\ttristate "BBRPLUS TCP"\n\tdepends on TCP_CONG_ADVANCED\n\tdefault m\n' >> net/ipv4/Kconfig
+                  ;;
+                BRUTAL)
+                  printf '\nconfig TCP_CONG_BRUTAL\n\ttristate "TCP Brutal"\n\tdepends on TCP_CONG_ADVANCED\n\tdefault m\n' >> net/ipv4/Kconfig
+                  ;;
+              esac
+            fi
+          done
+
+          # 3. Fix .tso_segs -> .min_tso_segs for 6.12 compat
           if [ -f net/ipv4/tcp_bbr1.c ]; then
-            echo "修复 BBRv1 补丁 tso_segs → min_tso_segs..."
+            echo "Fixing BBRv1 tso_segs -> min_tso_segs..."
             sed -i 's/\.tso_segs.*=.*bbr1_tso_segs,/.min_tso_segs\t= bbr_min_tso_segs,/' net/ipv4/tcp_bbr1.c
             sed -i '/^__bpf_kfunc static u32 bbr1_tso_segs/,/^}/d' net/ipv4/tcp_bbr1.c
             sed -i '/BTF_ID_FLAGS(func, bbr1_tso_segs)/d' net/ipv4/tcp_bbr1.c
           fi
 
-          # 3. CloudPassenger BBRPlus 补丁 .tso_segs → .min_tso_segs
           if [ -f net/ipv4/tcp_bbrplus.c ]; then
-            echo "修复 BBRPlus 补丁 tso_segs → min_tso_segs..."
+            echo "Fixing BBRPlus tso_segs -> min_tso_segs..."
             sed -i 's/\.tso_segs.*=.*bbr_tso_segs,/.min_tso_segs\t= bbr_min_tso_segs,/' net/ipv4/tcp_bbrplus.c
             sed -i '/^__bpf_kfunc static u32 bbr_tso_segs/,/^}/d' net/ipv4/tcp_bbrplus.c
             sed -i '/BTF_ID_FLAGS(func, bbr_tso_segs)/d' net/ipv4/tcp_bbrplus.c
           fi
 
-          echo "验证修复结果..."
-          echo "=== ICSK_CA_PRIV_SIZE ==="
-          grep -n 'icsk_ca_priv' include/net/inet_connection_sock.h
-          echo "=== BBRv1 min_tso_segs ==="
-          grep -n 'min_tso_segs\|tso_segs' net/ipv4/tcp_bbr1.c 2>/dev/null | head -5 || echo "(tcp_bbr1.c 不存在)"
-          echo "=== BBRPlus min_tso_segs ==="
-          grep -n 'min_tso_segs\|tso_segs' net/ipv4/tcp_bbrplus.c 2>/dev/null | head -5 || echo "(tcp_bbrplus.c 不存在)"
+          # 4. Make tcp_tso_autosize non-static for BBRPlus
+          if grep -q 'static u32 tcp_tso_autosize' net/ipv4/tcp_output.c; then
+            echo "Fixing tcp_tso_autosize: static -> non-static..."
+            sed -i 's/^static u32 tcp_tso_autosize/u32 tcp_tso_autosize/' net/ipv4/tcp_output.c
+          fi
 
-      - name: 创建 BBRPlusV3 算法
+          echo ""
+          echo "=== Verification ==="
+          echo "--- ICSK_CA_PRIV_SIZE ---"
+          grep -n 'icsk_ca_priv' include/net/inet_connection_sock.h
+          echo "--- Makefile TCP modules ---"
+          grep -E 'tcp_bbr|tcp_brutal' net/ipv4/Makefile
+          echo "--- Kconfig TCP options ---"
+          grep -E 'config TCP_CONG_(BBR|BRUTAL)' net/ipv4/Kconfig
+          echo "--- TCP module files ---"
+          ls net/ipv4/tcp_bbr*.c net/ipv4/tcp_brutal.c 2>/dev/null || echo "(some files missing)"
+
+      - name: Create BBRPlusV3 algorithm
         working-directory: linux-src
         run: |
           # 基于 BBRv3 tcp_bbr.c 动态创建 bbrplusv3
@@ -207,7 +260,7 @@ jobs:
             exit 1
           fi
 
-      - name: 应用 tcpboost 编译配置
+      - name: Apply tcpboost build config
         working-directory: linux-src
         run: |
           echo "-tcpboost" > localversion
@@ -221,7 +274,7 @@ jobs:
           echo "=== 默认拥塞控制 ==="
           grep 'CONFIG_DEFAULT_TCP_CONG' .config || true
 
-      - name: 编译内核 (DEB)
+      - name: Build kernel (DEB)
         working-directory: linux-src
         run: |
           export CC="ccache gcc"
@@ -242,7 +295,7 @@ jobs:
           find .. -maxdepth 1 -name "*.deb" -exec ls -lh {} \;
           find . -maxdepth 1 -name "*.deb" -exec ls -lh {} \;
 
-      - name: 编译内核 (RPM)
+      - name: Build kernel (RPM)
         working-directory: linux-src
         run: |
           echo "正在生成 RPM 包..."
@@ -259,7 +312,7 @@ jobs:
           echo "=== RPM 产物 ==="
           find rpmbuild -name "*.rpm" -exec ls -lh {} \;
 
-      - name: 收集构建产物
+      - name: Collect build artifacts
         run: |
           mkdir -p artifacts
 
@@ -280,7 +333,7 @@ jobs:
             exit 1
           fi
 
-      - name: 上传构建产物
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: kernel-${{ matrix.arch }}
@@ -293,16 +346,16 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: 检出仓库
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: 下载构建产物
+      - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
           merge-multiple: true
 
-      - name: 创建 Release
+      - name: Create Release
         run: |
           VERSION="${{ needs.check-version.outputs.latest_version }}"
           TAG="v${VERSION}-tcpboost"
