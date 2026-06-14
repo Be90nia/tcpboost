@@ -41,18 +41,18 @@ echo "目标文件: $BBRPLUSV3_SRC"
 # 1. 复制 tcp_bbr.c → tcp_bbrplusv3.c
 # ============================================
 cp "$BBR_SRC" "$BBRPLUSV3_SRC"
-echo "[1/8] 已复制 $BBR_SRC → $BBRPLUSV3_SRC"
+echo "[1/9] 已复制 $BBR_SRC → $BBRPLUSV3_SRC"
 
 # ============================================
 # 2. 修改模块名和算法标识
 # ============================================
 
 # 模块描述
-sed -i 's/MODULE_DESCRIPTION("TCP BBR (Bottleneck Bandwidth and RTT)")/MODULE_DESCRIPTION("TCP BBRPlusV3 (BBRv3 + aggressive probing, based on BBRPlus ideas)")/' "$BBRPLUSV3_SRC"
+sed -i 's/MODULE_DESCRIPTION("TCP BBR (Bottleneck Bandwidth and RTT)")/MODULE_DESCRIPTION("TCP BBRPlusV3 (BBRv3 + aggressive probing + ACD + profile system)")/' "$BBRPLUSV3_SRC"
 
 # 添加 MODULE_VERSION（标识 BBRPlusV3，不改 BBR_VERSION 避免影响算法内部逻辑）
 if ! grep -q 'MODULE_VERSION' "$BBRPLUSV3_SRC" 2>/dev/null; then
-  sed -i '/MODULE_DESCRIPTION/a\MODULE_VERSION("1.0-bbrplusv3");' "$BBRPLUSV3_SRC"
+  sed -i '/MODULE_DESCRIPTION/a\MODULE_VERSION("2.0-bbrplusv3");' "$BBRPLUSV3_SRC"
 fi
 
 # 注册名：bbr → bbrplusv3
@@ -73,7 +73,7 @@ sed -i 's/static void __exit tcp_bbr_unregister/static void __exit tcp_bbrplusv3
 sed -i 's/tcp_register_congestion_control(&tcp_bbr_cong_ops)/tcp_register_congestion_control(\&tcp_bbrplusv3_cong_ops)/' "$BBRPLUSV3_SRC"
 sed -i 's/tcp_unregister_congestion_control(&tcp_bbr_cong_ops)/tcp_unregister_congestion_control(\&tcp_bbrplusv3_cong_ops)/' "$BBRPLUSV3_SRC"
 
-echo "[2/8] 已修改模块名和注册信息"
+echo "[2/9] 已修改模块名和注册信息"
 
 # ============================================
 # 3. 去掉可调参数的 const 限定符（为 module_param 做准备）
@@ -92,7 +92,7 @@ for param in $TUNABLE_PARAMS; do
   sed -i -E "s/static const (int|u32) ${param} /static \1 ${param} /" "$BBRPLUSV3_SRC"
 done
 
-echo "[3/8] 已去掉可调参数的 const 限定符"
+echo "[3/9] 已去掉可调参数的 const 限定符"
 
 # ============================================
 # 4. 应用 BBRPlus aggressive 参数值（默认 profile）
@@ -113,7 +113,7 @@ sed -i 's/bbr_beta = BBR_UNIT \* 30 \/ 100;/bbr_beta = BBR_UNIT * 20 \/ 100;/' "
 # 4e. loss_thresh: 2% → 5%（丢包容忍度提高，高丢包链路不会过早降速）
 sed -i 's/bbr_loss_thresh = BBR_UNIT \* 2 \/ 100;.*/bbr_loss_thresh = BBR_UNIT * 5 \/ 100;/' "$BBRPLUSV3_SRC"
 
-echo "[4/8] 已应用 BBRPlus aggressive 参数值"
+echo "[4/9] 已应用 BBRPlus aggressive 参数值"
 
 # ============================================
 # 5. PROBE_RTT 优化（200→50ms, 5000→2500ms）
@@ -126,7 +126,7 @@ sed -i 's/bbr_probe_rtt_mode_ms = 200;/bbr_probe_rtt_mode_ms = 50;/' "$BBRPLUSV3
 # 每次只停 50ms（vs BBRv3 的 200ms），总吞吐量损失更小
 sed -i 's/bbr_probe_rtt_win_ms = 5000;/bbr_probe_rtt_win_ms = 2500;/' "$BBRPLUSV3_SRC"
 
-echo "[5/8] 已优化 PROBE_RTT 参数"
+echo "[5/9] 已优化 PROBE_RTT 参数"
 
 # ============================================
 # 6. ECN/loss 参数调整
@@ -141,7 +141,7 @@ sed -i 's/bbr_full_loss_cnt = 6;/bbr_full_loss_cnt = 3;/' "$BBRPLUSV3_SRC"
 # bbr_inflight_headroom: 15% → 10%（保留更少的 headroom，更激进利用带宽）
 sed -i 's/bbr_inflight_headroom = BBR_UNIT \* 15 \/ 100;/bbr_inflight_headroom = BBR_UNIT * 10 \/ 100;/' "$BBRPLUSV3_SRC"
 
-echo "[6/8] 已调整 ECN/loss 参数"
+echo "[6/9] 已调整 ECN/loss 参数"
 
 # ============================================
 # 7. 追加 module_param 声明 + 三档 Profile 系统
@@ -168,6 +168,7 @@ cat >> "$BBRPLUSV3_SRC" << 'BBRPLUSV3_PARAMS_EOF'
 #define BBRPLUSV3_PROFILE_CONSERVATIVE	0
 #define BBRPLUSV3_PROFILE_STANDARD	1
 #define BBRPLUSV3_PROFILE_AGGRESSIVE	2
+#define BBRPLUSV3_PROFILE_WIFI		3
 
 /* Profile 参数预设表 */
 struct bbrplusv3_profile_params {
@@ -221,6 +222,18 @@ bbrplusv3_profile_table[] = {
 		.full_loss_cnt		= 3,
 		.inflight_headroom	= BBR_UNIT * 10 / 100,
 	},
+	[BBRPLUSV3_PROFILE_WIFI] = {
+		.pacing_gain_up		= BBR_UNIT * 3 / 2,
+		.pacing_gain_down	= BBR_UNIT * 9 / 10,
+		.startup_cwnd_gain	= BBR_UNIT * 9 / 4,
+		.beta			= BBR_UNIT * 25 / 100,
+		.loss_thresh		= BBR_UNIT * 5 / 100,
+		.probe_rtt_mode_ms	= 100,
+		.probe_rtt_win_ms	= 3000,
+		.ecn_thresh		= BBR_UNIT * 7 / 10,
+		.full_loss_cnt		= 4,
+		.inflight_headroom	= BBR_UNIT * 10 / 100,
+	},
 };
 
 static int bbrplusv3_profile = BBRPLUSV3_PROFILE_AGGRESSIVE;
@@ -237,7 +250,7 @@ static int bbrplusv3_profile_set(const char *val,
 		return ret;
 
 	if (bbrplusv3_profile < 0 ||
-	    bbrplusv3_profile > BBRPLUSV3_PROFILE_AGGRESSIVE) {
+	    bbrplusv3_profile > BBRPLUSV3_PROFILE_WIFI) {
 		bbrplusv3_profile = old;
 		return -EINVAL;
 	}
@@ -260,7 +273,9 @@ static int bbrplusv3_profile_set(const char *val,
 		bbrplusv3_profile == BBRPLUSV3_PROFILE_CONSERVATIVE ?
 			"conservative" :
 		bbrplusv3_profile == BBRPLUSV3_PROFILE_STANDARD ?
-			"standard" : "aggressive");
+			"standard" :
+		bbrplusv3_profile == BBRPLUSV3_PROFILE_AGGRESSIVE ?
+			"aggressive" : "wifi_optimized");
 	return 0;
 }
 
@@ -272,7 +287,7 @@ static const struct kernel_param_ops bbrplusv3_profile_ops = {
 module_param_cb(profile, &bbrplusv3_profile_ops,
 		&bbrplusv3_profile, 0644);
 MODULE_PARM_DESC(profile,
-	"BBRPlusV3 profile: 0=conservative, 1=standard, 2=aggressive (default)");
+	"BBRPlusV3 profile: 0=conservative, 1=standard, 2=aggressive, 3=wifi (default=2)");
 
 /* 单独可调参数（覆盖 profile 值，BBR_UNIT = 256） */
 module_param_named(pacing_gain_up,
@@ -289,7 +304,73 @@ module_param_named(full_loss_cnt, bbr_full_loss_cnt, uint, 0644);
 module_param_named(inflight_headroom, bbr_inflight_headroom, uint, 0644);
 BBRPLUSV3_PARAMS_EOF
 
-echo "[7/8] 已追加 module_param + Profile 系统"
+echo "[7/9] 已追加 module_param + 四档 Profile 系统"
+
+# ============================================
+# 7b. 注入算法优化（BBR-ACD + Pacing Scale + cong_control wrapper）
+# ============================================
+
+# 前向声明 bbrplusv3_main（在 cong_ops 之前注入）
+sed -i '/static struct tcp_congestion_ops tcp_bbrplusv3_cong_ops/i\
+static void bbrplusv3_main(struct sock *sk, const struct rate_sample *rs);' "$BBRPLUSV3_SRC"
+
+# 替换 cong_control 回调: bbr_main → bbrplusv3_main
+sed -i 's/\.cong_control.*=.*bbr_main,.*/.cong_control\t= bbrplusv3_main,/' "$BBRPLUSV3_SRC"
+
+# 追加 wrapper 函数 + 算法优化参数
+cat >> "$BBRPLUSV3_SRC" << 'BBRPLUSV3_ALGO_EOF'
+
+/* ============================================
+ * BBRPlusV3 算法优化
+ *
+ * BBR-ACD: 丢包+RTT恶化=真拥塞(降速), 丢包+RTT稳定=随机丢包(补偿)
+ * Pacing Scale: 全局 pacing rate 缩放 (BMR alpha)
+ * ============================================ */
+
+static int bbrplusv3_acd_enable;
+static int bbrplusv3_acd_rtt_factor = 125;
+static int bbrplusv3_pacing_rate_scale = 100;
+
+static void bbrplusv3_main(struct sock *sk, const struct rate_sample *rs)
+{
+	struct bbr *bbr = inet_csk_ca(sk);
+
+	bbr_main(sk, rs);
+
+	/* BBR-ACD: delay-gradient 真拥塞检测 */
+	if (bbrplusv3_acd_enable && rs->losses > 0 && rs->rtt_us > 0 &&
+	    bbr->min_rtt_us > 0) {
+		u32 threshold = bbr->min_rtt_us *
+				bbrplusv3_acd_rtt_factor / 100;
+
+		if (rs->rtt_us <= threshold) {
+			u64 rate = READ_ONCE(sk->sk_pacing_rate);
+
+			rate = rate * 105 / 100;
+			WRITE_ONCE(sk->sk_pacing_rate, rate);
+		}
+	}
+
+	/* Pacing Rate Scale (BMR alpha) */
+	if (bbrplusv3_pacing_rate_scale != 100) {
+		u64 rate = READ_ONCE(sk->sk_pacing_rate);
+
+		rate = rate * bbrplusv3_pacing_rate_scale / 100;
+		WRITE_ONCE(sk->sk_pacing_rate, rate);
+	}
+}
+
+module_param_named(acd_enable, bbrplusv3_acd_enable, int, 0644);
+MODULE_PARM_DESC(acd_enable, "BBR-ACD delay-gradient congestion detection (0=off, 1=on)");
+
+module_param_named(acd_rtt_factor, bbrplusv3_acd_rtt_factor, int, 0644);
+MODULE_PARM_DESC(acd_rtt_factor, "ACD RTT threshold in % (125=1.25x min_rtt)");
+
+module_param_named(pacing_rate_scale, bbrplusv3_pacing_rate_scale, int, 0644);
+MODULE_PARM_DESC(pacing_rate_scale, "Pacing rate scale in % (100=100%, 90=90%)");
+BBRPLUSV3_ALGO_EOF
+
+echo "[7b/9] 已注入 BBR-ACD + Pacing Scale + cong_control wrapper"
 
 # ============================================
 # 8. 修改 Kconfig 和 Makefile
@@ -344,7 +425,7 @@ if [ -f "$PRIV_FILE" ]; then
   fi
 fi
 
-echo "[8/8] 已修改 Kconfig 和 Makefile"
+echo "[8/9] 已修改 Kconfig 和 Makefile"
 
 # ============================================
 # 验证
