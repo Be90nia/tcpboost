@@ -500,6 +500,15 @@ net.ipv4.tcp_fack = 1
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.ip_local_port_range = 1024 65535
 
+# === 锐速风格 TCP 栈优化 ===
+net.ipv4.tcp_retries2 = 8
+net.ipv4.tcp_no_metrics_save = 1
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_synack_retries = 2
+net.ipv4.tcp_syn_retries = 4
+net.ipv4.tcp_adv_win_scale = 1
+net.ipv4.tcp_limit_output_bytes = $((buf_max / 4))
+
 # === 网络队列 ===
 net.core.netdev_max_backlog = 10000
 net.core.somaxconn = 65535
@@ -533,7 +542,16 @@ EOF
   fi
 
   sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1
-  info "已应用激进方案 (高性能, BDP 动态计算)"
+
+  # 锐速风格：增大初始拥塞窗口（默认 10 → 32）
+  local DEF_ROUTE
+  DEF_ROUTE=$(ip route show default 2>/dev/null | head -1)
+  if [ -n "$DEF_ROUTE" ]; then
+    ip route change $DEF_ROUTE initcwnd 32 initrwnd 32 2>/dev/null && \
+      info "初始拥塞窗口已设为 32 (initcwnd/initrwnd)" || true
+  fi
+
+  info "已应用激进方案 (高性能, BDP 动态计算 + 锐速风格 TCP 栈优化)"
 }
 
 # 恢复默认配置
