@@ -3,10 +3,18 @@
 #
 # 工作流程：
 #   1. 复制 tcp_bbr.c → tcp_bbrplusv3.c
-#   2. 修改模块名、算法名、版本号
-#   3. 调整算法参数（pacing_gain 动态化、cwnd_gain 增大、PROBE_RTT 优化）
-#   4. 添加 sysctl 可调参数（ECN/loss_thresh/beta/probe_rtt）
-#   5. 修改 Kconfig 和 Makefile 注册新算法
+#   2. 修改模块名、算法名、版本标识
+#   3. 去掉可调参数的 const 限定符（为 module_param 做准备）
+#   4. 应用 BBRPlus aggressive 参数值（默认 profile）
+#   5. PROBE_RTT 优化
+#   6. ECN/loss 参数调整
+#   7. 追加 module_param 声明 + 三档 Profile 系统
+#   8. 修改 Kconfig 和 Makefile 注册新算法
+#
+# Profile 系统（运行时切换）：
+#   echo 0 > /sys/module/tcp_bbrplusv3/parameters/profile  # conservative
+#   echo 1 > /sys/module/tcp_bbrplusv3/parameters/profile  # standard
+#   echo 2 > /sys/module/tcp_bbrplusv3/parameters/profile  # aggressive (默认)
 #
 # 前提：已应用 Xanmod BBRv3 补丁，net/ipv4/tcp_bbr.c 为 BBRv3 版本
 #
@@ -33,17 +41,19 @@ echo "目标文件: $BBRPLUSV3_SRC"
 # 1. 复制 tcp_bbr.c → tcp_bbrplusv3.c
 # ============================================
 cp "$BBR_SRC" "$BBRPLUSV3_SRC"
-echo "[1/6] 已复制 $BBR_SRC → $BBRPLUSV3_SRC"
+echo "[1/8] 已复制 $BBR_SRC → $BBRPLUSV3_SRC"
 
 # ============================================
 # 2. 修改模块名和算法标识
 # ============================================
 
-# BBR 版本号改为 3+（表示基于 BBRv3 的增强版）
-sed -i 's/#define BBR_VERSION\t\t3/#define BBR_VERSION\t\t3/' "$BBRPLUSV3_SRC"
-
 # 模块描述
 sed -i 's/MODULE_DESCRIPTION("TCP BBR (Bottleneck Bandwidth and RTT)")/MODULE_DESCRIPTION("TCP BBRPlusV3 (BBRv3 + aggressive probing, based on BBRPlus ideas)")/' "$BBRPLUSV3_SRC"
+
+# 添加 MODULE_VERSION（标识 BBRPlusV3，不改 BBR_VERSION 避免影响算法内部逻辑）
+if ! grep -q 'MODULE_VERSION' "$BBRPLUSV3_SRC" 2>/dev/null; then
+  sed -i '/MODULE_DESCRIPTION/a\MODULE_VERSION("1.0-bbrplusv3");' "$BBRPLUSV3_SRC"
+fi
 
 # 注册名：bbr → bbrplusv3
 sed -i 's/\.name\t\t= "bbr",/.name\t\t= "bbrplusv3",/' "$BBRPLUSV3_SRC"
@@ -63,75 +73,226 @@ sed -i 's/static void __exit tcp_bbr_unregister/static void __exit tcp_bbrplusv3
 sed -i 's/tcp_register_congestion_control(&tcp_bbr_cong_ops)/tcp_register_congestion_control(\&tcp_bbrplusv3_cong_ops)/' "$BBRPLUSV3_SRC"
 sed -i 's/tcp_unregister_congestion_control(&tcp_bbr_cong_ops)/tcp_unregister_congestion_control(\&tcp_bbrplusv3_cong_ops)/' "$BBRPLUSV3_SRC"
 
-echo "[2/6] 已修改模块名和注册信息"
+echo "[2/8] 已修改模块名和注册信息"
 
 # ============================================
-# 3. BBRPlus 核心算法改进
+# 3. 去掉可调参数的 const 限定符（为 module_param 做准备）
 # ============================================
 
-# 3a. pacing_gain UP: 5/4 → 3/2（更激进的带宽探测）
-#     BBRv3: BBR_UNIT * 5 / 4 = 1.25
-#     BBRPlusV3: BBR_UNIT * 3 / 2 = 1.5（BBRPlus 原版 pacing_gain = 2.89，但太激进；
-#     1.5 是 BBRPlus 思想与 BBRv3 框架的平衡点）
-sed -i 's/BBR_UNIT \* 5 \/ 4,\t\/\* UP: probe for more available bw \*\//BBR_UNIT * 3 \/ 2,\t\/\* UP: aggressive bandwidth probing (BBRPlus-style) *\//' "$BBRPLUSV3_SRC"
+# pacing_gain 数组
+sed -i 's/^static const int bbr_pacing_gain\[\]/static int bbr_pacing_gain[]/' "$BBRPLUSV3_SRC"
 
-# 3b. pacing_gain DOWN: 91/100 → 3/4（更积极地排空队列）
-#     BBRv3: BBR_UNIT * 91 / 100 = 0.91
-#     BBRPlusV3: BBR_UNIT * 3 / 4 = 0.75（与 BBRPlus 原版 drain 一致）
-sed -i 's/BBR_UNIT \* 91 \/ 100,\t\/\* DOWN: drain queue and\/or yield bw \*\//BBR_UNIT * 3 \/ 4,\t\/\* DOWN: aggressive drain (BBRPlus-style) *\//' "$BBRPLUSV3_SRC"
+# 需要可调的参数列表
+TUNABLE_PARAMS="bbr_startup_cwnd_gain bbr_cwnd_gain bbr_startup_pacing_gain \
+bbr_beta bbr_loss_thresh bbr_full_loss_cnt \
+bbr_ecn_thresh bbr_inflight_headroom \
+bbr_probe_rtt_mode_ms bbr_probe_rtt_win_ms bbr_min_rtt_win_sec"
 
-# 3c. startup_cwnd_gain: 2 → 2.5（BBRPlus 核心思想：STARTUP 时更激进地填充管道）
-#     BBRv3: BBR_UNIT * 2
-#     BBRPlusV3: BBR_UNIT * 5 / 2 = 2.5
-sed -i 's/static const int bbr_startup_cwnd_gain  = BBR_UNIT \* 2;/static const int bbr_startup_cwnd_gain  = BBR_UNIT * 5 \/ 2; \/* BBRPlus-style: more aggressive startup pipe-filling *\//' "$BBRPLUSV3_SRC"
+for param in $TUNABLE_PARAMS; do
+  sed -i -E "s/static const (int|u32) ${param} /static \1 ${param} /" "$BBRPLUSV3_SRC"
+done
 
-# 3d. bbr_beta: 30% → 20%（丢包时减少更少，保持更高吞吐）
-#     BBRv3: BBR_UNIT * 30 / 100
-#     BBRPlusV3: BBR_UNIT * 20 / 100
-sed -i 's/static const u32 bbr_beta = BBR_UNIT \* 30 \/ 100;/static const u32 bbr_beta = BBR_UNIT * 20 \/ 100; \/* BBRPlus-style: less reduction on loss *\//' "$BBRPLUSV3_SRC"
-
-# 3e. loss_thresh: 2% → 5%（丢包容忍度提高，高丢包链路不会过早降速）
-#     BBRv3: BBR_UNIT * 2 / 100
-#     BBRPlusV3: BBR_UNIT * 5 / 100
-sed -i 's/static const u32 bbr_loss_thresh = BBR_UNIT \* 2 \/ 100;  \/\* 2% loss \*\//static const u32 bbr_loss_thresh = BBR_UNIT * 5 \/ 100;  \/* 5% loss tolerance (BBRPlus-style) *\//' "$BBRPLUSV3_SRC"
-
-echo "[3/6] 已应用 BBRPlus 核心算法改进"
+echo "[3/8] 已去掉可调参数的 const 限定符"
 
 # ============================================
-# 4. PROBE_RTT 优化（200ms → 50ms，sysctl 可调）
+# 4. 应用 BBRPlus aggressive 参数值（默认 profile）
 # ============================================
 
-# BBRv3 的 PROBE_RTT 停留时间默认 200ms（bbr_probe_rtt_mode_ms）
-# 缩短到 50ms 可以减少吞吐量损失，在长肥管道上尤其明显
-# 注意：bbr_probe_rtt_mode_ms 在 BBRv3 代码中是 static const u32
-# 我们改为更高的 sysctl 可调值
-sed -i 's/static const u32 bbr_probe_rtt_mode_ms = 200;/static const u32 bbr_probe_rtt_mode_ms = 50; \/* BBRPlusV3: shorter PROBE_RTT (was 200ms) *\//' "$BBRPLUSV3_SRC"
+# 4a. pacing_gain UP: 5/4 → 3/2（更激进的带宽探测）
+sed -i 's/BBR_UNIT \* 5 \/ 4,\t\/\* UP: probe for more available bw \*\//BBR_UNIT * 3 \/ 2,\t\/* UP: aggressive bandwidth probing (BBRPlus-style) *\//' "$BBRPLUSV3_SRC"
+
+# 4b. pacing_gain DOWN: 91/100 → 3/4（更积极地排空队列）
+sed -i 's/BBR_UNIT \* 91 \/ 100,\t\/\* DOWN: drain queue and\/or yield bw \*\//BBR_UNIT * 3 \/ 4,\t\/* DOWN: aggressive drain (BBRPlus-style) *\//' "$BBRPLUSV3_SRC"
+
+# 4c. startup_cwnd_gain: 2 → 5/2（BBRPlus 核心思想：STARTUP 时更激进地填充管道）
+sed -i 's/bbr_startup_cwnd_gain.*BBR_UNIT \* 2;/bbr_startup_cwnd_gain = BBR_UNIT * 5 \/ 2;/' "$BBRPLUSV3_SRC"
+
+# 4d. bbr_beta: 30% → 20%（丢包时减少更少，保持更高吞吐）
+sed -i 's/bbr_beta = BBR_UNIT \* 30 \/ 100;/bbr_beta = BBR_UNIT * 20 \/ 100;/' "$BBRPLUSV3_SRC"
+
+# 4e. loss_thresh: 2% → 5%（丢包容忍度提高，高丢包链路不会过早降速）
+sed -i 's/bbr_loss_thresh = BBR_UNIT \* 2 \/ 100;.*/bbr_loss_thresh = BBR_UNIT * 5 \/ 100;/' "$BBRPLUSV3_SRC"
+
+echo "[4/8] 已应用 BBRPlus aggressive 参数值"
+
+# ============================================
+# 5. PROBE_RTT 优化（200→50ms, 5000→2500ms）
+# ============================================
+
+# BBRv3 的 PROBE_RTT 停留时间默认 200ms，缩短到 50ms 减少吞吐量损失
+sed -i 's/bbr_probe_rtt_mode_ms = 200;/bbr_probe_rtt_mode_ms = 50;/' "$BBRPLUSV3_SRC"
 
 # bbr_probe_rtt_win_ms: 5000 → 2500（更频繁地探测 min_rtt）
-# 这样 PROBE_RTT 每 2.5 秒进入一次（vs BBRv3 的 5 秒），
-# 但每次只停 50ms（vs BBRv3 的 200ms），总吞吐量损失更小
-sed -i 's/static const u32 bbr_probe_rtt_win_ms = 5000;/static const u32 bbr_probe_rtt_win_ms = 2500; \/* BBRPlusV3: probe RTT more often (was 5000ms) *\//' "$BBRPLUSV3_SRC"
+# 每次只停 50ms（vs BBRv3 的 200ms），总吞吐量损失更小
+sed -i 's/bbr_probe_rtt_win_ms = 5000;/bbr_probe_rtt_win_ms = 2500;/' "$BBRPLUSV3_SRC"
 
-echo "[4/6] 已优化 PROBE_RTT 参数"
+echo "[5/8] 已优化 PROBE_RTT 参数"
 
 # ============================================
-# 5. ECN 可调化
+# 6. ECN/loss 参数调整
 # ============================================
 
 # bbr_ecn_thresh: 50% → 70%（ECN 标记容忍度提高）
-# BBRv3 默认 50% 太保守，在高 ECN 标记链路会过早降速
-sed -i 's/static const u32 bbr_ecn_thresh = BBR_UNIT \* 1 \/ 2;  \/\* 1\/2 = 50% \*\//static const u32 bbr_ecn_thresh = BBR_UNIT * 7 \/ 10;  \/* 7\/10 = 70% ECN tolerance (BBRPlus-style) *\//' "$BBRPLUSV3_SRC"
+sed -i 's/bbr_ecn_thresh = BBR_UNIT \* 1 \/ 2;.*/bbr_ecn_thresh = BBR_UNIT * 7 \/ 10;/' "$BBRPLUSV3_SRC"
 
 # bbr_full_loss_cnt: 6 → 3（更快响应严重丢包退出 STARTUP）
-sed -i 's/static const u32 bbr_full_loss_cnt = 6;/static const u32 bbr_full_loss_cnt = 3; \/* BBRPlusV3: faster STARTUP exit on heavy loss *\//' "$BBRPLUSV3_SRC"
+sed -i 's/bbr_full_loss_cnt = 6;/bbr_full_loss_cnt = 3;/' "$BBRPLUSV3_SRC"
 
 # bbr_inflight_headroom: 15% → 10%（保留更少的 headroom，更激进利用带宽）
-sed -i 's/static const u32 bbr_inflight_headroom = BBR_UNIT \* 15 \/ 100;/static const u32 bbr_inflight_headroom = BBR_UNIT * 10 \/ 100; \/* BBRPlusV3: less headroom reserved *\//' "$BBRPLUSV3_SRC"
+sed -i 's/bbr_inflight_headroom = BBR_UNIT \* 15 \/ 100;/bbr_inflight_headroom = BBR_UNIT * 10 \/ 100;/' "$BBRPLUSV3_SRC"
 
-echo "[5/6] 已调整 ECN/loss 参数"
+echo "[6/8] 已调整 ECN/loss 参数"
 
 # ============================================
-# 6. 修改 Kconfig 和 Makefile
+# 7. 追加 module_param 声明 + 三档 Profile 系统
+# ============================================
+
+cat >> "$BBRPLUSV3_SRC" << 'BBRPLUSV3_PARAMS_EOF'
+
+/* ============================================
+ * BBRPlusV3: Module Parameters + Profile System
+ *
+ * 运行时可通过 /sys/module/tcp_bbrplusv3/parameters/ 调整
+ *
+ * Profile 切换（批量更新所有参数）:
+ *   echo 0 > .../profile  (conservative: 接近 BBRv3 原版)
+ *   echo 1 > .../profile  (standard: 温和增强)
+ *   echo 2 > .../profile  (aggressive: 激进探测，默认)
+ *
+ * 单独参数也可覆盖 profile 值（BBR_UNIT = 256）:
+ *   echo 76 > .../beta          (76/256 = 30%)
+ *   echo 13 > .../loss_thresh   (13/256 = 5%)
+ * ============================================ */
+
+/* Profile 枚举 */
+#define BBRPLUSV3_PROFILE_CONSERVATIVE	0
+#define BBRPLUSV3_PROFILE_STANDARD	1
+#define BBRPLUSV3_PROFILE_AGGRESSIVE	2
+
+/* Profile 参数预设表 */
+struct bbrplusv3_profile_params {
+	int  pacing_gain_up;
+	int  pacing_gain_down;
+	int  startup_cwnd_gain;
+	u32  beta;
+	u32  loss_thresh;
+	u32  probe_rtt_mode_ms;
+	u32  probe_rtt_win_ms;
+	u32  ecn_thresh;
+	u32  full_loss_cnt;
+	u32  inflight_headroom;
+};
+
+static const struct bbrplusv3_profile_params
+bbrplusv3_profile_table[] = {
+	[BBRPLUSV3_PROFILE_CONSERVATIVE] = {
+		.pacing_gain_up		= BBR_UNIT * 5 / 4,
+		.pacing_gain_down	= BBR_UNIT * 91 / 100,
+		.startup_cwnd_gain	= BBR_UNIT * 2,
+		.beta			= BBR_UNIT * 30 / 100,
+		.loss_thresh		= BBR_UNIT * 2 / 100,
+		.probe_rtt_mode_ms	= 200,
+		.probe_rtt_win_ms	= 5000,
+		.ecn_thresh		= BBR_UNIT * 1 / 2,
+		.full_loss_cnt		= 6,
+		.inflight_headroom	= BBR_UNIT * 15 / 100,
+	},
+	[BBRPLUSV3_PROFILE_STANDARD] = {
+		.pacing_gain_up		= BBR_UNIT * 11 / 8,
+		.pacing_gain_down	= BBR_UNIT * 17 / 20,
+		.startup_cwnd_gain	= BBR_UNIT * 9 / 4,
+		.beta			= BBR_UNIT * 25 / 100,
+		.loss_thresh		= BBR_UNIT * 35 / 1000,
+		.probe_rtt_mode_ms	= 100,
+		.probe_rtt_win_ms	= 3000,
+		.ecn_thresh		= BBR_UNIT * 3 / 5,
+		.full_loss_cnt		= 4,
+		.inflight_headroom	= BBR_UNIT * 12 / 100,
+	},
+	[BBRPLUSV3_PROFILE_AGGRESSIVE] = {
+		.pacing_gain_up		= BBR_UNIT * 3 / 2,
+		.pacing_gain_down	= BBR_UNIT * 3 / 4,
+		.startup_cwnd_gain	= BBR_UNIT * 5 / 2,
+		.beta			= BBR_UNIT * 20 / 100,
+		.loss_thresh		= BBR_UNIT * 5 / 100,
+		.probe_rtt_mode_ms	= 50,
+		.probe_rtt_win_ms	= 2500,
+		.ecn_thresh		= BBR_UNIT * 7 / 10,
+		.full_loss_cnt		= 3,
+		.inflight_headroom	= BBR_UNIT * 10 / 100,
+	},
+};
+
+static int bbrplusv3_profile = BBRPLUSV3_PROFILE_AGGRESSIVE;
+
+/* Profile 切换回调：批量更新所有参数 */
+static int bbrplusv3_profile_set(const char *val,
+				  const struct kernel_param *kp)
+{
+	int old = bbrplusv3_profile;
+	int ret = param_set_int(val, kp);
+	const struct bbrplusv3_profile_params *p;
+
+	if (ret)
+		return ret;
+
+	if (bbrplusv3_profile < 0 ||
+	    bbrplusv3_profile > BBRPLUSV3_PROFILE_AGGRESSIVE) {
+		bbrplusv3_profile = old;
+		return -EINVAL;
+	}
+
+	p = &bbrplusv3_profile_table[bbrplusv3_profile];
+
+	bbr_pacing_gain[BBR_BW_PROBE_UP]	= p->pacing_gain_up;
+	bbr_pacing_gain[BBR_BW_PROBE_DOWN]	= p->pacing_gain_down;
+	bbr_startup_cwnd_gain		= p->startup_cwnd_gain;
+	bbr_beta			= p->beta;
+	bbr_loss_thresh			= p->loss_thresh;
+	bbr_probe_rtt_mode_ms		= p->probe_rtt_mode_ms;
+	bbr_probe_rtt_win_ms		= p->probe_rtt_win_ms;
+	bbr_ecn_thresh			= p->ecn_thresh;
+	bbr_full_loss_cnt		= p->full_loss_cnt;
+	bbr_inflight_headroom		= p->inflight_headroom;
+
+	pr_info("BBRPlusV3: profile switched to %d (%s)\n",
+		bbrplusv3_profile,
+		bbrplusv3_profile == BBRPLUSV3_PROFILE_CONSERVATIVE ?
+			"conservative" :
+		bbrplusv3_profile == BBRPLUSV3_PROFILE_STANDARD ?
+			"standard" : "aggressive");
+	return 0;
+}
+
+static const struct kernel_param_ops bbrplusv3_profile_ops = {
+	.set = bbrplusv3_profile_set,
+	.get = param_get_int,
+};
+
+module_param_cb(profile, &bbrplusv3_profile_ops,
+		&bbrplusv3_profile, 0644);
+MODULE_PARM_DESC(profile,
+	"BBRPlusV3 profile: 0=conservative, 1=standard, 2=aggressive (default)");
+
+/* 单独可调参数（覆盖 profile 值，BBR_UNIT = 256） */
+module_param_named(pacing_gain_up,
+	bbr_pacing_gain[BBR_BW_PROBE_UP], int, 0644);
+module_param_named(pacing_gain_down,
+	bbr_pacing_gain[BBR_BW_PROBE_DOWN], int, 0644);
+module_param_named(startup_cwnd_gain, bbr_startup_cwnd_gain, int, 0644);
+module_param_named(beta, bbr_beta, uint, 0644);
+module_param_named(loss_thresh, bbr_loss_thresh, uint, 0644);
+module_param_named(probe_rtt_mode_ms, bbr_probe_rtt_mode_ms, uint, 0644);
+module_param_named(probe_rtt_win_ms, bbr_probe_rtt_win_ms, uint, 0644);
+module_param_named(ecn_thresh, bbr_ecn_thresh, uint, 0644);
+module_param_named(full_loss_cnt, bbr_full_loss_cnt, uint, 0644);
+module_param_named(inflight_headroom, bbr_inflight_headroom, uint, 0644);
+BBRPLUSV3_PARAMS_EOF
+
+echo "[7/8] 已追加 module_param + Profile 系统"
+
+# ============================================
+# 8. 修改 Kconfig 和 Makefile
 # ============================================
 
 # 添加 Kconfig 选项（在 net/ipv4/Kconfig 中 TCP_CONG_BBR 后面插入）
@@ -140,9 +301,6 @@ if [ ! -f "$KCONFIG_FILE" ]; then
   echo "警告: 未找到 $KCONFIG_FILE，跳过 Kconfig 修改"
 else
 if ! grep -q "CONFIG_TCP_CONG_BBRPLUSV3" "$KCONFIG_FILE" 2>/dev/null; then
-  # 找到 BBR 的 Kconfig 条目，在其后插入 bbrplusv3
-  # 注意：BBRv3 补丁会把 config TCP_CONG_BBR 改成 BBRv3 的描述
-  # 我们需要在其后面追加 bbrplusv3 的条目
   sed -i '/config TCP_CONG_BBR$/,/^[^[:space:]]/{
     /^[^[:space:]]/a\
 \
@@ -153,6 +311,9 @@ config TCP_CONG_BBRPLUSV3\
 	help\
 	  BBRPlusV3 combines Google BBRv3 with BBRPlus aggressive probing\
 	  strategies. Optimized for high-loss, high-BDP links.\
+	  \
+	  Supports runtime profile switching (conservative/standard/aggressive)\
+	  via /sys/module/tcp_bbrplusv3/parameters/profile.\
 	  \
 	  Recommended for VPS/proxy scenarios with packet loss 1-5%.\
 	  \
@@ -183,7 +344,7 @@ if [ -f "$PRIV_FILE" ]; then
   fi
 fi
 
-echo "[6/6] 已修改 Kconfig 和 Makefile"
+echo "[8/8] 已修改 Kconfig 和 Makefile"
 
 # ============================================
 # 验证
@@ -192,25 +353,45 @@ echo ""
 echo "=== 验证 bbrplusv3 创建结果 ==="
 echo "--- 注册名 ---"
 grep '\.name' "$BBRPLUSV3_SRC" | head -3
-echo "--- pacing_gain 数组 ---"
+echo ""
+echo "--- MODULE 版本 ---"
+grep -E 'MODULE_DESCRIPTION|MODULE_VERSION' "$BBRPLUSV3_SRC"
+echo ""
+echo "--- pacing_gain 数组（aggressive 默认值）---"
 grep -A4 'bbr_pacing_gain\[' "$BBRPLUSV3_SRC" | head -5
-echo "--- 关键参数 ---"
-grep -E 'bbr_startup_cwnd_gain|bbr_beta|bbr_loss_thresh|bbr_probe_rtt_mode_ms|bbr_probe_rtt_win_ms|bbr_ecn_thresh|bbr_full_loss_cnt|bbr_inflight_headroom' "$BBRPLUSV3_SRC"
+echo ""
+echo "--- 关键参数（aggressive 默认值）---"
+grep -E 'bbr_startup_cwnd_gain =|bbr_beta =|bbr_loss_thresh =|bbr_probe_rtt_mode_ms =|bbr_probe_rtt_win_ms =|bbr_ecn_thresh =|bbr_full_loss_cnt =|bbr_inflight_headroom =' "$BBRPLUSV3_SRC" | grep -v 'profile_table\|struct\|\.' | head -10
+echo ""
+echo "--- Profile 系统 ---"
+PARAM_COUNT=$(grep -c 'module_param' "$BBRPLUSV3_SRC")
+echo "  $PARAM_COUNT 个 module_param 声明"
+grep 'MODULE_PARM_DESC(profile' "$BBRPLUSV3_SRC"
+echo ""
 echo "--- Makefile ---"
 grep bbrplusv3 net/ipv4/Makefile
-echo "--- MODULE ---"
-grep -E 'MODULE_DESCRIPTION|MODULE_VERSION' "$BBRPLUSV3_SRC"
 
 echo ""
 echo "=== BBRPlusV3 创建完成 ==="
-echo "算法参数对比:"
-echo "  pacing_gain UP:    1.25 → 1.50 (BBRPlus-style 激进探测)"
-echo "  pacing_gain DOWN:  0.91 → 0.75 (BBRPlus-style 积极排空)"
-echo "  startup_cwnd_gain: 2.0  → 2.5  (更激进填充管道)"
-echo "  bbr_beta:          30%  → 20%  (丢包时减少更少)"
-echo "  loss_thresh:       2%   → 5%   (丢包容忍度提高)"
-echo "  probe_rtt_mode_ms: 200  → 50   (PROBE_RTT 停留更短)"
-echo "  probe_rtt_win_ms:  5000 → 2500 (PROBE_RTT 更频繁)"
-echo "  ecn_thresh:        50%  → 70%  (ECN 容忍度提高)"
-echo "  full_loss_cnt:     6    → 3    (更快退出 STARTUP)"
-echo "  inflight_headroom: 15%  → 10%  (更少保留 headroom)"
+echo ""
+echo "Profile 使用方式:"
+echo "  echo 0 > /sys/module/tcp_bbrplusv3/parameters/profile  # conservative"
+echo "  echo 1 > /sys/module/tcp_bbrplusv3/parameters/profile  # standard"
+echo "  echo 2 > /sys/module/tcp_bbrplusv3/parameters/profile  # aggressive (默认)"
+echo ""
+echo "单独参数调整（BBR_UNIT = 256）:"
+echo "  cat  /sys/module/tcp_bbrplusv3/parameters/beta"
+echo "  echo 76 > /sys/module/tcp_bbrplusv3/parameters/beta   # 30%"
+echo ""
+echo "Profile 参数对比:"
+echo "                     conservative   standard    aggressive"
+echo "  pacing_gain UP:    1.25 (320)     1.375 (352) 1.50 (384)"
+echo "  pacing_gain DOWN:  0.91 (232)     0.85 (217)  0.75 (192)"
+echo "  startup_cwnd_gain: 2.0 (512)      2.25 (576)  2.50 (640)"
+echo "  beta:              30% (76)       25% (64)    20% (51)"
+echo "  loss_thresh:       2% (5)         3.5% (8)    5% (12)"
+echo "  probe_rtt_mode_ms: 200            100         50"
+echo "  probe_rtt_win_ms:  5000           3000        2500"
+echo "  ecn_thresh:        50% (128)      60% (153)   70% (179)"
+echo "  full_loss_cnt:     6              4           3"
+echo "  inflight_headroom: 15% (38)       12% (30)    10% (25)"
