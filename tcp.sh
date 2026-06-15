@@ -366,11 +366,10 @@ uninstall_kernel() {
 # 基于跨太平洋真实链路测试验证 (6.12.90 tsunami-v3 内核):
 #   loss_thresh=30%: 丢包 30% 以下不触发 inflight_lo 降速
 #   beta=80%: 即使触发也只降 20%
-#   min_pacing_rate=100Mbps: 保底 pacing，防 STARTUP 早退
-# 测试结果 (VPS 199.115.231.188, RTT ~161ms):
-#   单流下载: 53.5 Mbps (cubic 仅 0.5)
-#   多流下载: 77.7 Mbps
-#   多流上传: 120.5 Mbps
+#   min_pacing_rate: 保底 pacing rate，防 STARTUP 早退（默认关闭）
+# 测试结果 (跨太平洋链路, RTT ~161ms, 6.12.90 内核):
+#   单流下载: vs cubic 提升 10-100x (随网络波动)
+#   多流上传: 120+ Mbps
 apply_bbrplusv3_params() {
   local param_dir="/sys/module/tcp_bbrplusv3/parameters"
   if [ ! -d "$param_dir" ]; then
@@ -385,9 +384,12 @@ apply_bbrplusv3_params() {
   echo 77 > "$param_dir/loss_thresh" 2>/dev/null || true
   echo 204 > "$param_dir/beta" 2>/dev/null || true
 
-  # min_pacing_rate: 100Mbps = 12500000 bytes/sec
+  # min_pacing_rate: 默认关闭(0)，用户根据 VPS 带宽设置
+  # 用法: ./tcp.sh set-min-pacing-rate <Mbps>
+  # 1Gbps VPS 推荐: set-min-pacing-rate 500
+  # 跨太平洋高丢包链路推荐: set-min-pacing-rate 100
   if [ -w "$param_dir/min_pacing_rate" ]; then
-    echo 12500000 > "$param_dir/min_pacing_rate" 2>/dev/null || true
+    echo 0 > "$param_dir/min_pacing_rate" 2>/dev/null || true
   fi
   # gc_enable: 默认关闭 (6.12.90 上 GC 打破 UP/DOWN 平衡)
   if [ -w "$param_dir/gc_enable" ]; then
@@ -397,15 +399,14 @@ apply_bbrplusv3_params() {
   mkdir -p "$CONF_DIR"
   cat > "$CONF_DIR/bbrplusv3.conf" <<'EOF'
 # BBRPlusV3 科学上网最优参数 (6.12.90 tsunami-v3 测试验证)
-# profile=2(aggressive), loss_thresh=30%, beta=80%, min_pacing=100Mbps
+# profile=2(aggressive), loss_thresh=30%, beta=80%
 profile=2
 loss_thresh=77
 beta=204
-min_pacing_rate=12500000
 gc_enable=0
 EOF
 
-  info "BBRPlusV3 参数已设置 (loss=30%, beta=80%, min_pacing=100Mbps)"
+  info "BBRPlusV3 参数已设置 (loss=30%, beta=80%, gc=off)"
 }
 
 # 设置 min_pacing_rate（保底速率，防单流 STARTUP 早退）
@@ -451,7 +452,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'PARAM_DIR=/sys/module/tcp_bbrplusv3/parameters; [ -d "$PARAM_DIR" ] && echo 2 > $PARAM_DIR/profile && echo 77 > $PARAM_DIR/loss_thresh && echo 204 > $PARAM_DIR/beta && echo 12500000 > $PARAM_DIR/min_pacing_rate 2>/dev/null && echo 0 > $PARAM_DIR/gc_enable 2>/dev/null || true'
+ExecStart=/bin/bash -c 'PARAM_DIR=/sys/module/tcp_bbrplusv3/parameters; [ -d "$PARAM_DIR" ] && echo 2 > $PARAM_DIR/profile && echo 77 > $PARAM_DIR/loss_thresh && echo 204 > $PARAM_DIR/beta && echo 0 > $PARAM_DIR/gc_enable 2>/dev/null || true'
 
 [Install]
 WantedBy=multi-user.target
