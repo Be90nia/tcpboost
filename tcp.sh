@@ -251,38 +251,44 @@ get_latest_version() {
 # 下载内核包
 download_kernel() {
   local version="$1"
-  local tmpdir
-  tmpdir=$(mktemp -d)
+
+  KERNEL_TMPDIR=$(mktemp -d)
 
   info "下载 TCPBoost 内核 ${version}..."
 
   case "$PKG_FMT" in
     deb)
-      local files="linux-headers-${version}-tcpboost_${version}-tcpboost-1_amd64.deb
-                   linux-image-${version}-tcpboost_${version}-tcpboost-1_amd64.deb
-                   linux-libc-dev_${version}-tcpboost-1_amd64.deb"
+      local files="linux-image-${version}-tcpboost_${version}-1_amd64.deb
+                   linux-libc-dev_${version}-1_amd64.deb"
       for f in $files; do
-        dl "$(get_release_url "$version" "$f")" "${tmpdir}/${f}" || {
-          error "下载失败: $f"
-          rm -rf "$tmpdir"
-          exit 1
+        dl "$(get_release_url "$version" "$f")" "${KERNEL_TMPDIR}/${f}" || {
+          warn "下载失败: $f（可能不存在，跳过）"
         }
       done
+      # 验证至少有 linux-image
+      if ! ls "${KERNEL_TMPDIR}"/linux-image-*.deb >/dev/null 2>&1; then
+        error "下载失败: linux-image deb 包"
+        rm -rf "$KERNEL_TMPDIR"
+        exit 1
+      fi
       ;;
     rpm)
-      local files="linux-headers-${version}-tcpboost-${version}_tcpboost-1.x86_64.rpm
-                   linux-image-${version}-tcpboost-${version}_tcpboost-1.x86_64.rpm"
+      local files="kernel-${version}_tcpboost-2.x86_64.rpm
+                   kernel-devel-${version}_tcpboost-2.x86_64.rpm"
       for f in $files; do
-        dl "$(get_release_url "$version" "$f")" "${tmpdir}/${f}" || {
-          error "下载失败: $f"
-          rm -rf "$tmpdir"
-          exit 1
+        dl "$(get_release_url "$version" "$f")" "${KERNEL_TMPDIR}/${f}" || {
+          warn "下载失败: $f（可能不存在，跳过）"
         }
       done
+      if ! ls "${KERNEL_TMPDIR}"/kernel-*.rpm >/dev/null 2>&1; then
+        error "下载失败: kernel rpm 包"
+        rm -rf "$KERNEL_TMPDIR"
+        exit 1
+      fi
       ;;
   esac
 
-  echo "$tmpdir"
+  echo "$KERNEL_TMPDIR"
 }
 
 # 安装内核
@@ -298,21 +304,20 @@ install_kernel() {
   info "包格式: ${PKG_FMT}"
   echo ""
 
-  local tmpdir
-  tmpdir=$(download_kernel "$version")
+  download_kernel "$version"
 
   info "安装内核 ${version}-tcpboost..."
 
   case "$PKG_FMT" in
     deb)
-      dpkg -i "${tmpdir}"/*.deb
+      dpkg -i "${KERNEL_TMPDIR}"/*.deb
       ;;
     rpm)
-      dnf install -y "${tmpdir}"/*.rpm
+      dnf install -y "${KERNEL_TMPDIR}"/*.rpm
       ;;
   esac
 
-  rm -rf "$tmpdir"
+  rm -rf "$KERNEL_TMPDIR"
 
   # 更新 GRUB
   if command -v update-grub >/dev/null 2>&1; then
