@@ -378,29 +378,42 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 	 * RTT 公平性 +50%, 重传率 -26%, 延迟 -57%
 	 */
 	if (bbrplusv3_gc_enable && rs->rtt_us > 0 &&
-	    bbr->min_rtt_us > 0 && bbr->mode == BBR_PROBE_BW) {
+	    bbr->min_rtt_us > 0) {
 		u32 min_rtt = bbr->min_rtt_us;
+		u64 omega = 0;
 
-		if (rs->rtt_us > min_rtt) {
-			u64 omega, w2, w4, adaptive_gain, gc_rate;
-
-			/* ω = (rtt - min_rtt) / min_rtt, clamp [0,1] */
+		if (rs->rtt_us > min_rtt)
 			omega = (u64)(rs->rtt_us - min_rtt) *
 				BBR_UNIT / min_rtt;
-			if (omega > BBR_UNIT)
-				omega = BBR_UNIT;
-			/* gamma correction: Pdown = 1.0 - 0.5 * ω^4 */
-			w2 = omega * omega / BBR_UNIT;
-			w4 = w2 * w2 / BBR_UNIT;
-			adaptive_gain = BBR_UNIT -
+		if (omega > BBR_UNIT)
+			omega = BBR_UNIT;
+
+		/* gamma correction: Pdown = 1.0 - 0.5 * ω^4 */
+		{
+			u64 w2 = omega * omega / BBR_UNIT;
+			u64 w4 = w2 * w2 / BBR_UNIT;
+			u64 adaptive_gain = BBR_UNIT -
 				(BBR_UNIT / 2) * w4 / BBR_UNIT;
-			gc_rate = bbr->bw * adaptive_gain / BBR_UNIT;
-			if (bbrplusv3_min_pacing_rate > 0 &&
-			    gc_rate < bbrplusv3_min_pacing_rate)
-				gc_rate = bbrplusv3_min_pacing_rate;
-			WRITE_ONCE(sk->sk_pacing_rate,
-				   min_t(u64, gc_rate,
-					 sk->sk_max_pacing_rate));
+			int default_down =
+				bbr_pacing_gain[BBR_BW_PROBE_DOWN];
+
+			/* 只在 adaptive > default DOWN 时补偿(单流提速)
+			 * 多流时 adaptive < default → 不修改(保持默认)
+			 */
+			if (default_down > 0 &&
+			    adaptive_gain > (u64)default_down) {
+				u64 cur_rate =
+					READ_ONCE(sk->sk_pacing_rate);
+				u64 gc_rate = cur_rate *
+					adaptive_gain / default_down;
+
+				if (bbrplusv3_min_pacing_rate > 0 &&
+				    gc_rate < bbrplusv3_min_pacing_rate)
+					gc_rate = bbrplusv3_min_pacing_rate;
+				WRITE_ONCE(sk->sk_pacing_rate,
+					   min_t(u64, gc_rate,
+						 sk->sk_max_pacing_rate));
+			}
 		}
 	}
 }
