@@ -6,7 +6,7 @@ on:
       kernel_version:
         description: '内核版本 (如 6.12.73)'
         required: false
-        default: '6.12.73'
+        default: '6.12.90'
       force_build:
         description: '强制构建 (跳过版本检查)'
         required: false
@@ -33,6 +33,15 @@ jobs:
           if [ -z "$LATEST" ]; then
             LATEST="${{ env.KERNEL_VERSION }}"
           fi
+
+          # Ensure version >= 6.12.90 (create_bbrplusv3.sh sed patterns
+          # are calibrated for 6.12.90+ BBRv3 source code)
+          MIN_VERSION="6.12.90"
+          if printf '%s\n' "$MIN_VERSION" "$LATEST" | sort -V | head -1 | grep -q "$MIN_VERSION"; then
+            echo "kernel.org returned $LATEST < $MIN_VERSION, using minimum"
+            LATEST="$MIN_VERSION"
+          fi
+
           echo "latest_version=$LATEST" >> $GITHUB_OUTPUT
           echo "最新版本: $LATEST"
 
