@@ -481,14 +481,16 @@ cleanup_kernels() {
   ls /boot/vmlinuz-* 2>/dev/null | sed 's|.*/vmlinuz-|    |' || echo "    (无)"
 }
 
-# BBRPlusV3 参数设置（科学上网场景最优配置）
-# 基于跨太平洋真实链路测试验证 (6.12.90 tsunami-v3 内核):
-#   loss_thresh=30%: 丢包 30% 以下不触发 inflight_lo 降速
-#   beta=80%: 即使触发也只降 20%
-#   min_pacing_rate: 保底 pacing rate，防 STARTUP 早退（默认关闭）
-# 测试结果 (跨太平洋链路, RTT ~161ms, 6.12.90 内核):
-#   单流下载: vs cubic 提升 10-100x (随网络波动)
-#   多流上传: 120+ Mbps
+# BBRPlusV3 参数设置（科学上网平衡优化配置）
+# 基于 BBRv3 核心机制 + 跨太平洋链路断流根因分析:
+#   保留: STARTUP 激进探测(startup_pacing_gain=2.885, cwnd_gain=2.5)
+#   保留: PROBE_BW UP 激进(pacing_gain_up=1.5) — 跨太平洋带宽探测优势
+#   保留: min_rtt_win=20s — 长 RTT 链路 min_rtt 估值稳定
+#   调整: loss_thresh=15% — 容忍跨太平洋正常丢包(1-5%)，真实拥塞(>15%)降速
+#   调整: beta=30% — BBRPlus 经典值，丢包后恢复 70%
+#   调整: pacing_gain_down=0.85 — 减少下载速率周期性波动(原 0.75)
+#   调整: probe_rtt 每5s/100ms — 减少游戏延迟峰值频率和深度(原 2.5s/50ms)
+#   测试基线 (跨太平洋链路, RTT ~161ms): vs cubic 提升 10-100x
 apply_bbrplusv3_params() {
   local param_dir="/sys/module/tcp_bbrplusv3/parameters"
   if [ ! -d "$param_dir" ]; then
@@ -499,9 +501,20 @@ apply_bbrplusv3_params() {
     return 0
   fi
 
+  # 1. aggressive profile 作为基线（保留 STARTUP/PROBE_BW UP 激进探测优势）
   echo 2 > "$param_dir/profile" 2>/dev/null || true
-  echo 77 > "$param_dir/loss_thresh" 2>/dev/null || true
-  echo 204 > "$param_dir/beta" 2>/dev/null || true
+
+  # 2. 平衡优化覆盖（在 aggressive 基线上调整稳定性参数）
+  # loss_thresh: 30%→15% (38/256) — 容忍跨太平洋正常丢包(1-5%)，真实拥塞(>15%)降速
+  echo 38 > "$param_dir/loss_thresh" 2>/dev/null || true
+  # beta: 80%→30% (76/256) — BBRPlus 经典值，丢包后恢复 70%
+  echo 76 > "$param_dir/beta" 2>/dev/null || true
+  # pacing_gain_down: 0.75→0.85 (217/256) — PROBE_BW DOWN 阶段速率保持 85%，减少下载波动
+  echo 217 > "$param_dir/pacing_gain_down" 2>/dev/null || true
+  # probe_rtt_mode_ms: 50→100 — PROBE_RTT 持续时间减半深度，cwnd=4 窗口缩短
+  echo 100 > "$param_dir/probe_rtt_mode_ms" 2>/dev/null || true
+  # probe_rtt_win_ms: 2500→5000 — PROBE_RTT 触发频率减半，游戏延迟峰值减少
+  echo 5000 > "$param_dir/probe_rtt_win_ms" 2>/dev/null || true
 
   # min_pacing_rate: 默认关闭(0)，用户根据 VPS 带宽设置
   # 用法: ./tcp.sh set-min-pacing-rate <Mbps>
@@ -517,15 +530,19 @@ apply_bbrplusv3_params() {
 
   mkdir -p "$CONF_DIR"
   cat > "$CONF_DIR/bbrplusv3.conf" <<'EOF'
-# BBRPlusV3 科学上网最优参数 (6.12.90 tsunami-v3 测试验证)
-# profile=2(aggressive), loss_thresh=30%, beta=80%
+# BBRPlusV3 科学上网平衡优化参数
+# 保留 STARTUP/PROBE_BW_UP 激进探测优势
+# 调整 loss/beta/pacing_down/PROBE_RTT 消除断流根因
 profile=2
-loss_thresh=77
-beta=204
+loss_thresh=38
+beta=76
+pacing_gain_down=217
+probe_rtt_mode_ms=100
+probe_rtt_win_ms=5000
 gc_enable=0
 EOF
 
-  info "BBRPlusV3 参数已设置 (loss=30%, beta=80%, gc=off)"
+  info "BBRPlusV3 参数已设置 (loss=15%, beta=30%, pacing_down=0.85, probe_rtt=5s/100ms, gc=off)"
 }
 
 # 设置 min_pacing_rate（保底速率，防单流 STARTUP 早退）
@@ -571,7 +588,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'PARAM_DIR=/sys/module/tcp_bbrplusv3/parameters; [ -d "$PARAM_DIR" ] && echo 2 > $PARAM_DIR/profile && echo 77 > $PARAM_DIR/loss_thresh && echo 204 > $PARAM_DIR/beta && echo 0 > $PARAM_DIR/gc_enable 2>/dev/null || true'
+ExecStart=/bin/bash -c 'PARAM_DIR=/sys/module/tcp_bbrplusv3/parameters; [ -d "$PARAM_DIR" ] && echo 2 > $PARAM_DIR/profile && echo 38 > $PARAM_DIR/loss_thresh && echo 76 > $PARAM_DIR/beta && echo 217 > $PARAM_DIR/pacing_gain_down && echo 100 > $PARAM_DIR/probe_rtt_mode_ms && echo 5000 > $PARAM_DIR/probe_rtt_win_ms && echo 0 > $PARAM_DIR/gc_enable 2>/dev/null || true'
 
 [Install]
 WantedBy=multi-user.target
@@ -714,16 +731,17 @@ net.ipv4.tcp_moderate_rcvbuf = 1
 net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_sack = 1
-net.ipv4.tcp_fack = 1
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.ip_local_port_range = 1024 65535
 
-# === 锐速风格 TCP 栈优化 ===
-net.ipv4.tcp_retries2 = 8
+# === 锐速风格 TCP 栈优化（稳定性修正） ===
+# tcp_retries2: 默认 15，过低会导致连接在临时拥塞时被过早杀死
+# tcp_synack_retries/syn_retries: 必须足够大以覆盖跨太平洋 SYN 丢包重传
+net.ipv4.tcp_retries2 = 15
 net.ipv4.tcp_no_metrics_save = 1
 net.ipv4.tcp_fin_timeout = 15
-net.ipv4.tcp_synack_retries = 2
-net.ipv4.tcp_syn_retries = 4
+net.ipv4.tcp_synack_retries = 5
+net.ipv4.tcp_syn_retries = 6
 net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_limit_output_bytes = $((buf_max / 4))
 
@@ -735,10 +753,11 @@ net.ipv4.tcp_max_tw_buckets = 10000
 net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_tw_recycle = 0
 
-# === Keepalive ===
-net.ipv4.tcp_keepalive_time = 600
-net.ipv4.tcp_keepalive_intvl = 30
-net.ipv4.tcp_keepalive_probes = 10
+# === Keepalive（稳定性修正） ===
+# 空闲 30 分钟后开始探测，总超时 30min + 9*60s = 39min（原 15min 过激进）
+net.ipv4.tcp_keepalive_time = 1800
+net.ipv4.tcp_keepalive_intvl = 60
+net.ipv4.tcp_keepalive_probes = 9
 EOF
 
   # limits.conf 调优
@@ -773,7 +792,7 @@ EOF
       info "初始拥塞窗口已设为 32 (initcwnd/initrwnd)" || true
   fi
 
-  info "已应用激进方案 (bbrplusv3 + 30%/80% + 锐速风格 TCP 栈优化)"
+  info "已应用激进方案 (bbrplusv3 15%/30% 平衡优化 + 锐速风格 TCP 栈优化)"
   echo ""
   echo -e "  ${CYAN}无感切换已启用:${NC}"
   echo "    xray / sing-box / 通用网络 → 自动使用 BBRPlusV3"
@@ -913,7 +932,7 @@ smart_recommend() {
     modprobe tcp_brutal 2>/dev/null && info "已加载 tcp_brutal（Hysteria2 可用）"
   fi
 
-  echo -e "  ${GREEN}→ 应用 BBRPlusV3 (30%/80%) 激进方案${NC}"
+  echo -e "  ${GREEN}→ 应用 BBRPlusV3 (15%/30%) 平衡优化配置${NC}"
   echo ""
 
   # 直接应用激进方案
@@ -957,16 +976,22 @@ show_algorithm_status() {
   if [ "$current_algo" = "bbrplusv3" ]; then
     local param_dir="/sys/module/tcp_bbrplusv3/parameters"
     if [ -d "$param_dir" ]; then
-      local lt beta mpr gc
+      local lt beta mpr gc pgd prt_mode prt_win
       lt=$(cat "$param_dir/loss_thresh" 2>/dev/null || echo "?")
       beta=$(cat "$param_dir/beta" 2>/dev/null || echo "?")
       mpr=$(cat "$param_dir/min_pacing_rate" 2>/dev/null || echo "?")
       gc=$(cat "$param_dir/gc_enable" 2>/dev/null || echo "?")
+      pgd=$(cat "$param_dir/pacing_gain_down" 2>/dev/null || echo "?")
+      prt_mode=$(cat "$param_dir/probe_rtt_mode_ms" 2>/dev/null || echo "?")
+      prt_win=$(cat "$param_dir/probe_rtt_win_ms" 2>/dev/null || echo "?")
       local lt_pct=$((lt * 100 / 256))
       local beta_pct=$((beta * 100 / 256))
       local mpr_mb=$((mpr * 8 / 1000000))
+      local pgd_pct=$((pgd * 100 / 256))
       echo "  loss_thresh:    ${lt} (${lt_pct}%)"
       echo "  beta:           ${beta} (${beta_pct}%)"
+      echo "  pacing_down:    ${pgd} (${pgd_pct}%)"
+      echo "  probe_rtt:      ${prt_win}ms周期/${prt_mode}ms持续"
       if [ "$mpr" = "?" ] || [ "$mpr" = "0" ]; then
         echo "  min_pacing_rate: off"
       else
@@ -1062,7 +1087,7 @@ show_menu() {
   echo "     bbrplusv3 + 激进 sysctl + 锐速风格 TCP 栈"
   echo ""
   echo "  4) 激进方案  科学上网推荐"
-  echo "     bbrplusv3 30%/80% + 锐速风格 + 可设保底速率"
+  echo "     bbrplusv3 15%/30% 平衡优化 + 锐速风格 + 可设保底速率"
   echo ""
   echo "  ── 高级 ──"
   echo "  5) 一键优化 (检测环境 + 自动应用最优)"
