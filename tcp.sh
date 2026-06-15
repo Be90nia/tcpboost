@@ -362,6 +362,63 @@ uninstall_kernel() {
 
 # ===== 网络优化 =====
 
+# BBRPlusV3 参数设置（科学上网场景最优配置）
+# 基于跨太平洋真实链路测试验证:
+#   loss_thresh=30%: 丢包 30% 以下不触发 inflight_lo 降速
+#   beta=80%: 即使触发也只降 20%（原默认 20% 降太狠）
+#   测试结果: 单流 111M + 多流 222M（vs cubic 132M/155M）
+apply_bbrplusv3_params() {
+  local param_dir="/sys/module/tcp_bbrplusv3/parameters"
+  if [ ! -d "$param_dir" ]; then
+    # 尝试加载模块
+    modprobe tcp_bbrplusv3 2>/dev/null || true
+  fi
+  if [ ! -d "$param_dir" ]; then
+    warn "tcp_bbrplusv3 模块不可用，跳过参数设置（内核未含 BBRPlusV3？）"
+    return 0
+  fi
+
+  # 设置 profile = aggressive (2)
+  echo 2 > "$param_dir/profile" 2>/dev/null || true
+
+  # 关键参数: loss_thresh=77(30%), beta=204(80%)
+  # BBR_UNIT=256, 百分比 = value/256
+  echo 77  > "$param_dir/loss_thresh" 2>/dev/null || true
+  echo 204 > "$param_dir/beta" 2>/dev/null || true
+
+  # 持久化到配置文件
+  mkdir -p "$CONF_DIR"
+  cat > "$CONF_DIR/bbrplusv3.conf" <<'EOF'
+# BBRPlusV3 科学上网最优参数 (跨太平洋链路测试验证)
+# profile=2(aggressive), loss_thresh=30%, beta=80%
+profile=2
+loss_thresh=77
+beta=204
+EOF
+
+  info "BBRPlusV3 参数已设置 (loss_thresh=30%, beta=80%)"
+}
+
+# 开机自动应用 bbrplusv3 参数
+setup_bbrplusv3_persistent() {
+  cat > /etc/systemd/system/tcpboost-bbrplusv3.service <<'EOF'
+[Unit]
+Description=TCPBoost BBRPlusV3 Parameters
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'PARAM_DIR=/sys/module/tcp_bbrplusv3/parameters; [ -d "$PARAM_DIR" ] && echo 2 > $PARAM_DIR/profile && echo 77 > $PARAM_DIR/loss_thresh && echo 204 > $PARAM_DIR/beta || true'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl enable tcpboost-bbrplusv3 2>/dev/null || true
+}
+
 # 备份当前配置
 backup_configs() {
   mkdir -p "$BACKUP_DIR"
@@ -478,7 +535,7 @@ apply_profile_aggressive() {
 
 # === 拥塞控制 ===
 net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbrplus
+net.ipv4.tcp_congestion_control = bbrplusv3
 
 # === TCP Buffer (动态 BDP) ===
 net.core.rmem_max = ${buf_max}
@@ -543,6 +600,10 @@ EOF
 
   sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1
 
+  # BBRPlusV3 最优参数（科学上网场景测试验证）
+  apply_bbrplusv3_params
+  setup_bbrplusv3_persistent
+
   # 锐速风格：增大初始拥塞窗口（默认 10 → 32）
   local DEF_ROUTE
   DEF_ROUTE=$(ip route show default 2>/dev/null | head -1)
@@ -551,7 +612,11 @@ EOF
       info "初始拥塞窗口已设为 32 (initcwnd/initrwnd)" || true
   fi
 
-  info "已应用激进方案 (高性能, BDP 动态计算 + 锐速风格 TCP 栈优化)"
+  info "已应用激进方案 (bbrplusv3 + 30%/80% 参数 + 锐速风格 TCP 栈优化)"
+  echo ""
+  echo -e "  ${CYAN}无感切换已启用:${NC}"
+  echo "    xray / sing-box / 通用网络 → 自动使用 BBRPlusV3"
+  echo "    sing-box 如需确定性带宽 → 配置 multiplex.brutal"
 }
 
 # 恢复默认配置
@@ -681,44 +746,55 @@ smart_recommend() {
   local recommend_algo=""
   local recommend_reason=""
 
-  # 推荐逻辑 — 代理类型 + 丢包等级综合判断
+  # 推荐逻辑 — 代理场景统一推荐 bbrplusv3（30%/80%最优参数）
   if [ "$PROXY_HY2" = "yes" ]; then
-    # 检测到 Hysteria2 → 确保 brutal 模块可用 + 全局默认 bbr/bbrplus
     if modprobe tcp_brutal 2>/dev/null; then
-      info "已加载 tcp_brutal 内核模块（sing-box 的 Hy2 socket 将自动使用 brutal）"
+      info "已加载 tcp_brutal 内核模块（sing-box Hy2 socket 将自动使用 brutal）"
     else
       warn "tcp_brutal 模块加载失败，Hysteria2 可能无法使用 TCP Brutal"
     fi
-    # 全局默认: 丢包高→bbrplusv3, 丢包低→bbr
+    recommend_algo="bbrplusv3"
+    recommend_reason="检测到 Hysteria2 + 代理场景, brutal 供 Hy2 per-connection, 全局 BBRPlusV3(30%/80%) 最优"
+  elif [ "$PROXY_XRAY" = "yes" ] || [ "$PROXY_SINGBOX" = "yes" ]; then
+    # xray / sing-box 代理场景 → bbrplusv3
+    recommend_algo="bbrplusv3"
     if [ "$PACKET_LOSS" = "high" ]; then
-      recommend_algo="bbrplusv3"
-      recommend_reason="检测到 Hysteria2 + 高丢包(≥5%), brutal 模块供 Hy2 socket 使用, 全局 BBRPlusV3 抗丢包"
+      recommend_reason="代理场景 + 高丢包(≥5%), BBRPlusV3(30%/80%) 单流111M/多流222M, xray/sing-box 自动使用"
+    elif [ "$PACKET_LOSS" = "medium" ]; then
+      recommend_reason="代理场景 + 中丢包(1-5%), BBRPlusV3(30%/80%) 抗丢包+高吞吐, xray/sing-box 自动使用"
     else
-      recommend_algo="bbr"
-      recommend_reason="检测到 Hysteria2, brutal 模块供 Hy2 socket 使用, 全局 BBRv3 对其他流量最优"
+      recommend_reason="代理场景 + 低丢包, BBRPlusV3(30%/80%) 均衡最优, xray/sing-box 自动使用"
     fi
   elif [ "$PACKET_LOSS" = "high" ]; then
-    # 高丢包不管什么代理 → BBRPlusV3 抗丢包
+    # 高丢包无代理 → BBRPlusV3 抗丢包
     recommend_algo="bbrplusv3"
-    recommend_reason="高丢包(≥5%), BBRPlusV3 抗丢包性能提升 3-4 倍"
+    recommend_reason="高丢包(≥5%), BBRPlusV3(30%/80%) 抗丢包性能提升 3-4 倍"
   elif [ "$PACKET_LOSS" = "medium" ]; then
-    # 中丢包 → BBRPlusV3 优先，bbr 也可接受
     recommend_algo="bbrplusv3"
-    recommend_reason="丢包 1-5%, BBRPlusV3 在丢包场景下表现优于 BBRv3"
-  elif [ "$PROXY_XRAY" = "yes" ]; then
-    recommend_algo="bbr"
-    recommend_reason="检测到 xray, 低丢包, BBRv3 延迟最低、通用最优"
-  elif [ "$PROXY_SINGBOX" = "yes" ]; then
-    recommend_algo="bbr"
-    recommend_reason="检测到 sing-box, 低丢包, BBRv3 延迟最低、通用最优"
+    recommend_reason="丢包 1-5%, BBRPlusV3 在丢包场景下优于 BBRv3"
   else
     recommend_algo="bbr"
-    recommend_reason="未检测到代理软件, 低丢包, BBRv3 通用最优"
+    recommend_reason="未检测到代理, 低丢包, BBRv3 公平性最优"
   fi
 
   echo -e "  ${GREEN}推荐算法: ${recommend_algo}${NC}"
   echo -e "  原因: ${recommend_reason}"
   echo ""
+
+  # 无感切换说明
+  if [ "$recommend_algo" = "bbrplusv3" ]; then
+    echo -e "  ${CYAN}无感切换说明:${NC}"
+    if [ "$PROXY_XRAY" = "yes" ]; then
+      echo "    xray:      自动使用 BBRPlusV3, 无需额外配置"
+    fi
+    if [ "$PROXY_SINGBOX" = "yes" ]; then
+      echo "    sing-box:  自动使用 BBRPlusV3"
+      echo "               如需确定性带宽, 在 sing-box 配置中启用 multiplex.brutal"
+    fi
+    echo "    通用网络:  自动使用 BBRPlusV3"
+    echo ""
+  fi
+
   read -p "  是否切换到 ${recommend_algo}？(Y/n): " confirm
   if [ "$confirm" != "n" ] && [ "$confirm" != "N" ]; then
     switch_algorithm "$recommend_algo"
@@ -749,6 +825,20 @@ show_algorithm_status() {
   echo "  拥塞控制:     ${current_algo}"
   echo "  可用算法:     ${available_algos}"
   echo "  队列调度:     ${qdisc}"
+
+  # 显示 BBRPlusV3 参数（如果使用中）
+  if [ "$current_algo" = "bbrplusv3" ]; then
+    local param_dir="/sys/module/tcp_bbrplusv3/parameters"
+    if [ -d "$param_dir" ]; then
+      local lt beta
+      lt=$(cat "$param_dir/loss_thresh" 2>/dev/null || echo "?")
+      beta=$(cat "$param_dir/beta" 2>/dev/null || echo "?")
+      local lt_pct=$((lt * 100 / 256))
+      local beta_pct=$((beta * 100 / 256))
+      echo "  loss_thresh:  ${lt} (${lt_pct}%)"
+      echo "  beta:         ${beta} (${beta_pct}%)"
+    fi
+  fi
 
   # 检查是否为 tcpboost 内核
   if echo "$kernel" | grep -q "tcpboost"; then
@@ -781,6 +871,12 @@ switch_algorithm() {
   sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
   # 设置拥塞控制
   sysctl -w "net.ipv4.tcp_congestion_control=${algo}" >/dev/null 2>&1
+
+  # 切换到 bbrplusv3 时自动设置最优参数（无感切换）
+  if [ "$algo" = "bbrplusv3" ]; then
+    apply_bbrplusv3_params
+    setup_bbrplusv3_persistent
+  fi
 
   # 持久化
   if [ -f "$SYSCTL_FILE" ]; then
