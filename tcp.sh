@@ -428,13 +428,43 @@ cleanup_kernels() {
   # 执行清理
   for kver in "${removable[@]}"; do
     info "删除 $kver ..."
-    if dpkg -l "linux-image-$kver" >/dev/null 2>&1; then
-      dpkg --purge "linux-image-$kver" 2>/dev/null || true
-    elif rpm -q "kernel-$kver" >/dev/null 2>&1; then
-      dnf remove -y "kernel-$kver" 2>/dev/null || true
-    else
+    local deleted=false
+
+    # 尝试 apt-get (Debian/Ubuntu) — apt 自动处理 meta 包依赖
+    if command -v apt-get >/dev/null 2>&1 && \
+       dpkg -l "linux-image-$kver" >/dev/null 2>&1; then
+      # 先检查是否有 meta 包依赖（linux-image-amd64 等）
+      local meta_pkg
+      meta_pkg=$(dpkg -S "linux-image-$kver" 2>/dev/null | grep -oP '^[^:]+(?=:)' | head -1)
+      if [ -n "$meta_pkg" ] && echo "$meta_pkg" | grep -q "^linux-image-"; then
+        info "  检测到 meta 包依赖 ($meta_pkg)，先删除 meta 包..."
+        apt-get purge -y "$meta_pkg" 2>/dev/null || true
+      fi
+      # 现在 purge 内核包
+      if apt-get purge -y "linux-image-$kver" 2>/dev/null; then
+        deleted=true
+      fi
+    fi
+
+    # 尝试 dnf (CentOS/Fedora)
+    if [ "$deleted" = false ] && command -v dnf >/dev/null 2>&1 && \
+       rpm -q "kernel-$kver" >/dev/null 2>&1; then
+      dnf remove -y "kernel-$kver" 2>/dev/null && deleted=true
+    fi
+
+    # Fallback: 直接删除文件（如果包管理器失败或找不到包）
+    if [ "$deleted" = false ] || [ -f "/boot/vmlinuz-$kver" ]; then
+      info "  包管理器未完全删除，fallback 到强制 rm..."
+      rm -rf "/lib/modules/$kver" 2>/dev/null || true
       rm -f "/boot/vmlinuz-$kver" "/boot/initrd.img-$kver" \
             "/boot/config-$kver" "/boot/System.map-$kver" 2>/dev/null || true
+    fi
+
+    # 验证删除
+    if [ -f "/boot/vmlinuz-$kver" ]; then
+      error "未能删除 $kver，请手动执行: apt purge linux-image-$kver"
+    else
+      info "  $kver 已删除 ✓"
     fi
   done
 
@@ -443,7 +473,7 @@ cleanup_kernels() {
 
   echo ""
   info "清理完成！剩余内核:"
-  ls /boot/vmlinuz-* | sed 's|.*/vmlinuz-|    |'
+  ls /boot/vmlinuz-* 2>/dev/null | sed 's|.*/vmlinuz-|    |' || echo "    (无)"
 }
 
 # BBRPlusV3 参数设置（科学上网场景最优配置）
