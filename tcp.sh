@@ -654,15 +654,15 @@ EOF
       info "初始拥塞窗口已设为 32 (initcwnd/initrwnd)" || true
   fi
 
-  info "已应用激进方案 (bbrplusv3 + 30%/80% + min_pacing 100Mbps + 锐速风格 TCP 栈优化)"
+  info "已应用激进方案 (bbrplusv3 + 30%/80% + 锐速风格 TCP 栈优化)"
   echo ""
   echo -e "  ${CYAN}无感切换已启用:${NC}"
   echo "    xray / sing-box / 通用网络 → 自动使用 BBRPlusV3"
   echo "    sing-box 如需确定性带宽 → 配置 multiplex.brutal"
   echo ""
-  echo -e "  ${YELLOW}建议:${NC} 设置 min_pacing_rate 进一步提升下载性能"
-  echo "    ./tcp.sh set-min-pacing-rate 50  (50 Mbps VPS)"
-  echo "    测试数据: 下载单流 8.5→26.1 Mbps (+207%)"
+  echo -e "  ${YELLOW}建议:${NC} 设置 min_pacing_rate 提升单流性能"
+  echo "    ./tcp.sh set-min-pacing-rate 500  (500 Mbps VPS)"
+  echo "    ./tcp.sh set-min-pacing-rate 1000 (1 Gbps VPS)"
 }
 
 # 恢复默认配置
