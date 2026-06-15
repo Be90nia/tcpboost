@@ -819,8 +819,8 @@ smart_recommend() {
     recommend_algo="bbrplusv3"
     recommend_reason="丢包 1-5%, BBRPlusV3 在丢包场景下优于 BBRv3"
   else
-    recommend_algo="bbr"
-    recommend_reason="未检测到代理, 低丢包, BBRv3 公平性最优"
+    recommend_algo="bbrplusv3"
+    recommend_reason="未检测到代理, 低丢包, BBRPlusV3 兼具高吞吐与公平性"
   fi
 
   echo -e "  ${GREEN}推荐算法: ${recommend_algo}${NC}"
@@ -972,48 +972,70 @@ show_menu() {
   show_algorithm_status
 
   echo "  1) 安装 TCPBoost 内核 (6.12 LTS)"
-  echo "  2) 网络优化 — 保守方案 (≤100Mbps)"
-  echo "  3) 网络优化 — 均衡方案 (1Gbps)"
-  echo "  4) 网络优化 — 激进方案 (高性能)"
-  echo "  5) 智能推荐算法 (自动检测代理环境)"
+  echo ""
+  echo "  ── 网络优化方案 ──"
+  echo "  2) 保守方案  ≤100Mbps 小带宽 VPS"
+  echo "     bbrplusv3 + 保守 sysctl + 标准 TCP 缓冲"
+  echo ""
+  echo "  3) 均衡方案  1Gbps VPS"
+  echo "     bbrplusv3 + 激进 sysctl + 锐速风格 TCP 栈"
+  echo ""
+  echo "  4) 激进方案  科学上网推荐"
+  echo "     bbrplusv3 30%/80% + 锐速风格 + 可设保底速率"
+  echo ""
+  echo "  ── 高级 ──"
+  echo "  5) 智能推荐 (自动检测代理环境)"
   echo "  6) 手动切换算法"
-  echo "  7) 恢复默认配置"
-  echo "  8) 卸载 TCPBoost 内核"
+  echo "  7) 设置最低保底速率 (min_pacing_rate)"
+  echo "  8) 恢复默认配置"
+  echo "  9) 卸载 TCPBoost 内核"
   echo "  0) 退出"
   echo ""
-  read -p "  请选择 [0-8]: " choice
+  read -p "  请选择 [0-9]: " choice
 
   case "$choice" in
     1) install_kernel ;;
     2) apply_profile_conservative ;;
     3) apply_profile_balanced ;;
-    4) apply_profile_aggressive ;;
+    4) apply_profile_aggressive
+       # 激进方案后交互设置 min_pacing_rate
+       echo ""
+       read -p "  设置最低保底速率? 输入 Mbps (如 500=500M, 1000=1G, 0=跳过): " mpr_input
+       if [ -n "$mpr_input" ] && [ "$mpr_input" != "0" ]; then
+         set_min_pacing_rate "$mpr_input"
+       fi
+       ;;
     5) smart_recommend ;;
     6) menu_switch_algorithm ;;
-    7) restore_configs ;;
-    8) uninstall_kernel ;;
+    7) echo ""; read -p "  输入 Mbps (500=500M, 1000=1G, 0=关闭): " mpr_input
+       set_min_pacing_rate "${mpr_input:-0}" ;;
+    8) restore_configs ;;
+    9) uninstall_kernel ;;
     0) exit 0 ;;
     *) error "无效选择" ;;
   esac
 }
 
 menu_switch_algorithm() {
+  local available
+  available=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null)
   echo ""
-  echo "  可用算法:"
-  echo "  1) bbr         — BBRv3 (推荐通用)"
-  echo "  2) bbrplusv3   — BBRPlusV3 (高丢包首选, BBRv3+激进探测)"
-  echo "  3) bbrplus     — BBRPlus (高丢包优化, 原版)"
-  echo "  4) brutal      — TCP Brutal (Hysteria2 专用)"
-  echo "  5) cubic       — Cubic (公平性好)"
+  echo "  可用算法: $available"
+  echo ""
+  echo "  1) bbrplusv3   — BBRPlusV3 (科学上网首选, BBRv3+激进探测)"
+  echo "  2) bbrplus     — BBRPlus (高丢包优化, 原版)"
+  echo "  3) brutal      — TCP Brutal (Hysteria2 专用)"
+  echo "  4) cubic       — Cubic (系统默认, 公平性好)"
+  echo "  5) reno        — Reno (最基础)"
   echo ""
   read -p "  选择算法 [1-5]: " algo_choice
 
   case "$algo_choice" in
-    1) switch_algorithm bbr ;;
-    2) switch_algorithm bbrplusv3 ;;
-    3) switch_algorithm bbrplus ;;
-    4) switch_algorithm brutal ;;
-    5) switch_algorithm cubic ;;
+    1) switch_algorithm bbrplusv3 ;;
+    2) switch_algorithm bbrplus ;;
+    3) switch_algorithm brutal ;;
+    4) switch_algorithm cubic ;;
+    5) switch_algorithm reno ;;
     *) error "无效选择" ;;
   esac
 }
