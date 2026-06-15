@@ -127,20 +127,50 @@ fi
 ./scripts/config --module CONFIG_VIRTIO_BLK
 
 # ============================================
-# 禁用签名证书 (CI 环境无证书文件)
+# 禁用签名/证书/BTF 等 CI 编译陷阱
 # ============================================
-# 清空信任根和吊销列表 (x86_64_defconfig 已空，发行版 config 通常含硬编码路径)
+# 发行版 config (Ubuntu/Debian) 默认启用大量证书相关特性，引用 CI 不存在的密钥文件，
+# 会导致 vmlinux 链接阶段 Error 255 (ld 失败) 或 bindeb-pkg 失败。
+# 这里把所有相关项全部 disable / set-str 空，确保 CI 能干净编译。
+
+# 1. 模块签名（最常见的 vmlinux Error 255 元凶）
+./scripts/config --disable CONFIG_MODULE_SIG
+./scripts/config --disable CONFIG_MODULE_SIG_ALL
+./scripts/config --disable CONFIG_MODULE_SIG_FORCE
+./scripts/config --disable CONFIG_MODULE_SIG_SHA256
+./scripts/config --disable CONFIG_MODULE_SIG_SHA384
+./scripts/config --disable CONFIG_MODULE_SIG_SHA512
+./scripts/config --set-str CONFIG_MODULE_SIG_KEY ""
+./scripts/config --disable CONFIG_MODULE_SIG_KEYTYPE
+./scripts/config --set-str CONFIG_MODULE_SIG_HASH ""
+./scripts/config --set-str CONFIG_MODULE_SIG_HASH_OLD ""
+
+# 2. 系统信任根 / 吊销列表 (Ubuntu config: CONFIG_SYSTEM_TRUSTED_KEYS="debian/canonical-certs.pem")
 ./scripts/config --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
 ./scripts/config --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
 
-# 禁用模块签名 (Ubuntu/Debian 发行版 config 默认启用，CI 无证书会导致编译失败)
-./scripts/config --disable CONFIG_MODULE_SIG
-./scripts/config --disable CONFIG_MODULE_SIG_ALL
-./scripts/config --set-str CONFIG_MODULE_SIG_KEY ""
+# 3. 各类 keyring (引用更多证书文件)
+./scripts/config --disable CONFIG_SYSTEM_TRUSTED_KEYRING
+./scripts/config --disable CONFIG_SYSTEM_BLACKLIST_KEYRING
+./scripts/config --disable CONFIG_SYSTEM_REVOCATION_KEYRING
+./scripts/config --disable CONFIG_SECONDARY_TRUSTED_KEYRING
+./scripts/config --disable CONFIG_IMA_KEYRINGS_PERMIT_SIGNED_BY_BUILTIN_OR_SECONDARY
 
-# 禁用安全锁定 (发行版 config 默认启用，会阻止加载未签名模块、限制 BPF)
+# 4. 安全锁定 (发行版默认启用，CI 编译会触发多种依赖问题)
 ./scripts/config --disable CONFIG_SECURITY_LOCKDOWN_LSM
 ./scripts/config --disable CONFIG_SECURITY_LOCKDOWN_LSM_EARLY
+./scripts/config --disable CONFIG_SECURITY_SECURELEVEL
+
+# 5. BTF 调试信息 (pahole 版本/工具链问题经常导致 resolve_btfids 失败)
+# BTF 仅 BPF CO-RE 需要，对 TCP 加速、科学上网、容器等场景无影响
+./scripts/config --disable CONFIG_DEBUG_INFO_BTF
+./scripts/config --disable CONFIG_DEBUG_INFO_BTF_MODULES
+./scripts/config --disable CONFIG_DEBUG_INFO_BTF_MODULES_PERF_MODULE
+./scripts/config --disable CONFIG_DEBUG_INFO
+
+# 6. 阻止 build 阶段读证书的杂项
+./scripts/config --disable CONFIG_SIGNED_PE_FILE_VERIFICATION
+./scripts/config --disable CONFIG_EFI_SECRET
 
 # ============================================
 # 固定配置

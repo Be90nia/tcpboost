@@ -402,6 +402,7 @@ jobs:
           echo "已保存 .config 到 workspace root，将由 Collect build artifacts 步骤打包"
 
       - name: Build kernel (DEB)
+        id: build_deb
         working-directory: linux-src
         run: |
           export CC="ccache gcc"
@@ -413,10 +414,28 @@ jobs:
           JOBS=$(nproc)
           echo "并行任务数: $JOBS"
 
+          # tee 到日志文件，失败时用于诊断
           DEB_BUILD_PROFILES=pkg.linux-upstream.nokernelheaders \
-          make -j${JOBS} bindeb-pkg
+          make -j${JOBS} bindeb-pkg 2>&1 | tee /tmp/build-deb.log
+          BUILD_EXIT=${PIPESTATUS[0]}
 
           ccache -s
+
+          if [ "$BUILD_EXIT" -ne 0 ]; then
+            echo ""
+            echo "======================================================"
+            echo "  BUILD FAILED (exit=$BUILD_EXIT) - 诊断上下文"
+            echo "======================================================"
+            echo "--- Error 上下文（最后 200 行）---"
+            tail -n 200 /tmp/build-deb.log
+            echo ""
+            echo "--- 搜索关键错误行 ---"
+            grep -nE 'Error|error:|fatal|undefined reference|No such file' /tmp/build-deb.log | tail -n 50 || true
+            echo ""
+            echo "--- 当前 .config 中证书/BTF 相关项 ---"
+            grep -E 'CONFIG_(MODULE_SIG|SYSTEM_TRUSTED|SYSTEM_BLACKLIST|DEBUG_INFO_BTF|SECURITY_LOCKDOWN)' .config || true
+            exit "$BUILD_EXIT"
+          fi
 
           echo "=== DEB 产物 ==="
           find .. -maxdepth 1 -name "*.deb" -exec ls -lh {} \;
