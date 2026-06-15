@@ -452,7 +452,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'PARAM_DIR=/sys/module/tcp_bbrplusv3/parameters; [ -d "$PARAM_DIR" ] && echo 2 > $PARAM_DIR/profile && echo 128 > $PARAM_DIR/loss_thresh && echo 230 > $PARAM_DIR/beta || true'
+ExecStart=/bin/bash -c 'PARAM_DIR=/sys/module/tcp_bbrplusv3/parameters; [ -d "$PARAM_DIR" ] && echo 2 > $PARAM_DIR/profile && echo 128 > $PARAM_DIR/loss_thresh && echo 230 > $PARAM_DIR/beta && echo 1 > $PARAM_DIR/gc_enable 2>/dev/null || true'
 
 [Install]
 WantedBy=multi-user.target
@@ -876,10 +876,11 @@ show_algorithm_status() {
   if [ "$current_algo" = "bbrplusv3" ]; then
     local param_dir="/sys/module/tcp_bbrplusv3/parameters"
     if [ -d "$param_dir" ]; then
-      local lt beta mpr
+      local lt beta mpr gc
       lt=$(cat "$param_dir/loss_thresh" 2>/dev/null || echo "?")
       beta=$(cat "$param_dir/beta" 2>/dev/null || echo "?")
       mpr=$(cat "$param_dir/min_pacing_rate" 2>/dev/null || echo "?")
+      gc=$(cat "$param_dir/gc_enable" 2>/dev/null || echo "?")
       local lt_pct=$((lt * 100 / 256))
       local beta_pct=$((beta * 100 / 256))
       local mpr_mb=$((mpr * 8 / 1000000))
@@ -889,6 +890,13 @@ show_algorithm_status() {
         echo "  min_pacing_rate: off"
       else
         echo "  min_pacing_rate: ${mpr} (${mpr_mb} Mbps)"
+      fi
+      if [ "$gc" = "1" ]; then
+        echo "  BBR-GC:         on (adaptive pacing gain)"
+      elif [ "$gc" = "0" ]; then
+        echo "  BBR-GC:         off"
+      else
+        echo "  BBR-GC:         ${gc}"
       fi
     fi
   fi
