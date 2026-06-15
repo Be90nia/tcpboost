@@ -452,7 +452,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'PARAM_DIR=/sys/module/tcp_bbrplusv3/parameters; [ -d "$PARAM_DIR" ] && echo 2 > $PARAM_DIR/profile && echo 128 > $PARAM_DIR/loss_thresh && echo 230 > $PARAM_DIR/beta && echo 1 > $PARAM_DIR/gc_enable 2>/dev/null || true'
+ExecStart=/bin/bash -c 'PARAM_DIR=/sys/module/tcp_bbrplusv3/parameters; [ -d "$PARAM_DIR" ] && echo 2 > $PARAM_DIR/profile && echo 128 > $PARAM_DIR/loss_thresh && echo 230 > $PARAM_DIR/beta && echo 0 > $PARAM_DIR/gc_enable 2>/dev/null || true'
 
 [Install]
 WantedBy=multi-user.target

@@ -331,7 +331,7 @@ static int bbrplusv3_acd_enable;
 static int bbrplusv3_acd_rtt_factor = 125;
 static int bbrplusv3_pacing_rate_scale = 100;
 static u64 bbrplusv3_min_pacing_rate;
-static int bbrplusv3_gc_enable = 1;
+static int bbrplusv3_gc_enable = 0;
 
 static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 			   const struct rate_sample *rs)
