@@ -388,18 +388,26 @@ echo "[7b/9] 已注入 BBR-ACD + Pacing Scale + cong_control wrapper"
 
 # ============================================
 # 7c. STARTUP 阶段优化（单流性能改进）
-# 基于跨太平洋链路测试 + BBRv3e1/xquic 研究:
-#   - drain_gain 0.347→0.75: 更温和的 DRAIN，减少高 RTT 恢复延迟
-#   - startup_pacing_gain 2.77→2.885: 更快的指数爬升
+# 基于 tsunami-v3 基准验证 (616 vs 494 Mbps) + nanqinlang STARTUP 抗早退:
+#   - drain_gain 0.347→0.416: 温和 DRAIN（tsunami-v3 验证）
+#   - min_rtt_win 10→20s: 长 RTT 链路更稳定（tsunami-v3）
+#   - full_bw_thresh 1.25→2.0: STARTUP 抗早退（nanqinlang）
+#   - startup_pacing_gain 2.77→2.885: 更快爬升（BBRv3e1）
 # ============================================
 
-# DRAIN gain: 0.347 → 0.75 (alibaba/xquic 验证的值)
-sed -i 's/bbr_drain_gain = BBR_UNIT \* 1000 \/ 2885/bbr_drain_gain = BBR_UNIT * 75 \/ 100/' "$BBRPLUSV3_SRC"
+# DRAIN gain: 0.347 → 0.416 (tsunami-v3 验证值)
+sed -i 's/bbr_drain_gain = BBR_UNIT \* 1000 \/ 2885/bbr_drain_gain = BBR_UNIT * 1200 \/ 2885/' "$BBRPLUSV3_SRC"
 
-# STARTUP pacing gain: 2.77 → 2.885 (BBRv3e1 论文推荐，2/ln(2))
+# min_rtt 窗口: 10s → 20s (tsunami-v3, 长 RTT 链路 min_rtt 估值更稳定)
+sed -i 's/bbr_min_rtt_win_sec = 10/bbr_min_rtt_win_sec = 20/' "$BBRPLUSV3_SRC"
+
+# full_bw_thresh: 1.25 → 2.0 (nanqinlang, STARTUP 不轻易退出)
+sed -i 's/bbr_full_bw_thresh = BBR_UNIT \* 5 \/ 4/bbr_full_bw_thresh = BBR_UNIT * 2/' "$BBRPLUSV3_SRC"
+
+# STARTUP pacing gain: 2.77 → 2.885 (BBRv3e1 论文, 2/ln(2))
 sed -i 's/bbr_startup_pacing_gain = BBR_UNIT \* 277 \/ 100 + 1/bbr_startup_pacing_gain = BBR_UNIT * 2885 \/ 1000 + 1/' "$BBRPLUSV3_SRC"
 
-echo "[7c/9] 已优化 STARTUP/DRAIN 参数 (drain=0.75, pacing=2.885)"
+echo "[7c/9] 已优化 STARTUP/DRAIN (tsunami-v3+nanqinlang: drain=0.416, win=20s, thresh=2.0, pacing=2.885)"
 
 # ============================================
 # 8. 修改 Kconfig 和 Makefile
