@@ -415,8 +415,9 @@ jobs:
           echo "并行任务数: $JOBS"
 
           # tee 到日志文件，失败时用于诊断
+          # INSTALL_MOD_STRIP=1: strip 模块调试符号，linux-image deb 600-900MB→100-200MB
           DEB_BUILD_PROFILES=pkg.linux-upstream.nokernelheaders \
-          make -j${JOBS} bindeb-pkg 2>&1 | tee /tmp/build-deb.log
+          make -j${JOBS} INSTALL_MOD_STRIP=1 bindeb-pkg 2>&1 | tee /tmp/build-deb.log
           BUILD_EXIT=${PIPESTATUS[0]}
 
           ccache -s
@@ -462,13 +463,13 @@ jobs:
         run: |
           mkdir -p artifacts
 
-          echo "=== 搜索 DEB 文件 ==="
-          find . -maxdepth 1 -name "*.deb" -exec echo "找到: {}" \; -exec mv {} artifacts/ \;
-          find linux-src/.. -maxdepth 1 -name "*.deb" -exec echo "找到: {}" \; -exec mv {} artifacts/ \;
+          echo "=== 搜索 DEB 文件（跳过 -dbg 调试符号包以减小体积） ==="
+          find . -maxdepth 1 -name "*.deb" ! -name "*-dbg*.deb" -exec echo "找到: {}" \; -exec mv {} artifacts/ \;
+          find linux-src/.. -maxdepth 1 -name "*.deb" ! -name "*-dbg*.deb" -exec echo "找到: {}" \; -exec mv {} artifacts/ \;
 
-          echo "=== 搜索 RPM 文件 ==="
-          find linux-src/rpmbuild -name "*.rpm" -exec echo "找到: {}" \; -exec mv {} artifacts/ \;
-          find . -maxdepth 3 -name "*.rpm" -exec echo "找到: {}" \; -exec mv {} artifacts/ \;
+          echo "=== 搜索 RPM 文件（跳过 debuginfo/debugsource 包） ==="
+          find linux-src/rpmbuild -name "*.rpm" ! -name "*-debug*" -exec echo "找到: {}" \; -exec mv {} artifacts/ \;
+          find . -maxdepth 3 -name "*.rpm" ! -name "*-debug*" -exec echo "找到: {}" \; -exec mv {} artifacts/ \;
 
           echo "=== 搜索 .config 审计文件 ==="
           find . -maxdepth 1 -name "tcpboost-config-*" -exec echo "找到: {}" \; -exec mv {} artifacts/ \;
