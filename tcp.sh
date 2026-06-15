@@ -363,14 +363,16 @@ uninstall_kernel() {
 # ===== 网络优化 =====
 
 # BBRPlusV3 参数设置（科学上网场景最优配置）
-# 基于跨太平洋真实链路测试验证:
-#   loss_thresh=30%: 丢包 30% 以下不触发 inflight_lo 降速
-#   beta=80%: 即使触发也只降 20%（原默认 20% 降太狠）
-#   测试结果: 单流 111M + 多流 222M（vs cubic 132M/155M）
+# 基于跨太平洋真实链路测试验证 (tsunami-v3 优化内核):
+#   loss_thresh=50%: 高丢包链路下保持发送速率
+#   beta=90%: 极轻微降速（仅降 10%）
+#   min_pacing_rate: 保底 pacing rate，防 STARTUP 早退
+# 测试结果 (VPS 199.115.231.188, RTT ~161ms):
+#   上传单流: 79.8 Mbps (cubic 85.7)
+#   下载单流: 26.1 Mbps (cubic 仅 0.3, 提升 87x)
 apply_bbrplusv3_params() {
   local param_dir="/sys/module/tcp_bbrplusv3/parameters"
   if [ ! -d "$param_dir" ]; then
-    # 尝试加载模块
     modprobe tcp_bbrplusv3 2>/dev/null || true
   fi
   if [ ! -d "$param_dir" ]; then
@@ -381,22 +383,62 @@ apply_bbrplusv3_params() {
   # 设置 profile = aggressive (2)
   echo 2 > "$param_dir/profile" 2>/dev/null || true
 
-  # 关键参数: loss_thresh=77(30%), beta=204(80%)
-  # BBR_UNIT=256, 百分比 = value/256
-  echo 77  > "$param_dir/loss_thresh" 2>/dev/null || true
-  echo 204 > "$param_dir/beta" 2>/dev/null || true
+  # 50%/90% 激进参数 (BBR_UNIT=256)
+  echo 128 > "$param_dir/loss_thresh" 2>/dev/null || true
+  echo 230 > "$param_dir/beta" 2>/dev/null || true
+
+  # min_pacing_rate: 默认关闭(0)
+  # 用户可通过 set_min_pacing_rate 设置（推荐 50Mbps = 6250000 bytes/sec）
+  if [ -w "$param_dir/min_pacing_rate" ]; then
+    local current_mpr
+    current_mpr=$(cat "$param_dir/min_pacing_rate" 2>/dev/null || echo 0)
+    # 保持已设置的值，不覆盖
+    [ -z "$current_mpr" ] && echo 0 > "$param_dir/min_pacing_rate" 2>/dev/null || true
+  fi
 
   # 持久化到配置文件
   mkdir -p "$CONF_DIR"
   cat > "$CONF_DIR/bbrplusv3.conf" <<'EOF'
-# BBRPlusV3 科学上网最优参数 (跨太平洋链路测试验证)
-# profile=2(aggressive), loss_thresh=30%, beta=80%
+# BBRPlusV3 科学上网最优参数 (tsunami-v3 内核测试验证)
+# profile=2(aggressive), loss_thresh=50%, beta=90%
 profile=2
-loss_thresh=77
-beta=204
+loss_thresh=128
+beta=230
 EOF
 
-  info "BBRPlusV3 参数已设置 (loss_thresh=30%, beta=80%)"
+  info "BBRPlusV3 参数已设置 (loss_thresh=50%, beta=90%)"
+}
+
+# 设置 min_pacing_rate（保底速率，防单流 STARTUP 早退）
+# 用法: set_min_pacing_rate <Mbps>
+#   推荐: set_min_pacing_rate 50  (50 Mbps VPS)
+#         set_min_pacing_rate 100 (100 Mbps VPS)
+#         set_min_pacing_rate 0    (关闭)
+set_min_pacing_rate() {
+  local mbps="${1:-0}"
+  local param_dir="/sys/module/tcp_bbrplusv3/parameters"
+
+  if [ ! -w "$param_dir/min_pacing_rate" ]; then
+    warn "min_pacing_rate 参数不可用（需要 tsunami-v3 优化内核）"
+    return 1
+  fi
+
+  # Mbps → bytes/sec
+  local bps=$((mbps * 1000000 / 8))
+  echo "$bps" > "$param_dir/min_pacing_rate" 2>/dev/null
+
+  if [ "$mbps" -eq 0 ]; then
+    info "min_pacing_rate 已关闭"
+  else
+    info "min_pacing_rate 已设为 ${mbps} Mbps (${bps} bytes/sec)"
+    echo "  下载方向单流性能预计提升 3x+ (测试: 8.5→26.1 Mbps)"
+  fi
+
+  # 持久化
+  if [ -f "$CONF_DIR/bbrplusv3.conf" ]; then
+    sed -i "/^min_pacing_rate/d" "$CONF_DIR/bbrplusv3.conf"
+    echo "min_pacing_rate=$bps" >> "$CONF_DIR/bbrplusv3.conf"
+  fi
 }
 
 # 开机自动应用 bbrplusv3 参数
@@ -410,7 +452,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'PARAM_DIR=/sys/module/tcp_bbrplusv3/parameters; [ -d "$PARAM_DIR" ] && echo 2 > $PARAM_DIR/profile && echo 77 > $PARAM_DIR/loss_thresh && echo 204 > $PARAM_DIR/beta || true'
+ExecStart=/bin/bash -c 'PARAM_DIR=/sys/module/tcp_bbrplusv3/parameters; [ -d "$PARAM_DIR" ] && echo 2 > $PARAM_DIR/profile && echo 128 > $PARAM_DIR/loss_thresh && echo 230 > $PARAM_DIR/beta || true'
 
 [Install]
 WantedBy=multi-user.target
@@ -612,11 +654,15 @@ EOF
       info "初始拥塞窗口已设为 32 (initcwnd/initrwnd)" || true
   fi
 
-  info "已应用激进方案 (bbrplusv3 + 30%/80% 参数 + 锐速风格 TCP 栈优化)"
+  info "已应用激进方案 (bbrplusv3 + 50%/90% 参数 + 锐速风格 TCP 栈优化)"
   echo ""
   echo -e "  ${CYAN}无感切换已启用:${NC}"
   echo "    xray / sing-box / 通用网络 → 自动使用 BBRPlusV3"
   echo "    sing-box 如需确定性带宽 → 配置 multiplex.brutal"
+  echo ""
+  echo -e "  ${YELLOW}建议:${NC} 设置 min_pacing_rate 进一步提升下载性能"
+  echo "    ./tcp.sh set-min-pacing-rate 50  (50 Mbps VPS)"
+  echo "    测试数据: 下载单流 8.5→26.1 Mbps (+207%)"
 }
 
 # 恢复默认配置
@@ -830,13 +876,20 @@ show_algorithm_status() {
   if [ "$current_algo" = "bbrplusv3" ]; then
     local param_dir="/sys/module/tcp_bbrplusv3/parameters"
     if [ -d "$param_dir" ]; then
-      local lt beta
+      local lt beta mpr
       lt=$(cat "$param_dir/loss_thresh" 2>/dev/null || echo "?")
       beta=$(cat "$param_dir/beta" 2>/dev/null || echo "?")
+      mpr=$(cat "$param_dir/min_pacing_rate" 2>/dev/null || echo "?")
       local lt_pct=$((lt * 100 / 256))
       local beta_pct=$((beta * 100 / 256))
-      echo "  loss_thresh:  ${lt} (${lt_pct}%)"
-      echo "  beta:         ${beta} (${beta_pct}%)"
+      local mpr_mb=$((mpr * 8 / 1000000))
+      echo "  loss_thresh:    ${lt} (${lt_pct}%)"
+      echo "  beta:           ${beta} (${beta_pct}%)"
+      if [ "$mpr" = "?" ] || [ "$mpr" = "0" ]; then
+        echo "  min_pacing_rate: off"
+      else
+        echo "  min_pacing_rate: ${mpr} (${mpr_mb} Mbps)"
+      fi
     fi
   fi
 
@@ -978,6 +1031,14 @@ main() {
       ;;
     uninstall) uninstall_kernel ;;
     restore)  restore_configs ;;
+    set-min-pacing-rate)
+      if [ -z "${2:-}" ]; then
+        echo "用法: $0 set-min-pacing-rate <Mbps>"
+        echo "  推荐: 50 (50Mbps VPS), 100 (100Mbps VPS), 0 (关闭)"
+        exit 1
+      fi
+      set_min_pacing_rate "$2"
+      ;;
     *)
       # 交互式菜单
       while true; do
