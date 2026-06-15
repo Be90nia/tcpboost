@@ -10,8 +10,42 @@ cd "$KERNEL_DIR"
 
 # 确保 .config 存在
 if [ ! -f .config ]; then
-  echo "正在生成 x86_64 默认配置..."
-  make defconfig
+  echo "正在准备内核配置..."
+
+  # 必须使用发行版完整 config 作为基线，不能用 make defconfig。
+  # x86_64_defconfig 是上游最小可启动配置，默认禁用大量协议：
+  #   - Netfilter 完整栈 (iptables/nftables REDIRECT/TPROXY/CONNTRACK/NAT)
+  #   - TUN/TAP (sing-box/xray 透明代理必需)
+  #   - WireGuard / VXLAN / IPIP / GRE / FOU / UDP Tunnel
+  #   - XFRM / IPSec (INET_ESP/AH)
+  #   - NET_CLS_BPF / NET_ACT_* (tc 流量分类)
+  #   - NET_SCH_HTB/TBF/HFSC/PRIO/SFQ/RED (除 fq 外的 qdisc)
+  #   - Bridge / VLAN / VETH / DUMMY / MACVLAN (容器网络)
+  #   - IP_VS (kube-proxy IPVS)
+  # 这些缺失会导致 sing-box TUN、xray ws/xhttp、Docker/K8s、tc filter 等全部失效。
+  DISTRO_CONFIG=""
+  for cfg_pattern in \
+    "/boot/config-$(uname -r)" \
+    /boot/config-*-cloud-amd64 \
+    /boot/config-*-generic \
+    /boot/config-*-amd64 \
+    /boot/config-*-linux-*; do
+    if ls $cfg_pattern >/dev/null 2>&1; then
+      DISTRO_CONFIG=$(ls -1v $cfg_pattern 2>/dev/null | tail -1)
+      break
+    fi
+  done
+
+  if [ -n "$DISTRO_CONFIG" ]; then
+    echo "✅ 使用发行版完整配置作为基线: $DISTRO_CONFIG"
+    cp "$DISTRO_CONFIG" .config
+    make olddefconfig
+  else
+    echo "⚠️  警告: 未找到任何发行版 config，回退到 x86_64_defconfig"
+    echo "⚠️  警告: defconfig 默认禁用大量网络协议 (netfilter/tc/tun/wireguard/vxlan/ipsec)"
+    echo "           这会导致 sing-box TUN、xray ws/xhttp、iptables、tc、Docker/K8s 等失效"
+    make defconfig
+  fi
 fi
 
 echo "正在应用 tcpboost 内核编译选项..."
@@ -95,8 +129,18 @@ fi
 # ============================================
 # 禁用签名证书 (CI 环境无证书文件)
 # ============================================
+# 清空信任根和吊销列表 (x86_64_defconfig 已空，发行版 config 通常含硬编码路径)
 ./scripts/config --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
 ./scripts/config --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
+
+# 禁用模块签名 (Ubuntu/Debian 发行版 config 默认启用，CI 无证书会导致编译失败)
+./scripts/config --disable CONFIG_MODULE_SIG
+./scripts/config --disable CONFIG_MODULE_SIG_ALL
+./scripts/config --set-str CONFIG_MODULE_SIG_KEY ""
+
+# 禁用安全锁定 (发行版 config 默认启用，会阻止加载未签名模块、限制 BPF)
+./scripts/config --disable CONFIG_SECURITY_LOCKDOWN_LSM
+./scripts/config --disable CONFIG_SECURITY_LOCKDOWN_LSM_EARLY
 
 # ============================================
 # 固定配置

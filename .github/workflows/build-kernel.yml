@@ -293,6 +293,114 @@ jobs:
           echo "=== 默认拥塞控制 ==="
           grep 'CONFIG_DEFAULT_TCP_CONG' .config || true
 
+      - name: Verify critical network protocols
+        working-directory: linux-src
+        run: |
+          # 验证步骤只用于诊断展示，不应让 CI 失败
+          set +e
+          echo ""
+          echo "======================================================"
+          echo "  验证关键网络协议 (修复 ws/xhttp/协议不支持 问题)"
+          echo "======================================================"
+          PASS=0
+          FAIL=0
+          for cfg in \
+            CONFIG_NETFILTER \
+            CONFIG_NETFILTER_XTABLES \
+            CONFIG_NF_CONNTRACK \
+            CONFIG_NF_NAT \
+            CONFIG_NETFILTER_XT_MATCH_CONNTRACK \
+            CONFIG_NETFILTER_XT_MATCH_STATE \
+            CONFIG_NETFILTER_XT_MATCH_MULTIPORT \
+            CONFIG_NETFILTER_XT_TARGET_MASQUERADE \
+            CONFIG_NETFILTER_XT_TARGET_REDIRECT \
+            CONFIG_NETFILTER_XT_TARGET_TPROXY \
+            CONFIG_NETFILTER_XT_TARGET_LOG \
+            CONFIG_NETFILTER_TPROXY \
+            CONFIG_IP_NF_IPTABLES \
+            CONFIG_IP_NF_FILTER \
+            CONFIG_IP_NF_NAT \
+            CONFIG_IP_NF_MANGLE \
+            CONFIG_IP_NF_RAW \
+            CONFIG_NF_TABLES \
+            CONFIG_NF_TABLES_INET \
+            CONFIG_NF_TABLES_IPV4 \
+            CONFIG_NFT_CT \
+            CONFIG_NFT_CHAIN_NAT \
+            CONFIG_NFT_MASQ \
+            CONFIG_NFT_TPROXY \
+            CONFIG_TUN \
+            CONFIG_TAP \
+            CONFIG_WIREGUARD \
+            CONFIG_VXLAN \
+            CONFIG_IPIP \
+            CONFIG_GRE \
+            CONFIG_NET_FOU \
+            CONFIG_NET_UDP_TUNNEL \
+            CONFIG_XFRM_USER \
+            CONFIG_INET_XFRM_MODE_TRANSPORT \
+            CONFIG_INET_XFRM_MODE_TUNNEL \
+            CONFIG_INET_ESP \
+            CONFIG_NET_SCHED \
+            CONFIG_NET_SCH_FQ \
+            CONFIG_NET_SCH_HTB \
+            CONFIG_NET_SCH_TBF \
+            CONFIG_NET_SCH_PRIO \
+            CONFIG_NET_SCH_SFQ \
+            CONFIG_NET_SCH_RED \
+            CONFIG_NET_SCH_HFSC \
+            CONFIG_NET_SCH_INGRESS \
+            CONFIG_NET_CLS \
+            CONFIG_NET_CLS_BPF \
+            CONFIG_NET_CLS_U32 \
+            CONFIG_NET_CLS_FW \
+            CONFIG_NET_CLS_ROUTE4 \
+            CONFIG_NET_CLS_ACT \
+            CONFIG_NET_ACT_BPF \
+            CONFIG_NET_ACT_GACT \
+            CONFIG_NET_ACT_MIRRED \
+            CONFIG_NET_ACT_POLICE \
+            CONFIG_NET_ACT_VLAN \
+            CONFIG_BRIDGE \
+            CONFIG_VLAN_8021Q \
+            CONFIG_VETH \
+            CONFIG_DUMMY \
+            CONFIG_MACVLAN \
+            CONFIG_IPVLAN \
+            CONFIG_NET_NS \
+            CONFIG_CGROUPS \
+            CONFIG_OVERLAY_FS \
+            CONFIG_IP_VS \
+            CONFIG_IP_VS_RR \
+            CONFIG_IP_VS_WRR \
+            CONFIG_IP_VS_LC \
+            CONFIG_IP_VS_SH \
+            CONFIG_IPV6 \
+            CONFIG_IPV6_MULTIPLE_TABLES; do
+            val=$(grep -E "^${cfg}[= ]|^# ${cfg} is not set" .config 2>/dev/null | head -1)
+            if echo "$val" | grep -q "=y"; then
+              printf "  OK   %-45s =y (built-in)\n" "$cfg"
+              PASS=$((PASS+1))
+            elif echo "$val" | grep -q "=m"; then
+              printf "  OK   %-45s =m (module)\n" "$cfg"
+              PASS=$((PASS+1))
+            else
+              printf "  MISS %-45s not enabled\n" "$cfg"
+              FAIL=$((FAIL+1))
+            fi
+          done
+          echo ""
+          echo "======================================================"
+          echo "  Protocol verification: OK=$PASS enabled, MISS=$FAIL"
+          echo "======================================================"
+          exit 0
+
+      - name: Save final .config for audit
+        working-directory: linux-src
+        run: |
+          cp .config "${{ github.workspace }}/tcpboost-config-${{ needs.check-version.outputs.latest_version }}"
+          echo "已保存 .config 到 workspace root，将由 Collect build artifacts 步骤打包"
+
       - name: Build kernel (DEB)
         working-directory: linux-src
         run: |
@@ -342,6 +450,9 @@ jobs:
           echo "=== 搜索 RPM 文件 ==="
           find linux-src/rpmbuild -name "*.rpm" -exec echo "找到: {}" \; -exec mv {} artifacts/ \;
           find . -maxdepth 3 -name "*.rpm" -exec echo "找到: {}" \; -exec mv {} artifacts/ \;
+
+          echo "=== 搜索 .config 审计文件 ==="
+          find . -maxdepth 1 -name "tcpboost-config-*" -exec echo "找到: {}" \; -exec mv {} artifacts/ \;
 
           echo "=== 构建产物 ==="
           ls -lh artifacts/
