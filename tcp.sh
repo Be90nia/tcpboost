@@ -360,7 +360,91 @@ uninstall_kernel() {
   esac
 }
 
-# ===== 网络优化 =====
+# 清理多余内核（确认 tcpboost 能用后删除所有其他内核）
+cleanup_kernels() {
+  local current_kernel
+  current_kernel=$(uname -r)
+
+  info "扫描已安装内核..."
+  echo ""
+  echo "  当前运行: ${GREEN}${current_kernel}${NC}"
+  echo ""
+  echo "  已安装内核:"
+  echo "  ─────────────────────────────────────────"
+
+  local kernel_list=()
+  for vmlinuz in /boot/vmlinuz-*; do
+    [ -f "$vmlinuz" ] || continue
+    local kver
+    kver=$(basename "$vmlinuz" | sed 's/vmlinuz-//')
+    kernel_list+=("$kver")
+    if [ "$kver" = "$current_kernel" ]; then
+      echo "  ${GREEN}[运行]${NC}  $kver"
+    else
+      echo "  ${YELLOW}[可删]${NC}  $kver"
+    fi
+  done
+  echo "  ─────────────────────────────────────────"
+
+  # 安全检查 1: 当前必须运行 tcpboost 内核
+  if ! echo "$current_kernel" | grep -q "tcpboost"; then
+    error "当前未运行 tcpboost 内核！"
+    echo "  请先安装 tcpboost 内核并重启成功后，再执行清理。"
+    return 1
+  fi
+  info "安全检查 1/2: 当前正在运行 tcpboost 内核 ✓"
+
+  # 安全检查 2: bbrplusv3 可用（证明内核功能正常）
+  if ! sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -q "bbrplusv3"; then
+    error "bbrplusv3 不可用！tcpboost 内核可能有问题，拒绝清理。"
+    return 1
+  fi
+  info "安全检查 2/2: bbrplusv3 算法可用，内核功能正常 ✓"
+  echo ""
+
+  # 收集要删除的内核（除了当前运行的）
+  local removable=()
+  for kver in "${kernel_list[@]}"; do
+    [ "$kver" != "$current_kernel" ] && removable+=("$kver")
+  done
+
+  if [ ${#removable[@]} -eq 0 ]; then
+    info "没有其他内核需要清理"
+    return 0
+  fi
+
+  warn "即将删除以下 ${#removable[@]} 个内核:"
+  for kver in "${removable[@]}"; do
+    echo "    ✗ $kver"
+  done
+  echo "  保留: $current_kernel"
+  echo ""
+  read -p "  确认清理？(y/N): " confirm
+  if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+    info "已取消"
+    return 0
+  fi
+
+  # 执行清理
+  for kver in "${removable[@]}"; do
+    info "删除 $kver ..."
+    if dpkg -l "linux-image-$kver" >/dev/null 2>&1; then
+      dpkg --purge "linux-image-$kver" 2>/dev/null || true
+    elif rpm -q "kernel-$kver" >/dev/null 2>&1; then
+      dnf remove -y "kernel-$kver" 2>/dev/null || true
+    else
+      rm -f "/boot/vmlinuz-$kver" "/boot/initrd.img-$kver" \
+            "/boot/config-$kver" "/boot/System.map-$kver" 2>/dev/null || true
+    fi
+  done
+
+  info "更新 GRUB..."
+  update-grub 2>/dev/null || grub2-mkconfig -o /boot/grub2/grub.cfg 2>/dev/null || true
+
+  echo ""
+  info "清理完成！剩余内核:"
+  ls /boot/vmlinuz-* | sed 's|.*/vmlinuz-|    |'
+}
 
 # BBRPlusV3 参数设置（科学上网场景最优配置）
 # 基于跨太平洋真实链路测试验证 (6.12.90 tsunami-v3 内核):
@@ -987,18 +1071,18 @@ show_menu() {
   echo "  5) 智能推荐 (自动检测代理环境)"
   echo "  6) 手动切换算法"
   echo "  7) 设置最低保底速率 (min_pacing_rate)"
-  echo "  8) 恢复默认配置"
-  echo "  9) 卸载 TCPBoost 内核"
+  echo "  8) 清理多余内核 (只保留当前 tcpboost)"
+  echo "  9) 恢复默认配置"
+  echo " 10) 卸载 TCPBoost 内核"
   echo "  0) 退出"
   echo ""
-  read -p "  请选择 [0-9]: " choice
+  read -p "  请选择 [0-10]: " choice
 
   case "$choice" in
     1) install_kernel ;;
     2) apply_profile_conservative ;;
     3) apply_profile_balanced ;;
     4) apply_profile_aggressive
-       # 激进方案后交互设置 min_pacing_rate
        echo ""
        read -p "  设置最低保底速率? 输入 Mbps (如 500=500M, 1000=1G, 0=跳过): " mpr_input
        if [ -n "$mpr_input" ] && [ "$mpr_input" != "0" ]; then
@@ -1009,8 +1093,9 @@ show_menu() {
     6) menu_switch_algorithm ;;
     7) echo ""; read -p "  输入 Mbps (500=500M, 1000=1G, 0=关闭): " mpr_input
        set_min_pacing_rate "${mpr_input:-0}" ;;
-    8) restore_configs ;;
-    9) uninstall_kernel ;;
+    8) cleanup_kernels ;;
+    9) restore_configs ;;
+   10) uninstall_kernel ;;
     0) exit 0 ;;
     *) error "无效选择" ;;
   esac
@@ -1060,6 +1145,7 @@ main() {
       switch_algorithm "$2"
       ;;
     uninstall) uninstall_kernel ;;
+    cleanup)  cleanup_kernels ;;
     restore)  restore_configs ;;
     set-min-pacing-rate)
       if [ -z "${2:-}" ]; then
