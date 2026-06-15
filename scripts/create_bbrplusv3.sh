@@ -84,8 +84,8 @@ sed -i 's/^static const int bbr_pacing_gain\[\]/static int bbr_pacing_gain[]/' "
 
 # 需要可调的参数列表
 TUNABLE_PARAMS="bbr_startup_cwnd_gain bbr_cwnd_gain bbr_startup_pacing_gain \
-bbr_beta bbr_loss_thresh bbr_full_loss_cnt \
-bbr_ecn_thresh bbr_inflight_headroom \
+bbr_beta bbr_loss_thresh bbr_full_loss_cnt bbr_full_bw_thresh \
+bbr_ecn_thresh bbr_inflight_headroom bbr_drain_gain \
 bbr_probe_rtt_mode_ms bbr_probe_rtt_win_ms bbr_min_rtt_win_sec"
 
 for param in $TUNABLE_PARAMS; do
@@ -175,8 +175,10 @@ struct bbrplusv3_profile_params {
 	int  pacing_gain_up;
 	int  pacing_gain_down;
 	int  startup_cwnd_gain;
+	int  drain_gain;
 	u32  beta;
 	u32  loss_thresh;
+	u32  full_bw_thresh;
 	u32  probe_rtt_mode_ms;
 	u32  probe_rtt_win_ms;
 	u32  ecn_thresh;
@@ -190,8 +192,10 @@ bbrplusv3_profile_table[] = {
 		.pacing_gain_up		= BBR_UNIT * 5 / 4,
 		.pacing_gain_down	= BBR_UNIT * 91 / 100,
 		.startup_cwnd_gain	= BBR_UNIT * 2,
+		.drain_gain		= BBR_UNIT * 1000 / 2885,
 		.beta			= BBR_UNIT * 30 / 100,
 		.loss_thresh		= BBR_UNIT * 2 / 100,
+		.full_bw_thresh		= BBR_UNIT * 5 / 4,
 		.probe_rtt_mode_ms	= 200,
 		.probe_rtt_win_ms	= 5000,
 		.ecn_thresh		= BBR_UNIT * 1 / 2,
@@ -202,8 +206,10 @@ bbrplusv3_profile_table[] = {
 		.pacing_gain_up		= BBR_UNIT * 11 / 8,
 		.pacing_gain_down	= BBR_UNIT * 17 / 20,
 		.startup_cwnd_gain	= BBR_UNIT * 9 / 4,
+		.drain_gain		= BBR_UNIT * 1100 / 2885,
 		.beta			= BBR_UNIT * 25 / 100,
 		.loss_thresh		= BBR_UNIT * 35 / 1000,
+		.full_bw_thresh		= BBR_UNIT * 6 / 5,
 		.probe_rtt_mode_ms	= 100,
 		.probe_rtt_win_ms	= 3000,
 		.ecn_thresh		= BBR_UNIT * 3 / 5,
@@ -214,8 +220,10 @@ bbrplusv3_profile_table[] = {
 		.pacing_gain_up		= BBR_UNIT * 3 / 2,
 		.pacing_gain_down	= BBR_UNIT * 3 / 4,
 		.startup_cwnd_gain	= BBR_UNIT * 5 / 2,
+		.drain_gain		= BBR_UNIT * 1200 / 2885,
 		.beta			= BBR_UNIT * 20 / 100,
 		.loss_thresh		= BBR_UNIT * 5 / 100,
+		.full_bw_thresh		= BBR_UNIT * 11 / 10,
 		.probe_rtt_mode_ms	= 50,
 		.probe_rtt_win_ms	= 2500,
 		.ecn_thresh		= BBR_UNIT * 7 / 10,
@@ -226,8 +234,10 @@ bbrplusv3_profile_table[] = {
 		.pacing_gain_up		= BBR_UNIT * 3 / 2,
 		.pacing_gain_down	= BBR_UNIT * 9 / 10,
 		.startup_cwnd_gain	= BBR_UNIT * 9 / 4,
+		.drain_gain		= BBR_UNIT * 1200 / 2885,
 		.beta			= BBR_UNIT * 25 / 100,
 		.loss_thresh		= BBR_UNIT * 5 / 100,
+		.full_bw_thresh		= BBR_UNIT * 11 / 10,
 		.probe_rtt_mode_ms	= 100,
 		.probe_rtt_win_ms	= 3000,
 		.ecn_thresh		= BBR_UNIT * 7 / 10,
@@ -260,8 +270,10 @@ static int bbrplusv3_profile_set(const char *val,
 	bbr_pacing_gain[BBR_BW_PROBE_UP]	= p->pacing_gain_up;
 	bbr_pacing_gain[BBR_BW_PROBE_DOWN]	= p->pacing_gain_down;
 	bbr_startup_cwnd_gain		= p->startup_cwnd_gain;
+	bbr_drain_gain			= p->drain_gain;
 	bbr_beta			= p->beta;
 	bbr_loss_thresh			= p->loss_thresh;
+	bbr_full_bw_thresh		= p->full_bw_thresh;
 	bbr_probe_rtt_mode_ms		= p->probe_rtt_mode_ms;
 	bbr_probe_rtt_win_ms		= p->probe_rtt_win_ms;
 	bbr_ecn_thresh			= p->ecn_thresh;
@@ -295,8 +307,10 @@ module_param_named(pacing_gain_up,
 module_param_named(pacing_gain_down,
 	bbr_pacing_gain[BBR_BW_PROBE_DOWN], int, 0644);
 module_param_named(startup_cwnd_gain, bbr_startup_cwnd_gain, int, 0644);
+module_param_named(drain_gain, bbr_drain_gain, int, 0644);
 module_param_named(beta, bbr_beta, uint, 0644);
 module_param_named(loss_thresh, bbr_loss_thresh, uint, 0644);
+module_param_named(full_bw_thresh, bbr_full_bw_thresh, uint, 0644);
 module_param_named(probe_rtt_mode_ms, bbr_probe_rtt_mode_ms, uint, 0644);
 module_param_named(probe_rtt_win_ms, bbr_probe_rtt_win_ms, uint, 0644);
 module_param_named(ecn_thresh, bbr_ecn_thresh, uint, 0644);
@@ -446,13 +460,17 @@ sed -i 's/bbr_drain_gain = BBR_UNIT \* 1000 \/ 2885/bbr_drain_gain = BBR_UNIT * 
 # min_rtt 窗口: 10s → 20s (tsunami-v3, 长 RTT 链路 min_rtt 估值更稳定)
 sed -i 's/bbr_min_rtt_win_sec = 10/bbr_min_rtt_win_sec = 20/' "$BBRPLUSV3_SRC"
 
-# full_bw_thresh: 1.25 → 2.0 (nanqinlang, STARTUP 不轻易退出)
-sed -i 's/bbr_full_bw_thresh = BBR_UNIT \* 5 \/ 4/bbr_full_bw_thresh = BBR_UNIT * 2/' "$BBRPLUSV3_SRC"
+# full_bw_thresh: 1.25 → 1.10 (降低增长判定阈值, STARTUP 充分探测带宽后再退出)
+# BBR STARTUP 退出条件: 连续 full_bw_cnt(3) 个 round 带宽增长不到 full_bw_thresh
+# 原版 1.25 要求每 round 增长 25% 才算"显著增长"(重置计数器)
+# 改为 1.10 只要 10% 增长即可, 避免 STARTUP 过早退出导致 full_bw 估计偏低
+# 注: 之前的 2.0 方向反了 — 翻倍才算"显著"导致第 3 个 round 就退出 STARTUP
+sed -i 's/bbr_full_bw_thresh = BBR_UNIT \* 5 \/ 4/bbr_full_bw_thresh = BBR_UNIT * 11 \/ 10/' "$BBRPLUSV3_SRC"
 
 # STARTUP pacing gain: 2.77 → 2.885 (BBRv3e1 论文, 2/ln(2))
 sed -i 's/bbr_startup_pacing_gain = BBR_UNIT \* 277 \/ 100 + 1/bbr_startup_pacing_gain = BBR_UNIT * 2885 \/ 1000 + 1/' "$BBRPLUSV3_SRC"
 
-echo "[7c/9] 已优化 STARTUP/DRAIN (tsunami-v3+nanqinlang: drain=0.416, win=20s, thresh=2.0, pacing=2.885)"
+echo "[7c/9] 已优化 STARTUP/DRAIN (tsunami-v3+nanqinlang: drain=0.416, win=20s, thresh=1.10, pacing=2.885)"
 
 # ============================================
 # 8. 修改 Kconfig 和 Makefile
@@ -524,7 +542,7 @@ echo "--- pacing_gain 数组（aggressive 默认值）---"
 grep -A4 'bbr_pacing_gain\[' "$BBRPLUSV3_SRC" | head -5
 echo ""
 echo "--- 关键参数（aggressive 默认值）---"
-grep -E 'bbr_startup_cwnd_gain =|bbr_beta =|bbr_loss_thresh =|bbr_probe_rtt_mode_ms =|bbr_probe_rtt_win_ms =|bbr_ecn_thresh =|bbr_full_loss_cnt =|bbr_inflight_headroom =' "$BBRPLUSV3_SRC" | grep -v 'profile_table\|struct\|\.' | head -10
+grep -E 'bbr_startup_cwnd_gain =|bbr_drain_gain =|bbr_beta =|bbr_loss_thresh =|bbr_full_bw_thresh =|bbr_probe_rtt_mode_ms =|bbr_probe_rtt_win_ms =|bbr_ecn_thresh =|bbr_full_loss_cnt =|bbr_inflight_headroom =' "$BBRPLUSV3_SRC" | grep -v 'profile_table\|struct\|\.' | head -12
 echo ""
 echo "--- Profile 系统 ---"
 PARAM_COUNT=$(grep -c 'module_param' "$BBRPLUSV3_SRC")
@@ -551,8 +569,10 @@ echo "                     conservative   standard    aggressive"
 echo "  pacing_gain UP:    1.25 (320)     1.375 (352) 1.50 (384)"
 echo "  pacing_gain DOWN:  0.91 (232)     0.85 (217)  0.75 (192)"
 echo "  startup_cwnd_gain: 2.0 (512)      2.25 (576)  2.50 (640)"
+echo "  drain_gain:        0.35 (89)      0.38 (97)   0.42 (107)"
 echo "  beta:              30% (76)       25% (64)    20% (51)"
 echo "  loss_thresh:       2% (5)         3.5% (8)    5% (12)"
+echo "  full_bw_thresh:    1.25 (320)     1.20 (307)  1.10 (281)"
 echo "  probe_rtt_mode_ms: 200            100         50"
 echo "  probe_rtt_win_ms:  5000           3000        2500"
 echo "  ecn_thresh:        50% (128)      60% (153)   70% (179)"
