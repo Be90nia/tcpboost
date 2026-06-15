@@ -17,7 +17,7 @@
 
 跨太平洋链路实测（RTT ~161ms，Debian 12 VPS）：
 
-| 方向 | CUBIC | BBRPlusV3 (30%/80%) | 提升 |
+| 方向 | CUBIC | BBRPlusV3 (15%/30%) | 提升 |
 |------|-------|---------------------|------|
 | 下载单流 | 0.3 Mbps | 53.5 Mbps | **178x** |
 | 下载多流 | 2.6 Mbps | 77.7 Mbps | **30x** |
@@ -93,13 +93,20 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/Be90nia
 
 ### BBRPlusV3 参数
 
+平衡优化配置（保留跨太平洋加速优势 + 消除断流根因）：
+
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `loss_thresh` | 30% (77/256) | 丢包阈值，低于此值不降速 |
-| `beta` | 80% (204/256) | 丢包响应幅度，越高越不降速 |
+| `loss_thresh` | 15% (38/256) | 丢包阈值，容忍跨太平洋正常丢包(1-5%)，真实拥塞(>15%)降速 |
+| `beta` | 30% (76/256) | BBRPlus 经典值，丢包后恢复 70% |
+| `pacing_gain_down` | 0.85 (217/256) | PROBE_BW DOWN 阶段速率，减少下载波动 |
+| `probe_rtt_mode_ms` | 100 | PROBE_RTT 持续时间，延迟峰值深度 |
+| `probe_rtt_win_ms` | 5000 | PROBE_RTT 触发周期，游戏延迟峰值频率 |
 | `min_pacing_rate` | 0 (关闭) | 保底发送速率，防 STARTUP 早退 |
 | `profile` | aggressive (2) | 参数预设：conservative/standard/aggressive/wifi |
 | `gc_enable` | 0 (关闭) | BBR-GC 自适应 pacing gain（实验性） |
+
+> **保留的激进参数**（不变）：`startup_pacing_gain=2.885`、`startup_cwnd_gain=2.5`、`pacing_gain_up=1.5`、`drain_gain=0.416`、`min_rtt_win_sec=20s` — 这些是跨太平洋加速的核心优势。
 
 **运行时调参**（无需重编译）：
 
@@ -119,7 +126,7 @@ cat /sys/module/tcp_bbrplusv3/parameters/loss_thresh
 |------|---------|---------|---------|---------|
 | 保守 | ≤100Mbps VPS | bbrplusv3 | 标准 | — |
 | 均衡 | 1Gbps VPS | bbrplusv3 | 锐速风格 | initcwnd=32 |
-| 激进 | 科学上网 | bbrplusv3 30%/80% | 锐速风格 + sysctl 调优 | initcwnd=32 + 可设 min_pacing |
+| 激进 | 科学上网 | bbrplusv3 15%/30% | 锐速风格 + sysctl 调优 | initcwnd=32 + 可设 min_pacing |
 
 ## 无感切换
 
@@ -137,11 +144,12 @@ cat /sys/module/tcp_bbrplusv3/parameters/loss_thresh
 
 BBRPlusV3 = Google BBRv3 核心 + BBRPlus 激进参数 + tsunami-v3 单流优化：
 
-- **STARTUP 抗早退** — `full_bw_thresh` 1.25→2.0，高丢包链路不轻易退出 STARTUP
+- **STARTUP 抗早退** — `full_bw_thresh` 1.25→1.10，STARTUP 充分探测带宽后再退出
 - **温和 DRAIN** — `drain_gain` 0.347→0.416，减少 STARTUP 后的过度排空
 - **快爬升** — `startup_pacing_gain` 2.77→2.885 (BBRv3e1: 2/ln(2))
 - **长 RTT 稳定** — `min_rtt_win_sec` 10→20s，跨太平洋链路 min_rtt 估值更稳
-- **丢包容忍** — `loss_thresh` 2%→30%，高丢包链路不降速
+- **丢包容忍** — `loss_thresh` 2%→15%（运行时），容忍跨太平洋正常丢包，真实拥塞时降速
+- **稳定性优化** — `pacing_gain_down`=0.85、`probe_rtt` 5s/100ms，减少下载波动和游戏延迟峰值
 - **BBR-ACD 检测** — cong_control wrapper 检测随机丢包并补偿 pacing（实验性）
 - **保底 pacing** — `min_pacing_rate` 防 STARTUP 阶段 pacing 过低
 
