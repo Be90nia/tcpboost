@@ -363,13 +363,14 @@ uninstall_kernel() {
 # ===== 网络优化 =====
 
 # BBRPlusV3 参数设置（科学上网场景最优配置）
-# 基于跨太平洋真实链路测试验证 (tsunami-v3 优化内核):
-#   loss_thresh=50%: 高丢包链路下保持发送速率
-#   beta=90%: 极轻微降速（仅降 10%）
-#   min_pacing_rate: 保底 pacing rate，防 STARTUP 早退
+# 基于跨太平洋真实链路测试验证 (6.12.90 tsunami-v3 内核):
+#   loss_thresh=30%: 丢包 30% 以下不触发 inflight_lo 降速
+#   beta=80%: 即使触发也只降 20%
+#   min_pacing_rate=100Mbps: 保底 pacing，防 STARTUP 早退
 # 测试结果 (VPS 199.115.231.188, RTT ~161ms):
-#   上传单流: 79.8 Mbps (cubic 85.7)
-#   下载单流: 26.1 Mbps (cubic 仅 0.3, 提升 87x)
+#   单流下载: 53.5 Mbps (cubic 仅 0.5)
+#   多流下载: 77.7 Mbps
+#   多流上传: 120.5 Mbps
 apply_bbrplusv3_params() {
   local param_dir="/sys/module/tcp_bbrplusv3/parameters"
   if [ ! -d "$param_dir" ]; then
@@ -380,33 +381,31 @@ apply_bbrplusv3_params() {
     return 0
   fi
 
-  # 设置 profile = aggressive (2)
   echo 2 > "$param_dir/profile" 2>/dev/null || true
+  echo 77 > "$param_dir/loss_thresh" 2>/dev/null || true
+  echo 204 > "$param_dir/beta" 2>/dev/null || true
 
-  # 50%/90% 激进参数 (BBR_UNIT=256)
-  echo 128 > "$param_dir/loss_thresh" 2>/dev/null || true
-  echo 230 > "$param_dir/beta" 2>/dev/null || true
-
-  # min_pacing_rate: 默认关闭(0)
-  # 用户可通过 set_min_pacing_rate 设置（推荐 50Mbps = 6250000 bytes/sec）
+  # min_pacing_rate: 100Mbps = 12500000 bytes/sec
   if [ -w "$param_dir/min_pacing_rate" ]; then
-    local current_mpr
-    current_mpr=$(cat "$param_dir/min_pacing_rate" 2>/dev/null || echo 0)
-    # 保持已设置的值，不覆盖
-    [ -z "$current_mpr" ] && echo 0 > "$param_dir/min_pacing_rate" 2>/dev/null || true
+    echo 12500000 > "$param_dir/min_pacing_rate" 2>/dev/null || true
+  fi
+  # gc_enable: 默认关闭 (6.12.90 上 GC 打破 UP/DOWN 平衡)
+  if [ -w "$param_dir/gc_enable" ]; then
+    echo 0 > "$param_dir/gc_enable" 2>/dev/null || true
   fi
 
-  # 持久化到配置文件
   mkdir -p "$CONF_DIR"
   cat > "$CONF_DIR/bbrplusv3.conf" <<'EOF'
-# BBRPlusV3 科学上网最优参数 (tsunami-v3 内核测试验证)
-# profile=2(aggressive), loss_thresh=50%, beta=90%
+# BBRPlusV3 科学上网最优参数 (6.12.90 tsunami-v3 测试验证)
+# profile=2(aggressive), loss_thresh=30%, beta=80%, min_pacing=100Mbps
 profile=2
-loss_thresh=128
-beta=230
+loss_thresh=77
+beta=204
+min_pacing_rate=12500000
+gc_enable=0
 EOF
 
-  info "BBRPlusV3 参数已设置 (loss_thresh=50%, beta=90%)"
+  info "BBRPlusV3 参数已设置 (loss=30%, beta=80%, min_pacing=100Mbps)"
 }
 
 # 设置 min_pacing_rate（保底速率，防单流 STARTUP 早退）
@@ -452,7 +451,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'PARAM_DIR=/sys/module/tcp_bbrplusv3/parameters; [ -d "$PARAM_DIR" ] && echo 2 > $PARAM_DIR/profile && echo 128 > $PARAM_DIR/loss_thresh && echo 230 > $PARAM_DIR/beta && echo 0 > $PARAM_DIR/gc_enable 2>/dev/null || true'
+ExecStart=/bin/bash -c 'PARAM_DIR=/sys/module/tcp_bbrplusv3/parameters; [ -d "$PARAM_DIR" ] && echo 2 > $PARAM_DIR/profile && echo 77 > $PARAM_DIR/loss_thresh && echo 204 > $PARAM_DIR/beta && echo 12500000 > $PARAM_DIR/min_pacing_rate 2>/dev/null && echo 0 > $PARAM_DIR/gc_enable 2>/dev/null || true'
 
 [Install]
 WantedBy=multi-user.target
@@ -654,7 +653,7 @@ EOF
       info "初始拥塞窗口已设为 32 (initcwnd/initrwnd)" || true
   fi
 
-  info "已应用激进方案 (bbrplusv3 + 50%/90% 参数 + 锐速风格 TCP 栈优化)"
+  info "已应用激进方案 (bbrplusv3 + 30%/80% + min_pacing 100Mbps + 锐速风格 TCP 栈优化)"
   echo ""
   echo -e "  ${CYAN}无感切换已启用:${NC}"
   echo "    xray / sing-box / 通用网络 → 自动使用 BBRPlusV3"
