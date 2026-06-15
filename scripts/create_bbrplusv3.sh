@@ -331,6 +331,7 @@ static int bbrplusv3_acd_enable;
 static int bbrplusv3_acd_rtt_factor = 125;
 static int bbrplusv3_pacing_rate_scale = 100;
 static u64 bbrplusv3_min_pacing_rate;
+static int bbrplusv3_gc_enable = 1;
 
 static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 			   const struct rate_sample *rs)
@@ -369,6 +370,39 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 			WRITE_ONCE(sk->sk_pacing_rate,
 				   bbrplusv3_min_pacing_rate);
 	}
+
+	/* BBR-GC: Gamma Correction 自适应 pacing gain
+	 * 论文: Sensors 2023 "Optimization of BBR based on pacing gain model"
+	 * 单流(ω≈0): Pdown→1.0, DOWN 阶段不降速
+	 * 多流(ω>0): Pdown 降低, 激进让路保持公平性
+	 * RTT 公平性 +50%, 重传率 -26%, 延迟 -57%
+	 */
+	if (bbrplusv3_gc_enable && rs->rtt_us > 0 &&
+	    bbr->min_rtt_us > 0 && bbr->mode == BBR_PROBE_BW) {
+		u32 min_rtt = bbr->min_rtt_us;
+
+		if (rs->rtt_us > min_rtt) {
+			u64 omega, w2, w4, adaptive_gain, gc_rate;
+
+			/* ω = (rtt - min_rtt) / min_rtt, clamp [0,1] */
+			omega = (u64)(rs->rtt_us - min_rtt) *
+				BBR_UNIT / min_rtt;
+			if (omega > BBR_UNIT)
+				omega = BBR_UNIT;
+			/* gamma correction: Pdown = 1.0 - 0.5 * ω^4 */
+			w2 = omega * omega / BBR_UNIT;
+			w4 = w2 * w2 / BBR_UNIT;
+			adaptive_gain = BBR_UNIT -
+				(BBR_UNIT / 2) * w4 / BBR_UNIT;
+			gc_rate = bbr->bw * adaptive_gain / BBR_UNIT;
+			if (bbrplusv3_min_pacing_rate > 0 &&
+			    gc_rate < bbrplusv3_min_pacing_rate)
+				gc_rate = bbrplusv3_min_pacing_rate;
+			WRITE_ONCE(sk->sk_pacing_rate,
+				   min_t(u64, gc_rate,
+					 sk->sk_max_pacing_rate));
+		}
+	}
 }
 
 module_param_named(acd_enable, bbrplusv3_acd_enable, int, 0644);
@@ -382,9 +416,12 @@ MODULE_PARM_DESC(pacing_rate_scale, "Pacing rate scale in % (100=100%, 90=90%)")
 
 module_param_named(min_pacing_rate, bbrplusv3_min_pacing_rate, ullong, 0644);
 MODULE_PARM_DESC(min_pacing_rate, "Min pacing rate bytes/s (0=off, e.g. 1250000=10Mbps)");
+
+module_param_named(gc_enable, bbrplusv3_gc_enable, int, 0644);
+MODULE_PARM_DESC(gc_enable, "BBR-GC adaptive pacing gain (0=off, 1=on)");
 BBRPLUSV3_ALGO_EOF
 
-echo "[7b/9] 已注入 BBR-ACD + Pacing Scale + cong_control wrapper"
+echo "[7b/9] 已注入 BBR-ACD + Pacing Scale + cong_control wrapper + BBR-GC"
 
 # ============================================
 # 7c. STARTUP 阶段优化（单流性能改进）
