@@ -395,6 +395,15 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 			u32 gc_down = (u32)(BBR_UNIT -
 				(BBR_UNIT / 2) * w4 / BBR_UNIT);
 
+			/* Cap at 0.91 to retain mild drain
+			 * (prevents upload regression from zero-drain) */
+			{
+				u32 gc_cap = BBR_UNIT * 91 / 100;
+
+				if (gc_down > gc_cap)
+					gc_down = gc_cap;
+			}
+
 			/* 直接更新全局 DOWN gain
 			 * 只影响 PROBE_BW DOWN phase
 			 * UP/CRUISE/REFILL 完全不受影响 */
