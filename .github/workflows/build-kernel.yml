@@ -446,7 +446,7 @@ jobs:
         working-directory: linux-src
         run: |
           echo "正在生成 RPM 包..."
-          make -j$(nproc) binrpm-pkg || {
+          make -j$(nproc) INSTALL_MOD_STRIP=1 binrpm-pkg || {
             echo "RPM 打包失败, 尝试手动打包..."
             sudo apt-get install -y alien
             DEB_FILE=$(ls -t ../*.deb 2>/dev/null | head -1)
