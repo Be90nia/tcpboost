@@ -58,7 +58,7 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/Be90nia
   4) 激进方案  科学上网推荐
 
   ── 高级 ──
-  5) 智能推荐 (自动检测代理环境)
+  5) 一键优化 (检测环境 + 自动应用最优)
   6) 手动切换算法
   7) 设置最低保底速率 (min_pacing_rate)
   8) 清理多余内核 (只保留当前 tcpboost)
@@ -72,7 +72,7 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/Be90nia
 ```bash
 ./tcp.sh install                 # 安装内核
 ./tcp.sh optimize                # 应用均衡优化
-./tcp.sh auto                    # 智能推荐算法
+./tcp.sh auto                    # 一键优化（自动检测 + 应用激进方案 + 提示 min_pacing_rate）
 ./tcp.sh switch bbrplusv3        # 切换到 BBRPlusV3
 ./tcp.sh status                  # 查看当前状态
 ./tcp.sh set-min-pacing-rate 100 # 设置保底速率 100Mbps

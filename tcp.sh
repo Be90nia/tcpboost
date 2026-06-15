@@ -897,7 +897,7 @@ detect_proxy() {
 # 智能推荐拥塞控制算法
 # 检测代理环境后推荐最合适的算法并确认切换
 smart_recommend() {
-  info "正在检测代理环境..."
+  info "正在检测环境..."
   detect_proxy
 
   echo ""
@@ -908,65 +908,27 @@ smart_recommend() {
   echo "  丢包等级:  ${PACKET_LOSS}"
   echo ""
 
-  local recommend_algo=""
-  local recommend_reason=""
-
-  # 推荐逻辑 — 代理场景统一推荐 bbrplusv3（30%/80%最优参数）
+  # 所有场景统一使用 bbrplusv3（tcpboost 内核唯一最优选择）
   if [ "$PROXY_HY2" = "yes" ]; then
-    if modprobe tcp_brutal 2>/dev/null; then
-      info "已加载 tcp_brutal 内核模块（sing-box Hy2 socket 将自动使用 brutal）"
-    else
-      warn "tcp_brutal 模块加载失败，Hysteria2 可能无法使用 TCP Brutal"
-    fi
-    recommend_algo="bbrplusv3"
-    recommend_reason="检测到 Hysteria2 + 代理场景, brutal 供 Hy2 per-connection, 全局 BBRPlusV3(30%/80%) 最优"
-  elif [ "$PROXY_XRAY" = "yes" ] || [ "$PROXY_SINGBOX" = "yes" ]; then
-    # xray / sing-box 代理场景 → bbrplusv3
-    recommend_algo="bbrplusv3"
-    if [ "$PACKET_LOSS" = "high" ]; then
-      recommend_reason="代理场景 + 高丢包(≥5%), BBRPlusV3(30%/80%) 单流111M/多流222M, xray/sing-box 自动使用"
-    elif [ "$PACKET_LOSS" = "medium" ]; then
-      recommend_reason="代理场景 + 中丢包(1-5%), BBRPlusV3(30%/80%) 抗丢包+高吞吐, xray/sing-box 自动使用"
-    else
-      recommend_reason="代理场景 + 低丢包, BBRPlusV3(30%/80%) 均衡最优, xray/sing-box 自动使用"
-    fi
-  elif [ "$PACKET_LOSS" = "high" ]; then
-    # 高丢包无代理 → BBRPlusV3 抗丢包
-    recommend_algo="bbrplusv3"
-    recommend_reason="高丢包(≥5%), BBRPlusV3(30%/80%) 抗丢包性能提升 3-4 倍"
-  elif [ "$PACKET_LOSS" = "medium" ]; then
-    recommend_algo="bbrplusv3"
-    recommend_reason="丢包 1-5%, BBRPlusV3 在丢包场景下优于 BBRv3"
-  else
-    recommend_algo="bbrplusv3"
-    recommend_reason="未检测到代理, 低丢包, BBRPlusV3 兼具高吞吐与公平性"
+    modprobe tcp_brutal 2>/dev/null && info "已加载 tcp_brutal（Hysteria2 可用）"
   fi
 
-  echo -e "  ${GREEN}推荐算法: ${recommend_algo}${NC}"
-  echo -e "  原因: ${recommend_reason}"
+  echo -e "  ${GREEN}→ 应用 BBRPlusV3 (30%/80%) 激进方案${NC}"
   echo ""
 
-  # 无感切换说明
-  if [ "$recommend_algo" = "bbrplusv3" ]; then
-    echo -e "  ${CYAN}无感切换说明:${NC}"
-    if [ "$PROXY_XRAY" = "yes" ]; then
-      echo "    xray:      自动使用 BBRPlusV3, 无需额外配置"
-    fi
-    if [ "$PROXY_SINGBOX" = "yes" ]; then
-      echo "    sing-box:  自动使用 BBRPlusV3"
-      echo "               如需确定性带宽, 在 sing-box 配置中启用 multiplex.brutal"
-    fi
-    echo "    通用网络:  自动使用 BBRPlusV3"
-    echo ""
+  # 直接应用激进方案
+  apply_profile_aggressive
+
+  # 提示设置 min_pacing_rate
+  echo ""
+  echo -e "  ${YELLOW}建议设置 min_pacing_rate 提升单流下载性能${NC}"
+  echo "  推荐值：100 (100Mbps) 或 500 (500Mbps)"
+  read -p "  设置 min_pacing_rate? 输入 Mbps (0=跳过): " mpr_input
+  if [ -n "$mpr_input" ] && [ "$mpr_input" != "0" ]; then
+    set_min_pacing_rate "$mpr_input"
   fi
 
-  read -p "  是否切换到 ${recommend_algo}？(Y/n): " confirm
-  if [ "$confirm" != "n" ] && [ "$confirm" != "N" ]; then
-    switch_algorithm "$recommend_algo"
-    info "智能推荐完成"
-  else
-    info "已跳过"
-  fi
+  info "一键优化完成"
 }
 
 # ===== 算法管理 =====
@@ -1103,7 +1065,7 @@ show_menu() {
   echo "     bbrplusv3 30%/80% + 锐速风格 + 可设保底速率"
   echo ""
   echo "  ── 高级 ──"
-  echo "  5) 智能推荐 (自动检测代理环境)"
+  echo "  5) 一键优化 (检测环境 + 自动应用最优)"
   echo "  6) 手动切换算法"
   echo "  7) 设置最低保底速率 (min_pacing_rate)"
   echo "  8) 清理多余内核 (只保留当前 tcpboost)"
