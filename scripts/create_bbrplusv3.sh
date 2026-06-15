@@ -330,6 +330,7 @@ cat >> "$BBRPLUSV3_SRC" << 'BBRPLUSV3_ALGO_EOF'
 static int bbrplusv3_acd_enable;
 static int bbrplusv3_acd_rtt_factor = 125;
 static int bbrplusv3_pacing_rate_scale = 100;
+static u64 bbrplusv3_min_pacing_rate;
 
 static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 			   const struct rate_sample *rs)
@@ -359,6 +360,15 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 		rate = rate * bbrplusv3_pacing_rate_scale / 100;
 		WRITE_ONCE(sk->sk_pacing_rate, rate);
 	}
+
+	/* Minimum pacing rate floor (单流保底) */
+	if (bbrplusv3_min_pacing_rate > 0) {
+		u64 rate = READ_ONCE(sk->sk_pacing_rate);
+
+		if (rate < bbrplusv3_min_pacing_rate)
+			WRITE_ONCE(sk->sk_pacing_rate,
+				   bbrplusv3_min_pacing_rate);
+	}
 }
 
 module_param_named(acd_enable, bbrplusv3_acd_enable, int, 0644);
@@ -369,9 +379,27 @@ MODULE_PARM_DESC(acd_rtt_factor, "ACD RTT threshold in % (125=1.25x min_rtt)");
 
 module_param_named(pacing_rate_scale, bbrplusv3_pacing_rate_scale, int, 0644);
 MODULE_PARM_DESC(pacing_rate_scale, "Pacing rate scale in % (100=100%, 90=90%)");
+
+module_param_named(min_pacing_rate, bbrplusv3_min_pacing_rate, ullong, 0644);
+MODULE_PARM_DESC(min_pacing_rate, "Min pacing rate bytes/s (0=off, e.g. 1250000=10Mbps)");
 BBRPLUSV3_ALGO_EOF
 
 echo "[7b/9] 已注入 BBR-ACD + Pacing Scale + cong_control wrapper"
+
+# ============================================
+# 7c. STARTUP 阶段优化（单流性能改进）
+# 基于跨太平洋链路测试 + BBRv3e1/xquic 研究:
+#   - drain_gain 0.347→0.75: 更温和的 DRAIN，减少高 RTT 恢复延迟
+#   - startup_pacing_gain 2.77→2.885: 更快的指数爬升
+# ============================================
+
+# DRAIN gain: 0.347 → 0.75 (alibaba/xquic 验证的值)
+sed -i 's/bbr_drain_gain = BBR_UNIT \* 1000 \/ 2885/bbr_drain_gain = BBR_UNIT * 75 \/ 100/' "$BBRPLUSV3_SRC"
+
+# STARTUP pacing gain: 2.77 → 2.885 (BBRv3e1 论文推荐，2/ln(2))
+sed -i 's/bbr_startup_pacing_gain = BBR_UNIT \* 277 \/ 100 + 1/bbr_startup_pacing_gain = BBR_UNIT * 2885 \/ 1000 + 1/' "$BBRPLUSV3_SRC"
+
+echo "[7c/9] 已优化 STARTUP/DRAIN 参数 (drain=0.75, pacing=2.885)"
 
 # ============================================
 # 8. 修改 Kconfig 和 Makefile
