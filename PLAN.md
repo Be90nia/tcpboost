@@ -262,12 +262,12 @@ tcpboost/
 - Cloudflare/Dropbox 生产 sysctl 调优经验
 - RFC 6928 (IW10) + RFC 7413 (TFO) + RFC 8446 (TLS 1.3)
 
-### Phase 2: 精细化调优（待办，记录于 beads）
+### Phase 2: 精细化调优（已完成 2026-06-16）
 
-| 优化项 | Beads ID | 优先级 | 说明 |
-|--------|----------|--------|------|
-| beta 加权 inflight_hi 软边界 | tcpboost-7gz | P2 | 替代硬性 cwnd 减半，`inflight_hi = max(tx_in_flight, target×(1-β))`，BBRv3 已有 `bbr_handle_inflight_too_high` 可参考 |
-| BBR-GC 真 gamma correction | tcpboost-20h | P3 | `Pup = 1 + 0.25×(inflight/BDP)^(1/γ)`，仅影响 PROBE_BW DOWN phase，论文 Sensors 2023 PMC10181671 |
+| 优化项 | 状态 | 说明 |
+|--------|------|------|
+| beta 加权 cwnd 缩减 | ✅ 完成 | BBR-ACD 真拥塞时 Recovery 首入执行 `cwnd × beta`（新增 `acd_cwnd_reduce` 参数，默认开启）。BBRv3 已有 `bbr_handle_inflight_too_high` 的 inflight_hi 软边界，本优化在其基础上增加显式 cwnd 缩减 |
+| BBR-GC gamma correction | ✅ 完成 | 从 omega^4 公式改进为 sqrt 近似（γ=2 gamma correction），基于 queue_ratio 平滑过渡 DOWN gain。新增 `gc_base_down` 全局变量保存 profile 原始值避免递归修改 |
 
 ### Phase 3: 探索性（远期，需评估）
 

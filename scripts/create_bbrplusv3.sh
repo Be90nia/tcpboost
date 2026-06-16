@@ -295,6 +295,7 @@ static int bbrplusv3_profile_set(const char *val,
 
 	bbr_pacing_gain[BBR_BW_PROBE_UP]	= p->pacing_gain_up;
 	bbr_pacing_gain[BBR_BW_PROBE_DOWN]	= p->pacing_gain_down;
+	bbrplusv3_gc_base_down		= p->pacing_gain_down;
 	bbr_startup_cwnd_gain		= p->startup_cwnd_gain;
 	bbr_startup_pacing_gain		= p->startup_pacing_gain;
 	bbr_drain_gain			= p->drain_gain;
@@ -374,9 +375,11 @@ cat >> "$BBRPLUSV3_SRC" << 'BBRPLUSV3_ALGO_EOF'
 static int bbrplusv3_acd_enable;
 static int bbrplusv3_acd_rtt_factor = 200;
 static int bbrplusv3_acd_congestion_scale = 70;
+static int bbrplusv3_acd_cwnd_reduce = 1;
 static int bbrplusv3_pacing_rate_scale = 100;
 static u64 bbrplusv3_min_pacing_rate;
 static int bbrplusv3_gc_enable = 0;
+static int bbrplusv3_gc_base_down;	/* profile 原始 DOWN gain, GC 基准值 */
 
 static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 			   const struct rate_sample *rs)
@@ -401,6 +404,20 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 
 			rate = rate * bbrplusv3_acd_congestion_scale / 100;
 			WRITE_ONCE(sk->sk_pacing_rate, rate);
+
+			/* beta 加权 cwnd 缩减 (优化 D)
+			 * 仅在 Recovery 首入时执行一次, 避免持续减半
+			 * cwnd_new = max(cwnd × beta, 4) */
+			if (bbrplusv3_acd_cwnd_reduce &&
+			    bbr->prev_ca_state != TCP_CA_Recovery &&
+			    inet_csk(sk)->icsk_ca_state == TCP_CA_Recovery) {
+				struct tcp_sock *tp = tcp_sk(sk);
+				u32 cwnd = tcp_snd_cwnd(tp);
+				u32 new_cwnd = max_t(u32,
+					(u64)cwnd * bbr_beta / BBR_UNIT, 4);
+
+				tcp_snd_cwnd_set(tp, new_cwnd);
+			}
 		} else {
 			/* 随机丢包: RTT 正常说明非拥塞，pacing 轻微补偿 */
 			u64 rate = READ_ONCE(sk->sk_pacing_rate);
@@ -427,45 +444,57 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 				   bbrplusv3_min_pacing_rate);
 	}
 
-	/* BBR-GC: Gamma Correction 自适应 pacing gain
+	/* BBR-GC: Gamma Correction 自适应 pacing gain (优化 E)
 	 * 论文: Sensors 2023 "Optimization of BBR based on pacing gain model"
-	 * 直接修改全局 bbr_pacing_gain[DOWN]，只影响 DOWN phase
-	 * 单流(ω≈0): DOWN gain → 1.0 (不降速)
-	 * 多流(ω>0): DOWN gain → 降低 (激进让路)
-	 */
+	 * 改进: 用 sqrt 近似 gamma=2, 基于 queue_ratio 平滑过渡
+	 * queue_ratio = (rtt - min_rtt) / min_rtt (队列膨胀比例)
+	 * gc_down = BBR_UNIT - range × sqrt(queue_ratio)
+	 * 无队列(q=0): gc_down → cap 0.91 (不降速)
+	 * 满队列(q=1): gc_down → base_down (profile DOWN gain)
+	 * sqrt 用整数牛顿法 1 次迭代近似 */
 	if (bbrplusv3_gc_enable && rs->rtt_us > 0 &&
-	    bbr->min_rtt_us > 0) {
-		u32 min_rtt = bbr->min_rtt_us;
-		u64 omega = 0;
+	    bbr->min_rtt_us > 0 && bbrplusv3_gc_base_down > 0) {
+		u32 queue_ratio = 0;
+		u32 base_down = bbrplusv3_gc_base_down;
+		u32 range = BBR_UNIT - base_down;
+		u32 sqrt_q;
+		u32 gc_down;
 
-		if (rs->rtt_us > min_rtt)
-			omega = (u64)(rs->rtt_us - min_rtt) *
-				BBR_UNIT / min_rtt;
-		if (omega > BBR_UNIT)
-			omega = BBR_UNIT;
-
-		/* gamma correction: Pdown = 1.0 - 0.5 * ω^4 */
-		{
-			u64 w2 = omega * omega / BBR_UNIT;
-			u64 w4 = w2 * w2 / BBR_UNIT;
-			u32 gc_down = (u32)(BBR_UNIT -
-				(BBR_UNIT / 2) * w4 / BBR_UNIT);
-
-			/* Cap at 0.91 to retain mild drain
-			 * (prevents upload regression from zero-drain) */
-			{
-				u32 gc_cap = BBR_UNIT * 91 / 100;
-
-				if (gc_down > gc_cap)
-					gc_down = gc_cap;
-			}
-
-			/* 直接更新全局 DOWN gain
-			 * 只影响 PROBE_BW DOWN phase
-			 * UP/CRUISE/REFILL 完全不受影响 */
-			WRITE_ONCE(bbr_pacing_gain[BBR_BW_PROBE_DOWN],
-				   gc_down);
+		if (rs->rtt_us > bbr->min_rtt_us) {
+			queue_ratio = (u32)((u64)(rs->rtt_us - bbr->min_rtt_us) *
+					    BBR_UNIT / bbr->min_rtt_us);
+			if (queue_ratio > BBR_UNIT)
+				queue_ratio = BBR_UNIT;
 		}
+
+		/* sqrt 近似 (牛顿法 1 次迭代) */
+		if (queue_ratio == 0) {
+			sqrt_q = 0;
+		} else {
+			u32 x = queue_ratio / 2 + 1;
+
+			x = (x + queue_ratio / x) / 2;
+			sqrt_q = x;
+		}
+
+		gc_down = BBR_UNIT - range * sqrt_q / BBR_UNIT;
+
+		/* Cap at 0.91 (保留温和排空, 避免 0-drain 上传退化) */
+		{
+			u32 gc_cap = BBR_UNIT * 91 / 100;
+
+			if (gc_down > gc_cap)
+				gc_down = gc_cap;
+		}
+		/* 不低于 base_down (保持最小排空能力) */
+		if (gc_down < base_down)
+			gc_down = base_down;
+
+		/* 直接更新全局 DOWN gain
+		 * 只影响 PROBE_BW DOWN phase
+		 * UP/CRUISE/REFILL 完全不受影响 */
+		WRITE_ONCE(bbr_pacing_gain[BBR_BW_PROBE_DOWN],
+			   gc_down);
 	}
 }
 
@@ -477,6 +506,9 @@ MODULE_PARM_DESC(acd_rtt_factor, "ACD RTT threshold in % (200=2x min_rtt, 真拥
 
 module_param_named(acd_congestion_scale, bbrplusv3_acd_congestion_scale, int, 0644);
 MODULE_PARM_DESC(acd_congestion_scale, "ACD pacing scale on true congestion in % (70=减速到70%)");
+
+module_param_named(acd_cwnd_reduce, bbrplusv3_acd_cwnd_reduce, int, 0644);
+MODULE_PARM_DESC(acd_cwnd_reduce, "ACD beta-weighted cwnd reduction on true congestion (0=off, 1=on)");
 
 module_param_named(pacing_rate_scale, bbrplusv3_pacing_rate_scale, int, 0644);
 MODULE_PARM_DESC(pacing_rate_scale, "Pacing rate scale in % (100=100%, 90=90%)");

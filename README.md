@@ -124,6 +124,7 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/Be90nia
 | `acd_enable` | 0 (关闭) | BBR-ACD 真拥塞检测（真拥塞 pacing×0.7，随机丢包 pacing×1.05）|
 | `acd_rtt_factor` | 200 (%) | ACD 真拥塞 RTT 阈值（200=2×min_rtt）|
 | `acd_congestion_scale` | 70 (%) | ACD 真拥塞 pacing 减速比例（70=减速到 70%）|
+| `acd_cwnd_reduce` | 1 (开启) | ACD 真拥塞时 beta 加权 cwnd 缩减（Recovery 首入执行一次）|
 
 > **保留的激进参数**（不变）：`startup_pacing_gain=2.885`、`startup_cwnd_gain=2.5`、`pacing_gain_up=1.5`、`drain_gain=0.416`、`min_rtt_win_sec=20s` — 这些是跨太平洋加速的核心优势。
 
