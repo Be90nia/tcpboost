@@ -557,7 +557,6 @@ EOF
 # 自动优化内容（mbps > 0 时）：
 #   PROBE_RTT: 5s/100ms → 10s/50ms（减少 cwnd 骤降频率和深度）
 #   pacing_gain_down: 0.85 → 0.90（减少周期性降速）
-#   tcp_notsent_lowat: 128KB（减少 bufferbloat）
 set_min_pacing_rate() {
   local mbps="${1:-0}"
   local param_dir="/sys/module/tcp_bbrplusv3/parameters"
@@ -578,7 +577,6 @@ set_min_pacing_rate() {
     echo 5000 > "$param_dir/probe_rtt_win_ms" 2>/dev/null || true
     echo 100 > "$param_dir/probe_rtt_mode_ms" 2>/dev/null || true
     echo 217 > "$param_dir/pacing_gain_down" 2>/dev/null || true
-    sysctl -w net.ipv4.tcp_notsent_lowat=0 >/dev/null 2>&1 || true
 
     if [ -f "$CONF_DIR/bbrplusv3.conf" ]; then
       sed -i "/^min_pacing_rate=/d; /^probe_rtt_win_ms=/d; /^probe_rtt_mode_ms=/d; /^pacing_gain_down=/d" "$CONF_DIR/bbrplusv3.conf"
@@ -598,9 +596,6 @@ set_min_pacing_rate() {
 
   # 2. pacing_gain_down: 0.85→0.90（减少 PROBE_BW DOWN 周期性降速）
   echo 230 > "$param_dir/pacing_gain_down" 2>/dev/null || true
-
-  # 3. tcp_notsent_lowat=128KB（Cloudflare 生产值，减少 bufferbloat）
-  sysctl -w net.ipv4.tcp_notsent_lowat=131072 >/dev/null 2>&1 || true
 
   # === 持久化 ===
   mkdir -p "$CONF_DIR"
@@ -627,7 +622,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'PD=/sys/module/tcp_bbrplusv3/parameters; [ -d "\$PD" ] && echo $bps > \$PD/min_pacing_rate && echo 10000 > \$PD/probe_rtt_win_ms && echo 50 > \$PD/probe_rtt_mode_ms && echo 230 > \$PD/pacing_gain_down 2>/dev/null; sysctl -w net.ipv4.tcp_notsent_lowat=131072 2>/dev/null; true'
+ExecStart=/bin/bash -c 'PD=/sys/module/tcp_bbrplusv3/parameters; [ -d "\$PD" ] && echo $bps > \$PD/min_pacing_rate && echo 10000 > \$PD/probe_rtt_win_ms && echo 50 > \$PD/probe_rtt_mode_ms && echo 230 > \$PD/pacing_gain_down 2>/dev/null; true'
 
 [Install]
 WantedBy=multi-user.target
@@ -640,7 +635,6 @@ EOF
   echo -e "  ${CYAN}min_pacing_rate:${NC}    ${mbps} Mbps（pacing 保底）"
   echo -e "  ${CYAN}PROBE_RTT:${NC}         10s/50ms（原 5s/100ms，骤降频率/深度减半）"
   echo -e "  ${CYAN}pacing_gain_down:${NC}  0.90（原 0.85，减少周期性降速）"
-  echo -e "  ${CYAN}tcp_notsent_lowat:${NC} 128KB（减少 bufferbloat）"
   echo ""
   echo -e "  ${GREEN}预期:${NC} 视频流不再需要刷新 | 持续大流量吞吐更稳定"
   echo -e "  ${YELLOW}恢复默认:${NC} ./tcp.sh set-min-pacing-rate 0"
