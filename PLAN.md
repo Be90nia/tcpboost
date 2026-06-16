@@ -244,20 +244,15 @@ tcpboost/
 | 优化项 | 状态 | 说明 |
 |--------|------|------|
 | BBRv3 核心机制验证 | ✅ 确认 | Xanmod 补丁已包含 PROBE_BW 4 相位 + PROBE_RTT 0.5×BDP + loss 计数器 + prior_cwnd + probe_wait 随机化 |
-| BBR-ACD 双向 pacing | ✅ 完成 | 真拥塞(rtt>2×min_rtt) pacing×0.7 + 随机丢包 pacing×1.05，跨太平洋随机丢包不降速 |
-| tls_optimized profile | ✅ 完成 | 第5档 profile：STARTUP 温和(2.77/2.0) + PROBE_BW standard(1.375/0.85) + 丢包容忍(5%) + PROBE_RTT 优化(100ms/5s) |
-| TLS sysctl 配套 | ✅ 完成 | synack_retries=2, syn_retries=3, fastopen=3, slow_start_after_idle=0, mtu_probing=1 |
+| TLS sysctl 配套 | ✅ 完成 | tls-optimize 命令在 aggressive 基础上叠加 synack_retries=2, syn_retries=3, fastopen=3, slow_start_after_idle=0, mtu_probing=1 |
 | IW10 初始拥塞窗口 | ✅ 完成 | initcwnd=10 (RFC 6928)，TLS 证书链(约 2 MSS)全覆盖 |
-| tcp.sh 集成 | ✅ 完成 | 新增 `apply_profile_tls_optimized` + 菜单选项 5 + `tls-optimize` 子命令 |
+| tcp.sh 集成 | ✅ 完成 | 新增 `apply_profile_tls_optimized`（aggressive + TLS sysctl + IW10）+ 菜单选项 5 + `tls-optimize` 子命令 |
 
 **预期性能提升**：
-- TLS 握手延迟 -45%（~640ms → ~350ms）
-- 吞吐 +20-40%（BBR-ACD 减少随机丢包误退避）
-- PROBE_RTT 吞吐波动 -80%
+- TLS 握手延迟减少（synack_retries 降低 + TFO + IW10）
+- PROBE_RTT 吞吐波动减少（pacing_gain_down=0.85 + probe_rtt 周期调优）
 
 **研究依据**（2023-2026 学术论文 + 开源实现）：
-- BBR-ACD: Electronics 2020, 9(1), 136 — 随机丢包 vs 拥塞丢包区分
-- BBRv3e1: ICNC 2026 — STARTUP pacing_gain 2.77 比 2.89 公平性 +15%
 - IMC 2019 — BBR 在浅缓冲重传率高 10×，20% 丢包悬崖点
 - Cloudflare/Dropbox 生产 sysctl 调优经验
 - RFC 6928 (IW10) + RFC 7413 (TFO) + RFC 8446 (TLS 1.3)
@@ -266,8 +261,26 @@ tcpboost/
 
 | 优化项 | 状态 | 说明 |
 |--------|------|------|
-| beta 加权 cwnd 缩减 | ✅ 完成 | BBR-ACD 真拥塞时 Recovery 首入执行 `cwnd × beta`（新增 `acd_cwnd_reduce` 参数，默认开启）。BBRv3 已有 `bbr_handle_inflight_too_high` 的 inflight_hi 软边界，本优化在其基础上增加显式 cwnd 缩减 |
-| BBR-GC gamma correction | ✅ 完成 | 从 omega^4 公式改进为 sqrt 近似（γ=2 gamma correction），基于 queue_ratio 平滑过渡 DOWN gain。新增 `gc_base_down` 全局变量保存 profile 原始值避免递归修改 |
+| BBR-GC gamma correction | ✅ 完成 | 从 omega^4 公式改进为 sqrt 近似（γ=2 gamma correction），基于 queue_ratio 平滑过渡 DOWN gain。新增 `gc_base_down` 全局变量保存 profile 原始值避免递归修改。默认关闭（gc_enable=0） |
+
+### Phase 2.5: 批判性审查与负优化修复（已完成 2026-06-16）
+
+全新视角审视所有已实施的优化，识别并修复 4 个严重负优化问题：
+
+| 问题 | 严重度 | 修复 |
+|------|--------|------|
+| ACD 真拥塞 cwnd 缩减复用 bbr_beta(20%)，导致 cwnd 缩减 80%（双重惩罚） | 🔴 严重 | 完全移除 ACD 代码 |
+| ACD 随机丢包 +5% 补偿破坏 PROBE_BW DOWN 排空（1-5% 丢包每 RTT 触发 +5%） | 🔴 严重 | 完全移除 ACD 代码 |
+| set_min_pacing_rate service 覆盖 apply_bbrplusv3_params service（重启后参数丢失） | 🔴 严重 | 合并全套参数到单一 service |
+| tls_optimized profile 与 aggressive 参数完全重复（删除前已对齐） | 🔴 严重 | 删除 profile，保留 TLS sysctl |
+| 文档与实际参数不符（STARTUP 温和 vs aggressive、ACD pacing×0.7 已移除） | 🟡 中 | 更新全部文档 |
+
+**核心原则**：所有优化必须是正向优化。BBRv3 原生 loss_thresh(5%)+inflight_hi 机制已处理随机丢包和真拥塞，额外干预只会双重惩罚或破坏排空。
+
+**修改后 bbrplusv3_main 仅保留 3 个可选优化**：
+1. Pacing Rate Scale（默认 100%=不生效）
+2. Minimum pacing rate floor（默认 0=关闭）
+3. BBR-GC gamma correction（默认 0=关闭）
 
 ### Phase 3: 探索性（远期，需评估）
 

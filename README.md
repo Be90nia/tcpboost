@@ -25,19 +25,19 @@
 
 > CUBIC 在跨太平洋高丢包链路上几乎完全失效，BBRPlusV3 是该场景下的正确选择。
 
-### TLS 握手优化方案预估（Phase 1）
+### TLS 握手优化方案
 
-基于 BBR-ACD 论文实测 + tls_optimized profile + 跨太平洋链路模型外推：
+`tls-optimize` 命令在 aggressive profile 基础上叠加 TLS 握手优化 sysctl，不降速：
 
-| 指标 | aggressive (现有) | tls_optimized (Phase 1) | 提升 |
-|------|-------------------|-------------------------|------|
-| TLS 握手延迟 | ~640ms | ~350ms | **-45%** |
-| TLS 握手成功率 | ~95% | ~99% | +4pp |
-| 下载单流 | 53.5 Mbps | 65-75 Mbps | +20-40% |
-| 下载多流 | 77.7 Mbps | 95-115 Mbps | +20-45% |
-| 吞吐波动 (PROBE_RTT) | 每 2.5s 骤降 | 波动 -80% | — |
+| 优化项 | 效果 |
+|--------|------|
+| synack_retries=2 / syn_retries=3 | SYN/SYN-ACK 重传次数降低，握手超时减少 |
+| tcp_fastopen=3 | TFO 双向启用，TLS 1.3 0-RTT 可省 1 RTT |
+| slow_start_after_idle=0 | 代理 keep-alive 连接不重新慢启动 |
+| initcwnd=10 (RFC 6928) | TLS 证书链(约 2 MSS)全覆盖，握手不卡 |
+| mtu_probing=1 | 自动探测路径 MTU，避免 PMTU 黑洞 |
 
-> tls_optimized profile + BBR-ACD 在跨太平洋随机丢包场景下显著提升握手稳定性和吞吐。启用方式：`./tcp.sh tls-optimize`
+> 启用方式：`./tcp.sh tls-optimize`。该方案保持 aggressive profile 的全部加速参数，仅叠加 TLS sysctl 优化。
 
 ## 支持系统
 
@@ -119,12 +119,9 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/Be90nia
 | `probe_rtt_mode_ms` | 100 | PROBE_RTT 持续时间，延迟峰值深度 |
 | `probe_rtt_win_ms` | 5000 | PROBE_RTT 触发周期，游戏延迟峰值频率 |
 | `min_pacing_rate` | 0 (关闭) | 保底发送速率，防 STARTUP 早退 |
-| `profile` | aggressive (2) | 参数预设：conservative/standard/aggressive/wifi/tls_optimized |
-| `gc_enable` | 0 (关闭) | BBR-GC 自适应 pacing gain（实验性） |
-| `acd_enable` | 0 (关闭) | BBR-ACD 真拥塞检测（真拥塞 pacing×0.7，随机丢包 pacing×1.05）|
-| `acd_rtt_factor` | 200 (%) | ACD 真拥塞 RTT 阈值（200=2×min_rtt）|
-| `acd_congestion_scale` | 70 (%) | ACD 真拥塞 pacing 减速比例（70=减速到 70%）|
-| `acd_cwnd_reduce` | 1 (开启) | ACD 真拥塞时 beta 加权 cwnd 缩减（Recovery 首入执行一次）|
+| `profile` | aggressive (2) | 参数预设：conservative/standard/aggressive/wifi |
+| `pacing_rate_scale` | 100 (%) | 全局 pacing rate 缩放系数（100=不调整）|
+| `gc_enable` | 0 (关闭) | BBR-GC 自适应 pacing gain（实验性，sqrt 近似 gamma correction）|
 
 > **保留的激进参数**（不变）：`startup_pacing_gain=2.885`、`startup_cwnd_gain=2.5`、`pacing_gain_up=1.5`、`drain_gain=0.416`、`min_rtt_win_sec=20s` — 这些是跨太平洋加速的核心优势。
 
@@ -139,14 +136,11 @@ cat /sys/module/tcp_bbrplusv3/parameters/loss_thresh
 ./tcp.sh set-min-pacing-rate 500   # 500 Mbps
 ./tcp.sh set-min-pacing-rate 0     # 关闭
 
-# 切换到 TLS 握手优化 profile（跨太平洋握手稳定性推荐）
-./tcp.sh tls-optimize              # 一键应用 TLS 优化方案（profile + ACD + IW10 + sysctl）
-echo 4 > /sys/module/tcp_bbrplusv3/parameters/profile  # 或仅切换 profile
+# 应用 TLS 握手优化（aggressive profile + TLS sysctl + IW10，不降速）
+./tcp.sh tls-optimize
 
-# 启用 BBR-ACD 真拥塞检测（tls_optimized 自动启用）
-echo 1 > /sys/module/tcp_bbrplusv3/parameters/acd_enable
-echo 200 > /sys/module/tcp_bbrplusv3/parameters/acd_rtt_factor        # 2×min_rtt
-echo 70 > /sys/module/tcp_bbrplusv3/parameters/acd_congestion_scale   # 真拥塞减速到 70%
+# 启用 BBR-GC 自适应 pacing gain（实验性，跨太平洋高丢包链路可尝试）
+echo 1 > /sys/module/tcp_bbrplusv3/parameters/gc_enable
 ```
 
 ## 网络优化方案
@@ -156,7 +150,7 @@ echo 70 > /sys/module/tcp_bbrplusv3/parameters/acd_congestion_scale   # 真拥�
 | 保守 | ≤100Mbps VPS | bbrplusv3 | 标准 | — |
 | 均衡 | 1Gbps VPS | bbrplusv3 | 锐速风格 | initcwnd=32 |
 | 激进 | 科学上网 | bbrplusv3 15%/30% | 锐速风格 + sysctl 调优 | initcwnd=32 + 可设 min_pacing |
-| **TLS优化** | **跨太平洋握手稳定性** | **bbrplusv3 tls_optimized** | **BDP 动态** | **BBR-ACD + IW10 + TLS sysctl** |
+| **TLS优化** | **跨太平洋握手稳定性** | **bbrplusv3 aggressive** | **BDP 动态** | **TLS sysctl + IW10（不降速）** |
 
 ## 无感切换
 
@@ -180,8 +174,7 @@ BBRPlusV3 = Google BBRv3 核心 + BBRPlus 激进参数 + tsunami-v3 单流优化
 - **长 RTT 稳定** — `min_rtt_win_sec` 10→20s，跨太平洋链路 min_rtt 估值更稳
 - **丢包容忍** — `loss_thresh` 2%→15%（运行时），容忍跨太平洋正常丢包，真实拥塞时降速
 - **稳定性优化** — `pacing_gain_down`=0.85、`probe_rtt` 5s/100ms，减少下载波动和游戏延迟峰值
-- **BBR-ACD 双向 pacing** — 真拥塞(rtt>2×min_rtt) pacing×0.7 减速 + 随机丢包 pacing×1.05 补偿，跨太平洋 1-5% 随机丢包不降速
-- **tls_optimized profile** — STARTUP 温和(2.77/2.0)避免握手队列堆积 + PROBE_BW standard 保持带宽探测 + IW10 TLS 证书链全覆盖
+- **TLS 握手优化** — tls-optimize 命令叠加 TLS sysctl（synack_retries=2/fastopen=3/slow_start_after_idle=0）+ IW10，不降速
 - **保底 pacing** — `min_pacing_rate` 防 STARTUP 阶段 pacing 过低
 
 ### 编译架构

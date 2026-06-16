@@ -572,7 +572,7 @@ set_min_pacing_rate() {
   # 写入 min_pacing_rate
   echo "$bps" > "$param_dir/min_pacing_rate" 2>/dev/null
 
-  # 关闭保底：恢复默认参数
+  # 关闭保底：恢复默认参数 + 重写 service（恢复 aggressive 基线，不含 min_pacing_rate）
   if [ "$mbps" -eq 0 ]; then
     echo 5000 > "$param_dir/probe_rtt_win_ms" 2>/dev/null || true
     echo 100 > "$param_dir/probe_rtt_mode_ms" 2>/dev/null || true
@@ -581,7 +581,26 @@ set_min_pacing_rate() {
     if [ -f "$CONF_DIR/bbrplusv3.conf" ]; then
       sed -i "/^min_pacing_rate=/d; /^probe_rtt_win_ms=/d; /^probe_rtt_mode_ms=/d; /^pacing_gain_down=/d" "$CONF_DIR/bbrplusv3.conf"
     fi
-    info "min_pacing_rate 已关闭，配套参数已恢复默认"
+
+    # 恢复 service 到 setup_bbrplusv3_persistent 基线（不含 min_pacing_rate 覆盖）
+    cat > /etc/systemd/system/tcpboost-bbrplusv3.service <<'EOF'
+[Unit]
+Description=TCPBoost BBRPlusV3 Parameters
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'PD=/sys/module/tcp_bbrplusv3/parameters; [ -d "$PD" ] && echo 2 > $PD/profile && echo 38 > $PD/loss_thresh && echo 76 > $PD/beta && echo 217 > $PD/pacing_gain_down && echo 100 > $PD/probe_rtt_mode_ms && echo 5000 > $PD/probe_rtt_win_ms && echo 0 > $PD/gc_enable 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable tcpboost-bbrplusv3 2>/dev/null || true
+
+    info "min_pacing_rate 已关闭，配套参数已恢复 aggressive 基线"
     return 0
   fi
 
@@ -612,17 +631,19 @@ probe_rtt_mode_ms=50
 pacing_gain_down=230
 EOF
 
-  # systemd service 持久化（包含全套参数）
+  # systemd service 持久化（必须包含全套参数，避免覆盖 aggressive 配置）
+  # 问题历史：旧版只写 4 个参数，重启后 loss_thresh/beta 回到默认值（负优化）
+  # 修复：service 自洽，包含 profile + loss_thresh + beta + gc + 保底 + PROBE_RTT
   cat > /etc/systemd/system/tcpboost-bbrplusv3.service <<EOF
 [Unit]
-Description=TCPBoost BBRPlusV3 Parameters
+Description=TCPBoost BBRPlusV3 Parameters (with min_pacing_rate)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'PD=/sys/module/tcp_bbrplusv3/parameters; [ -d "\$PD" ] && echo $bps > \$PD/min_pacing_rate && echo 10000 > \$PD/probe_rtt_win_ms && echo 50 > \$PD/probe_rtt_mode_ms && echo 230 > \$PD/pacing_gain_down 2>/dev/null; true'
+ExecStart=/bin/bash -c 'PD=/sys/module/tcp_bbrplusv3/parameters; [ -d "\$PD" ] && echo 2 > \$PD/profile && echo 38 > \$PD/loss_thresh && echo 76 > \$PD/beta && echo 0 > \$PD/gc_enable && echo $bps > \$PD/min_pacing_rate && echo 10000 > \$PD/probe_rtt_win_ms && echo 50 > \$PD/probe_rtt_mode_ms && echo 230 > \$PD/pacing_gain_down 2>/dev/null; true'
 
 [Install]
 WantedBy=multi-user.target
@@ -970,7 +991,9 @@ EOF
 
 # Profile 4: TLS 握手优化方案（跨太平洋稳定性推荐）
 # 适用: RTT 100ms+ 高延迟 + 1-5% 丢包的跨洋链路, xray/sing-box 代理
-# 核心: tls_optimized profile(STARTUP温和) + BBR-ACD(随机丢包检测) + IW10 + sysctl握手优化
+# 核心: aggressive profile + apply_bbrplusv3_params覆盖 + TLS sysctl 握手优化 + IW10
+# 注意: 不使用 tls_optimized profile（已移除，与 aggressive 重复）
+#       不启用 ACD（负优化：cwnd双重缩减 + 破坏PROBE_BW DOWN排空）
 apply_profile_tls_optimized() {
   backup_configs
 
@@ -984,12 +1007,12 @@ apply_profile_tls_optimized() {
   local buf_max=$((buf_max_mb * 1024 * 1024))
 
   info "内存: ${mem_total_mb}MB, Buffer 上限: ${buf_max_mb}MB"
-  info "应用 TLS 握手优化方案 (tls_optimized profile + BBR-ACD + IW10)..."
+  info "应用 TLS 握手优化方案 (aggressive profile + TLS sysctl + IW10)..."
 
   cat > "$SYSCTL_FILE" <<EOF
 # TCPBoost Profile: TLS 握手优化方案
 # 适用: 跨太平洋高延迟(100ms+)高丢包(1-5%)链路, xray/sing-box 代理
-# 核心: STARTUP 温和(2.77/2.0) + PROBE_BW standard + 丢包容忍(5%) + BBR-ACD
+# 核心: aggressive profile(2.885/2.5/1.5/0.75) + loss/beta覆盖 + TLS sysctl
 # 生成时间: $(date)
 
 # === 拥塞控制 ===
@@ -1062,53 +1085,11 @@ EOF
 
   sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1
 
-  # BBRPlusV3 tls_optimized profile (第5档) + BBR-ACD 启用
-  local param_dir="/sys/module/tcp_bbrplusv3/parameters"
-  if [ ! -d "$param_dir" ]; then
-    modprobe tcp_bbrplusv3 2>/dev/null || true
-  fi
-  if [ -d "$param_dir" ]; then
-    # 切换到 tls_optimized profile (STARTUP 温和 + PROBE_BW standard)
-    echo 4 > "$param_dir/profile" 2>/dev/null || true
-    # 启用 BBR-ACD 双向 pacing（真拥塞减速 + 随机丢包补偿）
-    echo 1 > "$param_dir/acd_enable" 2>/dev/null || true
-    echo 200 > "$param_dir/acd_rtt_factor" 2>/dev/null || true
-    echo 1 > "$param_dir/acd_cwnd_reduce" 2>/dev/null || true
-    # min_pacing_rate 默认关闭，用户可手动设置
-    echo 0 > "$param_dir/min_pacing_rate" 2>/dev/null || true
-    # GC 保持关闭
-    echo 0 > "$param_dir/gc_enable" 2>/dev/null || true
-  else
-    warn "tcp_bbrplusv3 模块不可用，仅应用 sysctl 优化"
-  fi
-
-  # 持久化 bbrplusv3 参数（tls_optimized profile + ACD）
-  mkdir -p "$CONF_DIR"
-  cat > "$CONF_DIR/bbrplusv3.conf" <<'EOF'
-# BBRPlusV3 TLS 握手优化参数
-# aggressive profile（不降速）+ ACD 纯补偿（随机丢包+5%，真拥塞不干预）
-profile=4
-acd_enable=1
-acd_rtt_factor=200
-gc_enable=0
-EOF
-
-  cat > /etc/systemd/system/tcpboost-bbrplusv3.service <<'EOF'
-[Unit]
-Description=TCPBoost BBRPlusV3 Parameters (TLS Optimized)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/bash -c 'PARAM_DIR=/sys/module/tcp_bbrplusv3/parameters; [ -d "$PARAM_DIR" ] && echo 4 > $PARAM_DIR/profile && echo 1 > $PARAM_DIR/acd_enable && echo 200 > $PARAM_DIR/acd_rtt_factor && echo 0 > $PARAM_DIR/gc_enable 2>/dev/null || true'
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl daemon-reload 2>/dev/null || true
-  systemctl enable tcpboost-bbrplusv3 2>/dev/null || true
+  # BBRPlusV3 aggressive profile + apply_bbrplusv3_params 覆盖（与激进方案一致）
+  # TLS 优化方案不降速: 使用与激进方案完全相同的 CC 参数
+  # 区别仅在 sysctl 层面（TLS 握手优化）+ IW10
+  apply_bbrplusv3_params
+  setup_bbrplusv3_persistent
 
   # IW10: 初始拥塞窗口 10 (RFC 6928, TLS 证书链约 2 MSS, IW10 足够覆盖)
   local DEF_ROUTE
@@ -1120,14 +1101,13 @@ EOF
 
   echo ""
   info "已应用 TLS 握手优化方案"
-  echo -e "  ${CYAN}tls_optimized profile:${NC} STARTUP 温和(2.77/2.0) + PROBE_BW standard(1.375/0.85)"
-  echo -e "  ${CYAN}BBR-ACD:${NC} 真拥塞(rtt>2×min_rtt) pacing×0.7 + 随机丢包 pacing×1.05"
-  echo -e "  ${CYAN}TLS sysctl:${NC} synack_retries=2, fastopen=3, slow_start_after_idle=0"
-  echo -e "  ${CYAN}IW10:${NC} 初始拥塞窗口 10 (TLS 证书链全覆盖)"
+  echo -e "  ${CYAN}CC 参数:${NC} aggressive profile + loss=15%/beta=30%（与激进方案一致，不降速）"
+  echo -e "  ${CYAN}TLS sysctl:${NC} synack_retries=2, syn_retries=3, fastopen=3, slow_start_after_idle=0"
+  echo -e "  ${CYAN}IW10:${NC} 初始拥塞窗口 10（TLS 证书链全覆盖）"
   echo ""
   echo -e "  ${YELLOW}预期效果:${NC}"
-  echo "    TLS 握手延迟 -30~50% | 吞吐 +15~25% | 握手成功率 +4pp"
-  echo "    PROBE_RTT 延迟峰 -80% (100ms/5s vs aggressive 50ms/2.5s)"
+  echo "    TLS 握手延迟 -30~50% | 跨洋 SYN 丢包重试更快"
+  echo "    持久连接 keep-alive 不重置 cwnd（代理稳定性↑）"
   echo ""
   echo -e "  ${YELLOW}可选:${NC} 设置 min_pacing_rate 进一步提升单流性能"
   echo "    ./tcp.sh set-min-pacing-rate 100  (100 Mbps VPS)"
@@ -1421,7 +1401,7 @@ show_menu() {
   echo "     bbrplusv3 15%/30% 平衡优化 + 锐速风格 + 可设保底速率"
   echo ""
   echo "  5) TLS优化方案  跨太平洋握手稳定性推荐"
-  echo "     tls_optimized profile + BBR-ACD + IW10 + TLS sysctl"
+  echo "     aggressive profile + TLS sysctl + IW10（不降速）"
   echo ""
   echo "  ── 高级 ──"
   echo "  6) 一键优化 (检测环境 + 自动应用最优)"
