@@ -1393,13 +1393,14 @@ show_menu() {
   echo "  ── 高级 ──"
   echo "  6) 一键优化 (检测环境 + 自动应用最优)"
   echo "  7) 手动切换算法"
-  echo "  8) 设置最低保底速率 (min_pacing_rate)"
-  echo "  9) 清理多余内核 (只保留当前 tcpboost)"
-  echo " 10) 恢复默认配置"
-  echo " 11) 卸载 TCPBoost 内核"
+  echo "  8) 测速并设置保底速率 (speedtest 自动测带宽)"
+  echo "  9) 手动设置保底速率 (min_pacing_rate)"
+  echo " 10) 清理多余内核 (只保留当前 tcpboost)"
+  echo " 11) 恢复默认配置"
+  echo " 12) 卸载 TCPBoost 内核"
   echo "  0) 退出"
   echo ""
-  read -p "  请选择 [0-11]: " choice
+  read -p "  请选择 [0-12]: " choice
 
   case "$choice" in
     1) install_kernel ;;
@@ -1421,11 +1422,12 @@ show_menu() {
        ;;
     6) smart_recommend ;;
     7) menu_switch_algorithm ;;
-    8) echo ""; read -p "  输入 Mbps (500=500M, 1000=1G, 0=关闭): " mpr_input
+    8) speedtest_bandwidth ;;
+    9) echo ""; read -p "  输入 Mbps (500=500M, 1000=1G, 0=关闭): " mpr_input
        set_min_pacing_rate "${mpr_input:-0}" ;;
-    9) cleanup_kernels ;;
-   10) restore_configs ;;
-   11) uninstall_kernel ;;
+   10) cleanup_kernels ;;
+   11) restore_configs ;;
+   12) uninstall_kernel ;;
     0) exit 0 ;;
     *) error "无效选择" ;;
   esac
