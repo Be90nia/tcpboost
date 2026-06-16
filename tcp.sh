@@ -545,36 +545,105 @@ EOF
   info "BBRPlusV3 参数已设置 (loss=15%, beta=30%, pacing_down=0.85, probe_rtt=5s/100ms, gc=off)"
 }
 
-# 设置 min_pacing_rate（保底速率，防单流 STARTUP 早退）
+# 设置 min_pacing_rate（保底速率）+ 自动应用全套配套优化
+# 一站式入口：输入保底速率 → 自动优化 PROBE_RTT + pacing_down + bufferbloat
+#
 # 用法: set_min_pacing_rate <Mbps>
-#   推荐: set_min_pacing_rate 50  (50 Mbps VPS)
-#         set_min_pacing_rate 100 (100 Mbps VPS)
-#         set_min_pacing_rate 0    (关闭)
+#   ./tcp.sh set-min-pacing-rate 100   (100 Mbps VPS)
+#   ./tcp.sh set-min-pacing-rate 500   (500 Mbps VPS)
+#   ./tcp.sh set-min-pacing-rate 1000  (1 Gbps VPS)
+#   ./tcp.sh set-min-pacing-rate 0     (关闭保底 + 恢复默认参数)
+#
+# 自动优化内容（mbps > 0 时）：
+#   PROBE_RTT: 5s/100ms → 10s/50ms（减少 cwnd 骤降频率和深度）
+#   pacing_gain_down: 0.85 → 0.90（减少周期性降速）
+#   tcp_notsent_lowat: 128KB（减少 bufferbloat）
 set_min_pacing_rate() {
   local mbps="${1:-0}"
   local param_dir="/sys/module/tcp_bbrplusv3/parameters"
 
   if [ ! -w "$param_dir/min_pacing_rate" ]; then
-    warn "min_pacing_rate 参数不可用（需要 tsunami-v3 优化内核）"
+    warn "min_pacing_rate 参数不可用（需要 BBRPlusV3 优化内核）"
     return 1
   fi
 
   # Mbps → bytes/sec
   local bps=$((mbps * 1000000 / 8))
+
+  # 写入 min_pacing_rate
   echo "$bps" > "$param_dir/min_pacing_rate" 2>/dev/null
 
+  # 关闭保底：恢复默认参数
   if [ "$mbps" -eq 0 ]; then
-    info "min_pacing_rate 已关闭"
-  else
-    info "min_pacing_rate 已设为 ${mbps} Mbps (${bps} bytes/sec)"
-    echo "  下载方向单流性能预计提升 3x+ (测试: 8.5→26.1 Mbps)"
+    echo 5000 > "$param_dir/probe_rtt_win_ms" 2>/dev/null || true
+    echo 100 > "$param_dir/probe_rtt_mode_ms" 2>/dev/null || true
+    echo 217 > "$param_dir/pacing_gain_down" 2>/dev/null || true
+    sysctl -w net.ipv4.tcp_notsent_lowat=0 >/dev/null 2>&1 || true
+
+    if [ -f "$CONF_DIR/bbrplusv3.conf" ]; then
+      sed -i "/^min_pacing_rate=/d; /^probe_rtt_win_ms=/d; /^probe_rtt_mode_ms=/d; /^pacing_gain_down=/d" "$CONF_DIR/bbrplusv3.conf"
+    fi
+    info "min_pacing_rate 已关闭，配套参数已恢复默认"
+    return 0
   fi
 
-  # 持久化
-  if [ -f "$CONF_DIR/bbrplusv3.conf" ]; then
-    sed -i "/^min_pacing_rate/d" "$CONF_DIR/bbrplusv3.conf"
-    echo "min_pacing_rate=$bps" >> "$CONF_DIR/bbrplusv3.conf"
+  info "min_pacing_rate = ${mbps} Mbps，自动应用配套优化..."
+
+  # === 自动配套优化 ===
+
+  # 1. PROBE_RTT 优化（核心！旧内核 cwnd=4 packets 无视 pacing 保底）
+  #    延长周期 5s→10s（骤降频率减半）+ 缩短持续 100ms→50ms（深度减半）
+  echo 10000 > "$param_dir/probe_rtt_win_ms" 2>/dev/null || true
+  echo 50 > "$param_dir/probe_rtt_mode_ms" 2>/dev/null || true
+
+  # 2. pacing_gain_down: 0.85→0.90（减少 PROBE_BW DOWN 周期性降速）
+  echo 230 > "$param_dir/pacing_gain_down" 2>/dev/null || true
+
+  # 3. tcp_notsent_lowat=128KB（Cloudflare 生产值，减少 bufferbloat）
+  sysctl -w net.ipv4.tcp_notsent_lowat=131072 >/dev/null 2>&1 || true
+
+  # === 持久化 ===
+  mkdir -p "$CONF_DIR"
+  local conf_file="$CONF_DIR/bbrplusv3.conf"
+  if [ -f "$conf_file" ]; then
+    sed -i "/^min_pacing_rate=/d; /^probe_rtt_win_ms=/d; /^probe_rtt_mode_ms=/d; /^pacing_gain_down=/d" "$conf_file"
+  else
+    : > "$conf_file"
   fi
+  cat >> "$conf_file" <<EOF
+min_pacing_rate=$bps
+probe_rtt_win_ms=10000
+probe_rtt_mode_ms=50
+pacing_gain_down=230
+EOF
+
+  # systemd service 持久化（包含全套参数）
+  cat > /etc/systemd/system/tcpboost-bbrplusv3.service <<EOF
+[Unit]
+Description=TCPBoost BBRPlusV3 Parameters
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'PD=/sys/module/tcp_bbrplusv3/parameters; [ -d "\$PD" ] && echo $bps > \$PD/min_pacing_rate && echo 10000 > \$PD/probe_rtt_win_ms && echo 50 > \$PD/probe_rtt_mode_ms && echo 230 > \$PD/pacing_gain_down 2>/dev/null; sysctl -w net.ipv4.tcp_notsent_lowat=131072 2>/dev/null; true'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl enable tcpboost-bbrplusv3 2>/dev/null || true
+
+  echo ""
+  info "全套优化已应用（基于 ${mbps} Mbps 保底）"
+  echo -e "  ${CYAN}min_pacing_rate:${NC}    ${mbps} Mbps（pacing 保底）"
+  echo -e "  ${CYAN}PROBE_RTT:${NC}         10s/50ms（原 5s/100ms，骤降频率/深度减半）"
+  echo -e "  ${CYAN}pacing_gain_down:${NC}  0.90（原 0.85，减少周期性降速）"
+  echo -e "  ${CYAN}tcp_notsent_lowat:${NC} 128KB（减少 bufferbloat）"
+  echo ""
+  echo -e "  ${GREEN}预期:${NC} 视频流不再需要刷新 | 持续大流量吞吐更稳定"
+  echo -e "  ${YELLOW}恢复默认:${NC} ./tcp.sh set-min-pacing-rate 0"
 }
 
 # 开机自动应用 bbrplusv3 参数
@@ -971,6 +1040,95 @@ EOF
   echo -e "  ${YELLOW}可选:${NC} 设置 min_pacing_rate 进一步提升单流性能"
   echo "    ./tcp.sh set-min-pacing-rate 100  (100 Mbps VPS)"
   echo "    ./tcp.sh set-min-pacing-rate 500  (500 Mbps VPS)"
+}
+
+# 视频流优化（在现有 profile 基础上叠加参数，不改内核代码）
+# 解决: YouTube/Bilibili 视频页面快但加载慢，刷新后变快的问题
+# 根因: 旧内核 PROBE_RTT 时 cwnd=4 packets(≈290Kbps@161ms)，无视 min_pacing_rate
+#       长连接(视频流)必然碰到 PROBE_RTT，短连接(页面)恰好避开
+# 优化: 延长 PROBE_RTT 周期 + 缩短持续时间 + pacing_down 提高缓冲区
+optimize_video_streaming() {
+  local param_dir="/sys/module/tcp_bbrplusv3/parameters"
+
+  if [ ! -d "$param_dir" ]; then
+    modprobe tcp_bbrplusv3 2>/dev/null || true
+  fi
+  if [ ! -d "$param_dir" ]; then
+    warn "tcp_bbrplusv3 模块不可用"
+    return 1
+  fi
+
+  info "应用视频流优化参数..."
+
+  # 1. PROBE_RTT 优化（核心！）
+  #    旧内核 PROBE_RTT cwnd=4 packets → 每 5s 吞吐骤降到 ~290Kbps
+  #    延长周期 5s→10s（减少骤降频率）+ 缩短持续 100ms→50ms（减少骤降深度）
+  echo 10000 > "$param_dir/probe_rtt_win_ms" 2>/dev/null || true
+  echo 50 > "$param_dir/probe_rtt_mode_ms" 2>/dev/null || true
+
+  # 2. pacing_gain_down: 0.85→0.90 (230/256)
+  #    减少 PROBE_BW DOWN 阶段的周期性降速，保持视频缓冲区稳定
+  echo 230 > "$param_dir/pacing_gain_down" 2>/dev/null || true
+
+  # 3. sysctl: tcp_notsent_lowat=128KB
+  #    限制内核 write queue 中未发送数据量，减少 bufferbloat 对 BBR pacing 的干扰
+  #    Cloudflare 生产验证值，对 HTTP/2 多路复用（YouTube）特别有效
+  sysctl -w net.ipv4.tcp_notsent_lowat=131072 >/dev/null 2>&1 || true
+
+  # 4. 检查 min_pacing_rate
+  local mpr
+  mpr=$(cat "$param_dir/min_pacing_rate" 2>/dev/null || echo "0")
+  if [ "$mpr" != "0" ] && [ -n "$mpr" ]; then
+    local mpr_mb=$((mpr * 8 / 1000000))
+    info "min_pacing_rate 已设为 ${mpr_mb} Mbps ✓（pacing 有保底）"
+  else
+    warn "min_pacing_rate 未设置，建议设置保底速率"
+    echo "    ./tcp.sh set-min-pacing-rate 100  (100 Mbps)"
+  fi
+
+  # 持久化到 systemd service（在现有参数基础上追加）
+  mkdir -p "$CONF_DIR"
+  cat > "$CONF_DIR/video-optimize.conf" <<'EOF'
+# BBRPlusV3 视频流优化参数叠加
+# 在当前 profile 基础上覆盖以下参数
+probe_rtt_win_ms=10000
+probe_rtt_mode_ms=50
+pacing_gain_down=230
+tcp_notsent_lowat=131072
+EOF
+
+  # 更新 systemd service 追加视频优化参数
+  cat > /etc/systemd/system/tcpboost-video.service <<'EOF'
+[Unit]
+Description=TCPBoost Video Streaming Optimization
+After=tcpboost-bbrplusv3.service
+Wants=tcpboost-bbrplusv3.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'PARAM_DIR=/sys/module/tcp_bbrplusv3/parameters; [ -d "$PARAM_DIR" ] && echo 10000 > $PARAM_DIR/probe_rtt_win_ms && echo 50 > $PARAM_DIR/probe_rtt_mode_ms && echo 230 > $PARAM_DIR/pacing_gain_down 2>/dev/null; sysctl -w net.ipv4.tcp_notsent_lowat=131072 2>/dev/null; true'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl enable tcpboost-video 2>/dev/null || true
+
+  echo ""
+  info "视频流优化已应用"
+  echo -e "  ${CYAN}PROBE_RTT:${NC} 10s/50ms（原 5s/100ms）"
+  echo "    → 吞吐骤降频率减半，每次持续时间减半"
+  echo -e "  ${CYAN}pacing_gain_down:${NC} 0.90（原 0.85）"
+  echo "    → PROBE_BW DOWN 降速幅度减少"
+  echo -e "  ${CYAN}tcp_notsent_lowat:${NC} 128KB"
+  echo "    → 减少 bufferbloat 对 BBR pacing 的干扰"
+  echo ""
+  echo -e "  ${GREEN}预期效果:${NC}"
+  echo "    视频加载不再需要刷新 | 持续大流量吞吐更稳定"
+  echo ""
+  echo -e "  ${YELLOW}提示:${NC} 新内核（Phase 1 BBRv3）PROBE_RTT cwnd=0.5×BDP（≈700 包）"
+  echo "    将从根本上解决此问题，旧内核用此参数调优缓解"
 }
 
 # 恢复默认配置
