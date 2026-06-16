@@ -640,6 +640,76 @@ EOF
   echo -e "  ${YELLOW}恢复默认:${NC} ./tcp.sh set-min-pacing-rate 0"
 }
 
+# 测试 VPS 真实带宽并自动设置 min_pacing_rate
+# 用法: ./tcp.sh speedtest
+# 原理: 从 Cloudflare 下载 100MB 文件测速 → 推荐 70% 作为 min_pacing_rate
+speedtest_bandwidth() {
+  local param_dir="/sys/module/tcp_bbrplusv3/parameters"
+
+  if [ ! -d "$param_dir" ]; then
+    modprobe tcp_bbrplusv3 2>/dev/null || true
+  fi
+
+  info "测试 VPS 真实带宽（下载 100MB）..."
+  echo ""
+
+  # 测试 2 次取最大值（第一次可能因 TCP 爬坡偏慢）
+  local max_mbps=0
+  local i
+  for i in 1 2; do
+    local raw_speed
+    raw_speed=$(curl -so /dev/null -w '%{speed_download}' \
+      --connect-timeout 10 --max-time 60 \
+      "https://speed.cloudflare.com/__down?bytes=104857600" 2>/dev/null || echo 0)
+
+    if [ -z "$raw_speed" ] || [ "$raw_speed" = "0" ]; then
+      warn "  第 ${i} 次测试失败，跳过"
+      continue
+    fi
+
+    local mbps
+    mbps=$(awk "BEGIN {printf \"%.1f\", $raw_speed / 125000}")
+    info "  第 ${i} 次: ${mbps} Mbps"
+
+    # 取最大值（整数比较）
+    local mbps_int
+    mbps_int=$(awk "BEGIN {printf \"%d\", $raw_speed / 125000}")
+    if [ "$mbps_int" -gt "$max_mbps" ] 2>/dev/null; then
+      max_mbps=$mbps_int
+    fi
+  done
+
+  if [ "$max_mbps" -eq 0 ] 2>/dev/null; then
+    error "带宽测试失败（Cloudflare CDN 不可达？）"
+    echo "  手动测试: curl -so /dev/null -w '%{speed_download}' https://speed.cloudflare.com/__down?bytes=104857600"
+    return 1
+  fi
+
+  # 推荐 min_pacing_rate = 实测带宽 × 70%（留 30% 余量给控制开销）
+  local recommended
+  recommended=$((max_mbps * 70 / 100))
+  [ "$recommended" -lt 10 ] && recommended=10
+
+  echo ""
+  info "实测最大带宽: ${max_mbps} Mbps"
+  echo -e "  ${CYAN}推荐 min_pacing_rate:${NC} ${recommended} Mbps（实测 × 70%）"
+  echo -e "  ${YELLOW}原理:${NC} min_pacing_rate 不应超过实际带宽，否则过度发送导致丢包"
+  echo ""
+
+  # 自动设置
+  if [ -d "$param_dir" ] && [ -w "$param_dir/min_pacing_rate" ]; then
+    read -p "  自动设置 min_pacing_rate = ${recommended} Mbps? (Y/n): " confirm
+    if [ "$confirm" != "n" ] && [ "$confirm" != "N" ]; then
+      set_min_pacing_rate "$recommended"
+    else
+      info "已跳过。手动设置: ./tcp.sh set-min-pacing-rate <Mbps>"
+    fi
+  else
+    warn "tcp_bbrplusv3 模块不可用，仅显示测试结果"
+    echo "  手动设置: ./tcp.sh set-min-pacing-rate ${recommended}"
+  fi
+}
+
 # 开机自动应用 bbrplusv3 参数
 setup_bbrplusv3_persistent() {
   cat > /etc/systemd/system/tcpboost-bbrplusv3.service <<'EOF'
@@ -1412,10 +1482,12 @@ main() {
       if [ -z "${2:-}" ]; then
         echo "用法: $0 set-min-pacing-rate <Mbps>"
         echo "  推荐: 50 (50Mbps VPS), 100 (100Mbps VPS), 0 (关闭)"
+        echo "  或: $0 speedtest 自动测试带宽并设置"
         exit 1
       fi
       set_min_pacing_rate "$2"
       ;;
+    speedtest) speedtest_bandwidth ;;
     *)
       # 交互式菜单
       while true; do
