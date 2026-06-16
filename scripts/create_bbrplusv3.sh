@@ -355,7 +355,8 @@ echo "[7/9] 已追加 module_param + 四档 Profile 系统"
 
 # 前向声明 bbrplusv3_main（在 cong_ops 之前注入）
 sed -i '/static struct tcp_congestion_ops tcp_bbrplusv3_cong_ops/i\
-static void bbrplusv3_main(struct sock *sk, u32 ack, int flag, const struct rate_sample *rs);' "$BBRPLUSV3_SRC"
+static void bbrplusv3_main(struct sock *sk, u32 ack, int flag, const struct rate_sample *rs);\
+static int bbrplusv3_gc_base_down;	/* profile 原始 DOWN gain, GC 基准值 */' "$BBRPLUSV3_SRC"
 
 # 替换 cong_control 回调: bbr_main → bbrplusv3_main
 sed -i 's/\.cong_control.*=.*bbr_main,.*/.cong_control\t= bbrplusv3_main,/' "$BBRPLUSV3_SRC"
@@ -375,7 +376,6 @@ static int bbrplusv3_acd_rtt_factor = 200;
 static int bbrplusv3_pacing_rate_scale = 100;
 static u64 bbrplusv3_min_pacing_rate;
 static int bbrplusv3_gc_enable = 0;
-static int bbrplusv3_gc_base_down;	/* profile 原始 DOWN gain, GC 基准值 */
 
 static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 			   const struct rate_sample *rs)
