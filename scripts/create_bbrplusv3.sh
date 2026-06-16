@@ -373,6 +373,7 @@ cat >> "$BBRPLUSV3_SRC" << 'BBRPLUSV3_ALGO_EOF'
 
 static int bbrplusv3_acd_enable;
 static int bbrplusv3_acd_rtt_factor = 200;
+static int bbrplusv3_acd_cwnd_reduce = 1;
 static int bbrplusv3_pacing_rate_scale = 100;
 static u64 bbrplusv3_min_pacing_rate;
 static int bbrplusv3_gc_enable = 0;
@@ -384,11 +385,11 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 
 	bbr_main(sk, ack, flag, rs);
 
-	/* BBR-ACD: 纯补偿模式（只增不减）
+	/* BBR-ACD: 随机丢包补偿 + 真拥塞 cwnd 缩减
 	 * 论文: Electronics 2020, 9(1), 136 (BBR-ACD)
 	 * 随机丢包 (rtt ≤ factor×min_rtt): pacing ×1.05 补偿，保持吞吐
-	 * 真拥塞 (rtt > factor×min_rtt): 不干预，BBRv3 内部 loss_events_in_round/inflight_hi 处理
-	 * 核心原则: 绝不用速度换稳定性 */
+	 * 真拥塞 (rtt > factor×min_rtt): cwnd ×beta 缩减（仅 Recovery 首入一次）
+	 *   不减速 pacing，只缩减在途数据量，BBRv3 自动调整 */
 	if (bbrplusv3_acd_enable && rs->losses > 0 && rs->rtt_us > 0 &&
 	    bbr->min_rtt_us > 0) {
 		u32 threshold = bbr->min_rtt_us *
@@ -400,8 +401,18 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 
 			rate = rate * 105 / 100;
 			WRITE_ONCE(sk->sk_pacing_rate, rate);
+		} else if (bbrplusv3_acd_cwnd_reduce &&
+			   bbr->prev_ca_state != TCP_CA_Recovery &&
+			   inet_csk(sk)->icsk_ca_state == TCP_CA_Recovery) {
+			/* 真拥塞: RTT 膨胀 = 队列堆积
+			 * cwnd ×beta 缩减, 仅 Recovery 首入执行一次 */
+			struct tcp_sock *tp = tcp_sk(sk);
+			u32 cwnd = tcp_snd_cwnd(tp);
+			u32 new_cwnd = max_t(u32,
+				(u64)cwnd * bbr_beta / BBR_UNIT, 4);
+
+			tcp_snd_cwnd_set(tp, new_cwnd);
 		}
-		/* 真拥塞: 不做任何事, 不降速 */
 	}
 
 	/* Pacing Rate Scale (BMR alpha) */
@@ -479,7 +490,10 @@ module_param_named(acd_enable, bbrplusv3_acd_enable, int, 0644);
 MODULE_PARM_DESC(acd_enable, "BBR-ACD delay-gradient congestion detection (0=off, 1=on)");
 
 module_param_named(acd_rtt_factor, bbrplusv3_acd_rtt_factor, int, 0644);
-MODULE_PARM_DESC(acd_rtt_factor, "ACD RTT threshold in % (200=2x min_rtt, 真拥塞判据)");
+MODULE_PARM_DESC(acd_rtt_factor, "ACD RTT threshold in % (200=2x min_rtt)");
+
+module_param_named(acd_cwnd_reduce, bbrplusv3_acd_cwnd_reduce, int, 0644);
+MODULE_PARM_DESC(acd_cwnd_reduce, "ACD beta cwnd reduce on true congestion (0=off, 1=on)");
 
 module_param_named(pacing_rate_scale, bbrplusv3_pacing_rate_scale, int, 0644);
 MODULE_PARM_DESC(pacing_rate_scale, "Pacing rate scale in % (100=100%, 90=90%)");

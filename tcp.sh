@@ -1073,6 +1073,7 @@ EOF
     # 启用 BBR-ACD 双向 pacing（真拥塞减速 + 随机丢包补偿）
     echo 1 > "$param_dir/acd_enable" 2>/dev/null || true
     echo 200 > "$param_dir/acd_rtt_factor" 2>/dev/null || true
+    echo 1 > "$param_dir/acd_cwnd_reduce" 2>/dev/null || true
     # min_pacing_rate 默认关闭，用户可手动设置
     echo 0 > "$param_dir/min_pacing_rate" 2>/dev/null || true
     # GC 保持关闭
