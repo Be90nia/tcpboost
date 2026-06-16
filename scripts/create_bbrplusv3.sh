@@ -373,7 +373,7 @@ cat >> "$BBRPLUSV3_SRC" << 'BBRPLUSV3_ALGO_EOF'
 
 static int bbrplusv3_acd_enable;
 static int bbrplusv3_acd_rtt_factor = 200;
-static int bbrplusv3_acd_cwnd_reduce = 0; /* 默认关闭, prev_ca_state 判断时机需验证 */
+static int bbrplusv3_acd_cwnd_reduce = 1;
 static int bbrplusv3_pacing_rate_scale = 100;
 static u64 bbrplusv3_min_pacing_rate;
 static int bbrplusv3_gc_enable = 0;
@@ -382,6 +382,9 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 			   const struct rate_sample *rs)
 {
 	struct bbr *bbr = inet_csk_ca(sk);
+	u8 prev_ca_saved;	/* bbr_main 执行前保存, 用于 ACD 判断 */
+
+	prev_ca_saved = bbr->prev_ca_state;
 
 	bbr_main(sk, ack, flag, rs);
 
@@ -402,10 +405,13 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 			rate = rate * 105 / 100;
 			WRITE_ONCE(sk->sk_pacing_rate, rate);
 		} else if (bbrplusv3_acd_cwnd_reduce &&
-			   bbr->prev_ca_state != TCP_CA_Recovery &&
+			   prev_ca_saved != TCP_CA_Recovery &&
 			   inet_csk(sk)->icsk_ca_state == TCP_CA_Recovery) {
 			/* 真拥塞: RTT 膨胀 = 队列堆积
-			 * cwnd ×beta 缩减, 仅 Recovery 首入执行一次 */
+			 * 用 bbr_main 前保存的 prev_ca_saved 判断 Recovery 首入:
+			 *   saved 不是 Recovery + 当前是 Recovery = 刚进入（首入）
+			 *   下次 ACK saved 已是 Recovery → 不再执行（仅一次）
+			 * cwnd ×beta 缩减 */
 			struct tcp_sock *tp = tcp_sk(sk);
 			u32 cwnd = tcp_snd_cwnd(tp);
 			u32 new_cwnd = max_t(u32,
