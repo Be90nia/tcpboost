@@ -653,14 +653,46 @@ speedtest_bandwidth() {
   info "测试 VPS 真实带宽（下载 100MB）..."
   echo ""
 
-  # 测试 2 次取最大值（第一次可能因 TCP 爬坡偏慢）
+  # 测速源列表（全球 CDN 优先，HTTP 避免 SSL 问题）
+  local -a test_urls=(
+    "http://cachefly.cachefly.net/100mb.test"
+    "https://speed.cloudflare.com/__down?bytes=104857600"
+    "http://speedtest.tele2.net/100MB.zip"
+    "https://speed.hetzner.de/100MB.bin"
+    "http://proof.ovh.net/files/100Mb.dat"
+  )
+
+  # 找一个能连通的测速源
+  local test_url=""
+  local test_host=""
+  for url in "${test_urls[@]}"; do
+    test_host=$(echo "$url" | awk -F/ '{print $3}')
+    info "  尝试: ${test_host}..."
+    # 快速连通性检查（只下载 1 字节）
+    if curl -so /dev/null --connect-timeout 5 --max-time 8 \
+       "$(echo "$url" | sed 's/100[mM][bB]/1/; s/104857600/1/')" 2>/dev/null; then
+      test_url="$url"
+      break
+    fi
+  done
+
+  if [ -z "$test_url" ]; then
+    error "所有测速源均不可达"
+    echo "  手动测试:"
+    echo "    curl -so /dev/null -w '%{speed_download}' http://cachefly.cachefly.net/100mb.test"
+    return 1
+  fi
+
+  info "  使用: ${test_host}"
+
+  # 测试 2 次取最大值
   local max_mbps=0
   local i
   for i in 1 2; do
     local raw_speed
     raw_speed=$(curl -so /dev/null -w '%{speed_download}' \
       --connect-timeout 10 --max-time 60 \
-      "https://speed.cloudflare.com/__down?bytes=104857600" 2>/dev/null || echo 0)
+      "$test_url" 2>/dev/null || echo 0)
 
     if [ -z "$raw_speed" ] || [ "$raw_speed" = "0" ]; then
       warn "  第 ${i} 次测试失败，跳过"
