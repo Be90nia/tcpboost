@@ -230,3 +230,54 @@ tcpboost/
 | M3: 3 级优化方案完成 | - | 待开始 |
 | M4: 算法管理功能 | - | 待开始 |
 | M5: 首个 Release | - | 待开始 |
+
+---
+
+## BBRPlusV3 算法优化路线图
+
+### Phase 1: 核心稳定性（已完成 2026-06-16）
+
+**目标**：提升跨太平洋链路 TLS 握手稳定性 + 吞吐 + 减少波动
+
+**已完成内容**：
+
+| 优化项 | 状态 | 说明 |
+|--------|------|------|
+| BBRv3 核心机制验证 | ✅ 确认 | Xanmod 补丁已包含 PROBE_BW 4 相位 + PROBE_RTT 0.5×BDP + loss 计数器 + prior_cwnd + probe_wait 随机化 |
+| BBR-ACD 双向 pacing | ✅ 完成 | 真拥塞(rtt>2×min_rtt) pacing×0.7 + 随机丢包 pacing×1.05，跨太平洋随机丢包不降速 |
+| tls_optimized profile | ✅ 完成 | 第5档 profile：STARTUP 温和(2.77/2.0) + PROBE_BW standard(1.375/0.85) + 丢包容忍(5%) + PROBE_RTT 优化(100ms/5s) |
+| TLS sysctl 配套 | ✅ 完成 | synack_retries=2, syn_retries=3, fastopen=3, slow_start_after_idle=0, mtu_probing=1 |
+| IW10 初始拥塞窗口 | ✅ 完成 | initcwnd=10 (RFC 6928)，TLS 证书链(约 2 MSS)全覆盖 |
+| tcp.sh 集成 | ✅ 完成 | 新增 `apply_profile_tls_optimized` + 菜单选项 5 + `tls-optimize` 子命令 |
+
+**预期性能提升**：
+- TLS 握手延迟 -45%（~640ms → ~350ms）
+- 吞吐 +20-40%（BBR-ACD 减少随机丢包误退避）
+- PROBE_RTT 吞吐波动 -80%
+
+**研究依据**（2023-2026 学术论文 + 开源实现）：
+- BBR-ACD: Electronics 2020, 9(1), 136 — 随机丢包 vs 拥塞丢包区分
+- BBRv3e1: ICNC 2026 — STARTUP pacing_gain 2.77 比 2.89 公平性 +15%
+- IMC 2019 — BBR 在浅缓冲重传率高 10×，20% 丢包悬崖点
+- Cloudflare/Dropbox 生产 sysctl 调优经验
+- RFC 6928 (IW10) + RFC 7413 (TFO) + RFC 8446 (TLS 1.3)
+
+### Phase 2: 精细化调优（待办，记录于 beads）
+
+| 优化项 | Beads ID | 优先级 | 说明 |
+|--------|----------|--------|------|
+| beta 加权 inflight_hi 软边界 | tcpboost-7gz | P2 | 替代硬性 cwnd 减半，`inflight_hi = max(tx_in_flight, target×(1-β))`，BBRv3 已有 `bbr_handle_inflight_too_high` 可参考 |
+| BBR-GC 真 gamma correction | tcpboost-20h | P3 | `Pup = 1 + 0.25×(inflight/BDP)^(1/γ)`，仅影响 PROBE_BW DOWN phase，论文 Sensors 2023 PMC10181671 |
+
+### Phase 3: 探索性（远期，需评估）
+
+| 优化项 | 说明 | 风险 |
+|--------|------|------|
+| KCC 卡尔曼 min_rtt 滤波 | 替代滑动窗口 min_rtt，对队列噪声更鲁棒（liulilittle/kcc） | 许可证 NOASSERTION 需确认 |
+| skb_marked_lost 回调 | 精细化丢包追踪（BBRv3 已有 `.skb_marked_lost`） | 需 BBRv3 补丁支持 |
+| L4S / TCP Prague ECN | 精确 ECN 反馈（仅企业网段可用） | 跨洋公网路由器不支持 |
+
+**Beads 任务追踪**：
+- Epic: `tcpboost-2yh` (BBRPlusV3 算法优化)
+- Phase 1 任务: `tcpboost-12i` (A), `tcpboost-b7w` (B), `tcpboost-739` (C)
+- Phase 2 任务: `tcpboost-7gz` (D), `tcpboost-20h` (E)

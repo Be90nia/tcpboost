@@ -169,12 +169,14 @@ cat >> "$BBRPLUSV3_SRC" << 'BBRPLUSV3_PARAMS_EOF'
 #define BBRPLUSV3_PROFILE_STANDARD	1
 #define BBRPLUSV3_PROFILE_AGGRESSIVE	2
 #define BBRPLUSV3_PROFILE_WIFI		3
+#define BBRPLUSV3_PROFILE_TLS_OPTIMIZED	4
 
 /* Profile 参数预设表 */
 struct bbrplusv3_profile_params {
 	int  pacing_gain_up;
 	int  pacing_gain_down;
 	int  startup_cwnd_gain;
+	int  startup_pacing_gain;
 	int  drain_gain;
 	u32  beta;
 	u32  loss_thresh;
@@ -192,6 +194,7 @@ bbrplusv3_profile_table[] = {
 		.pacing_gain_up		= BBR_UNIT * 5 / 4,
 		.pacing_gain_down	= BBR_UNIT * 91 / 100,
 		.startup_cwnd_gain	= BBR_UNIT * 2,
+		.startup_pacing_gain	= BBR_UNIT * 277 / 100 + 1,
 		.drain_gain		= BBR_UNIT * 1000 / 2885,
 		.beta			= BBR_UNIT * 30 / 100,
 		.loss_thresh		= BBR_UNIT * 2 / 100,
@@ -206,6 +209,7 @@ bbrplusv3_profile_table[] = {
 		.pacing_gain_up		= BBR_UNIT * 11 / 8,
 		.pacing_gain_down	= BBR_UNIT * 17 / 20,
 		.startup_cwnd_gain	= BBR_UNIT * 9 / 4,
+		.startup_pacing_gain	= BBR_UNIT * 2885 / 1000 + 1,
 		.drain_gain		= BBR_UNIT * 1100 / 2885,
 		.beta			= BBR_UNIT * 25 / 100,
 		.loss_thresh		= BBR_UNIT * 35 / 1000,
@@ -220,6 +224,7 @@ bbrplusv3_profile_table[] = {
 		.pacing_gain_up		= BBR_UNIT * 3 / 2,
 		.pacing_gain_down	= BBR_UNIT * 3 / 4,
 		.startup_cwnd_gain	= BBR_UNIT * 5 / 2,
+		.startup_pacing_gain	= BBR_UNIT * 2885 / 1000 + 1,
 		.drain_gain		= BBR_UNIT * 1200 / 2885,
 		.beta			= BBR_UNIT * 20 / 100,
 		.loss_thresh		= BBR_UNIT * 5 / 100,
@@ -234,6 +239,7 @@ bbrplusv3_profile_table[] = {
 		.pacing_gain_up		= BBR_UNIT * 3 / 2,
 		.pacing_gain_down	= BBR_UNIT * 9 / 10,
 		.startup_cwnd_gain	= BBR_UNIT * 9 / 4,
+		.startup_pacing_gain	= BBR_UNIT * 2885 / 1000 + 1,
 		.drain_gain		= BBR_UNIT * 1200 / 2885,
 		.beta			= BBR_UNIT * 25 / 100,
 		.loss_thresh		= BBR_UNIT * 5 / 100,
@@ -243,6 +249,26 @@ bbrplusv3_profile_table[] = {
 		.ecn_thresh		= BBR_UNIT * 7 / 10,
 		.full_loss_cnt		= 4,
 		.inflight_headroom	= BBR_UNIT * 10 / 100,
+	},
+	[BBRPLUSV3_PROFILE_TLS_OPTIMIZED] = {
+		/* TLS 握手优化: STARTUP 温和(2.77/2.0 避免队列堆积)
+		 * + PROBE_BW standard(1.375/0.85 保持带宽探测)
+		 * + 丢包容忍(5%) + PROBE_RTT 优化(100ms/5s 减少延迟峰)
+		 * + BBRPlus beta(30%) 经典恢复
+		 * 适用: 跨太平洋 TLS 1.3 握手稳定性 + xray/sing-box 代理 */
+		.pacing_gain_up		= BBR_UNIT * 11 / 8,
+		.pacing_gain_down	= BBR_UNIT * 17 / 20,
+		.startup_cwnd_gain	= BBR_UNIT * 2,
+		.startup_pacing_gain	= BBR_UNIT * 277 / 100 + 1,
+		.drain_gain		= BBR_UNIT * 1100 / 2885,
+		.beta			= BBR_UNIT * 30 / 100,
+		.loss_thresh		= BBR_UNIT * 5 / 100,
+		.full_bw_thresh		= BBR_UNIT * 6 / 5,
+		.probe_rtt_mode_ms	= 100,
+		.probe_rtt_win_ms	= 5000,
+		.ecn_thresh		= BBR_UNIT * 3 / 5,
+		.full_loss_cnt		= 4,
+		.inflight_headroom	= BBR_UNIT * 12 / 100,
 	},
 };
 
@@ -260,7 +286,7 @@ static int bbrplusv3_profile_set(const char *val,
 		return ret;
 
 	if (bbrplusv3_profile < 0 ||
-	    bbrplusv3_profile > BBRPLUSV3_PROFILE_WIFI) {
+	    bbrplusv3_profile > BBRPLUSV3_PROFILE_TLS_OPTIMIZED) {
 		bbrplusv3_profile = old;
 		return -EINVAL;
 	}
@@ -270,6 +296,7 @@ static int bbrplusv3_profile_set(const char *val,
 	bbr_pacing_gain[BBR_BW_PROBE_UP]	= p->pacing_gain_up;
 	bbr_pacing_gain[BBR_BW_PROBE_DOWN]	= p->pacing_gain_down;
 	bbr_startup_cwnd_gain		= p->startup_cwnd_gain;
+	bbr_startup_pacing_gain		= p->startup_pacing_gain;
 	bbr_drain_gain			= p->drain_gain;
 	bbr_beta			= p->beta;
 	bbr_loss_thresh			= p->loss_thresh;
@@ -287,7 +314,9 @@ static int bbrplusv3_profile_set(const char *val,
 		bbrplusv3_profile == BBRPLUSV3_PROFILE_STANDARD ?
 			"standard" :
 		bbrplusv3_profile == BBRPLUSV3_PROFILE_AGGRESSIVE ?
-			"aggressive" : "wifi_optimized");
+			"aggressive" :
+		bbrplusv3_profile == BBRPLUSV3_PROFILE_WIFI ?
+			"wifi_optimized" : "tls_optimized");
 	return 0;
 }
 
@@ -299,7 +328,7 @@ static const struct kernel_param_ops bbrplusv3_profile_ops = {
 module_param_cb(profile, &bbrplusv3_profile_ops,
 		&bbrplusv3_profile, 0644);
 MODULE_PARM_DESC(profile,
-	"BBRPlusV3 profile: 0=conservative, 1=standard, 2=aggressive, 3=wifi (default=2)");
+	"BBRPlusV3 profile: 0=conservative, 1=standard, 2=aggressive, 3=wifi, 4=tls_optimized (default=2)");
 
 /* 单独可调参数（覆盖 profile 值，BBR_UNIT = 256） */
 module_param_named(pacing_gain_up,
@@ -307,6 +336,7 @@ module_param_named(pacing_gain_up,
 module_param_named(pacing_gain_down,
 	bbr_pacing_gain[BBR_BW_PROBE_DOWN], int, 0644);
 module_param_named(startup_cwnd_gain, bbr_startup_cwnd_gain, int, 0644);
+module_param_named(startup_pacing_gain, bbr_startup_pacing_gain, int, 0644);
 module_param_named(drain_gain, bbr_drain_gain, int, 0644);
 module_param_named(beta, bbr_beta, uint, 0644);
 module_param_named(loss_thresh, bbr_loss_thresh, uint, 0644);
@@ -342,7 +372,8 @@ cat >> "$BBRPLUSV3_SRC" << 'BBRPLUSV3_ALGO_EOF'
  * ============================================ */
 
 static int bbrplusv3_acd_enable;
-static int bbrplusv3_acd_rtt_factor = 125;
+static int bbrplusv3_acd_rtt_factor = 200;
+static int bbrplusv3_acd_congestion_scale = 70;
 static int bbrplusv3_pacing_rate_scale = 100;
 static u64 bbrplusv3_min_pacing_rate;
 static int bbrplusv3_gc_enable = 0;
@@ -354,13 +385,24 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 
 	bbr_main(sk, ack, flag, rs);
 
-	/* BBR-ACD: delay-gradient 真拥塞检测 */
+	/* BBR-ACD: 真拥塞 vs 随机丢包双向检测
+	 * 论文: Electronics 2020, 9(1), 136 (BBR-ACD)
+	 * 真拥塞 (rtt > factor×min_rtt): pacing × congestion_scale/100 (减速)
+	 * 随机丢包 (rtt ≤ factor×min_rtt): pacing × 105/100 (补偿，保持吞吐)
+	 * 跨太平洋链路 1-5% 丢包多为随机丢包(光放大器 ASE 噪声)，不应降速 */
 	if (bbrplusv3_acd_enable && rs->losses > 0 && rs->rtt_us > 0 &&
 	    bbr->min_rtt_us > 0) {
 		u32 threshold = bbr->min_rtt_us *
 				bbrplusv3_acd_rtt_factor / 100;
 
-		if (rs->rtt_us <= threshold) {
+		if (rs->rtt_us > threshold) {
+			/* 真拥塞: RTT 膨胀说明队列堆积，pacing 减速 */
+			u64 rate = READ_ONCE(sk->sk_pacing_rate);
+
+			rate = rate * bbrplusv3_acd_congestion_scale / 100;
+			WRITE_ONCE(sk->sk_pacing_rate, rate);
+		} else {
+			/* 随机丢包: RTT 正常说明非拥塞，pacing 轻微补偿 */
 			u64 rate = READ_ONCE(sk->sk_pacing_rate);
 
 			rate = rate * 105 / 100;
@@ -431,7 +473,10 @@ module_param_named(acd_enable, bbrplusv3_acd_enable, int, 0644);
 MODULE_PARM_DESC(acd_enable, "BBR-ACD delay-gradient congestion detection (0=off, 1=on)");
 
 module_param_named(acd_rtt_factor, bbrplusv3_acd_rtt_factor, int, 0644);
-MODULE_PARM_DESC(acd_rtt_factor, "ACD RTT threshold in % (125=1.25x min_rtt)");
+MODULE_PARM_DESC(acd_rtt_factor, "ACD RTT threshold in % (200=2x min_rtt, 真拥塞判据)");
+
+module_param_named(acd_congestion_scale, bbrplusv3_acd_congestion_scale, int, 0644);
+MODULE_PARM_DESC(acd_congestion_scale, "ACD pacing scale on true congestion in % (70=减速到70%)");
 
 module_param_named(pacing_rate_scale, bbrplusv3_pacing_rate_scale, int, 0644);
 MODULE_PARM_DESC(pacing_rate_scale, "Pacing rate scale in % (100=100%, 90=90%)");
@@ -559,22 +604,32 @@ echo "Profile 使用方式:"
 echo "  echo 0 > /sys/module/tcp_bbrplusv3/parameters/profile  # conservative"
 echo "  echo 1 > /sys/module/tcp_bbrplusv3/parameters/profile  # standard"
 echo "  echo 2 > /sys/module/tcp_bbrplusv3/parameters/profile  # aggressive (默认)"
+echo "  echo 3 > /sys/module/tcp_bbrplusv3/parameters/profile  # wifi"
+echo "  echo 4 > /sys/module/tcp_bbrplusv3/parameters/profile  # tls_optimized"
 echo ""
 echo "单独参数调整（BBR_UNIT = 256）:"
 echo "  cat  /sys/module/tcp_bbrplusv3/parameters/beta"
 echo "  echo 76 > /sys/module/tcp_bbrplusv3/parameters/beta   # 30%"
 echo ""
 echo "Profile 参数对比:"
-echo "                     conservative   standard    aggressive"
-echo "  pacing_gain UP:    1.25 (320)     1.375 (352) 1.50 (384)"
-echo "  pacing_gain DOWN:  0.91 (232)     0.85 (217)  0.75 (192)"
-echo "  startup_cwnd_gain: 2.0 (512)      2.25 (576)  2.50 (640)"
-echo "  drain_gain:        0.35 (89)      0.38 (97)   0.42 (107)"
-echo "  beta:              30% (76)       25% (64)    20% (51)"
-echo "  loss_thresh:       2% (5)         3.5% (8)    5% (12)"
-echo "  full_bw_thresh:    1.25 (320)     1.20 (307)  1.10 (281)"
-echo "  probe_rtt_mode_ms: 200            100         50"
-echo "  probe_rtt_win_ms:  5000           3000        2500"
-echo "  ecn_thresh:        50% (128)      60% (153)   70% (179)"
-echo "  full_loss_cnt:     6              4           3"
-echo "  inflight_headroom: 15% (38)       12% (30)    10% (25)"
+echo "                     conservative  standard  aggressive  wifi      tls_opt"
+echo "  pacing_gain UP:    1.25 (320)   1.375(352) 1.50 (384) 1.50(384) 1.375(352)"
+echo "  pacing_gain DOWN:  0.91 (232)   0.85 (217) 0.75 (192) 0.90(230) 0.85 (217)"
+echo "  startup_cwnd_gain: 2.0  (512)   2.25 (576) 2.50 (640) 2.25(576) 2.0  (512)"
+echo "  startup_pacing:    2.77 (709)   2.885(739) 2.885(739) 2.885(739) 2.77(709)"
+echo "  drain_gain:        0.35 (89)    0.38 (97)  0.42 (107) 0.42(107) 0.38 (97)"
+echo "  beta:              30% (76)     25% (64)   20% (51)   25% (64)  30% (76)"
+echo "  loss_thresh:       2%  (5)      3.5%(8)    5%  (12)   5%  (12)  5%  (12)"
+echo "  full_bw_thresh:    1.25(320)    1.20(307)  1.10(281)  1.10(281) 1.20(307)"
+echo "  probe_rtt_mode_ms: 200          100        50         100       100"
+echo "  probe_rtt_win_ms:  5000         3000       2500       3000      5000"
+echo "  ecn_thresh:        50% (128)    60% (153)  70% (179)  70%(179)  60% (153)"
+echo "  full_loss_cnt:     6            4          3          4         4"
+echo "  inflight_headroom: 15% (38)     12% (30)   10% (25)   10%(25)   12% (30)"
+echo ""
+echo "tls_optimized profile 特点:"
+echo "  - STARTUP 温和(2.77/2.0): 避免握手期队列堆积, TLS 握手成功率↑"
+echo "  - PROBE_BW standard(1.375/0.85): 保持跨太平洋带宽探测能力"
+echo "  - 丢包容忍(5%) + PROBE_RTT 优化(100ms/5s): 减少延迟峰"
+echo "  - BBR-ACD 双向 pacing: 真拥塞减速 + 随机丢包补偿"
+echo "  适用: 跨太平洋 TLS 1.3 + xray/sing-box 代理场景"

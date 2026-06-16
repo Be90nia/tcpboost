@@ -18,3 +18,8 @@ build/
 
 # OpenCode session
 .omo/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
