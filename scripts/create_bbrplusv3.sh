@@ -251,24 +251,22 @@ bbrplusv3_profile_table[] = {
 		.inflight_headroom	= BBR_UNIT * 10 / 100,
 	},
 	[BBRPLUSV3_PROFILE_TLS_OPTIMIZED] = {
-		/* TLS 握手优化: STARTUP 温和(2.77/2.0 避免队列堆积)
-		 * + PROBE_BW standard(1.375/0.85 保持带宽探测)
-		 * + 丢包容忍(5%) + PROBE_RTT 优化(100ms/5s 减少延迟峰)
-		 * + BBRPlus beta(30%) 经典恢复
-		 * 适用: 跨太平洋 TLS 1.3 握手稳定性 + xray/sing-box 代理 */
-		.pacing_gain_up		= BBR_UNIT * 11 / 8,
-		.pacing_gain_down	= BBR_UNIT * 17 / 20,
-		.startup_cwnd_gain	= BBR_UNIT * 2,
-		.startup_pacing_gain	= BBR_UNIT * 277 / 100 + 1,
-		.drain_gain		= BBR_UNIT * 1100 / 2885,
-		.beta			= BBR_UNIT * 30 / 100,
+		/* TLS 握手优化: 参数与 aggressive 完全一致（不降速！）
+		 * 稳定性通过运行时叠加实现: ACD纯补偿 + sysctl
+		 * 绝不牺牲速度换取稳定性 */
+		.pacing_gain_up		= BBR_UNIT * 3 / 2,
+		.pacing_gain_down	= BBR_UNIT * 3 / 4,
+		.startup_cwnd_gain	= BBR_UNIT * 5 / 2,
+		.startup_pacing_gain	= BBR_UNIT * 2885 / 1000 + 1,
+		.drain_gain		= BBR_UNIT * 1200 / 2885,
+		.beta			= BBR_UNIT * 20 / 100,
 		.loss_thresh		= BBR_UNIT * 5 / 100,
-		.full_bw_thresh		= BBR_UNIT * 6 / 5,
-		.probe_rtt_mode_ms	= 100,
-		.probe_rtt_win_ms	= 5000,
-		.ecn_thresh		= BBR_UNIT * 3 / 5,
-		.full_loss_cnt		= 4,
-		.inflight_headroom	= BBR_UNIT * 12 / 100,
+		.full_bw_thresh		= BBR_UNIT * 11 / 10,
+		.probe_rtt_mode_ms	= 50,
+		.probe_rtt_win_ms	= 2500,
+		.ecn_thresh		= BBR_UNIT * 7 / 10,
+		.full_loss_cnt		= 3,
+		.inflight_headroom	= BBR_UNIT * 10 / 100,
 	},
 };
 
@@ -374,8 +372,6 @@ cat >> "$BBRPLUSV3_SRC" << 'BBRPLUSV3_ALGO_EOF'
 
 static int bbrplusv3_acd_enable;
 static int bbrplusv3_acd_rtt_factor = 200;
-static int bbrplusv3_acd_congestion_scale = 70;
-static int bbrplusv3_acd_cwnd_reduce = 1;
 static int bbrplusv3_pacing_rate_scale = 100;
 static u64 bbrplusv3_min_pacing_rate;
 static int bbrplusv3_gc_enable = 0;
@@ -388,43 +384,24 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 
 	bbr_main(sk, ack, flag, rs);
 
-	/* BBR-ACD: 真拥塞 vs 随机丢包双向检测
+	/* BBR-ACD: 纯补偿模式（只增不减）
 	 * 论文: Electronics 2020, 9(1), 136 (BBR-ACD)
-	 * 真拥塞 (rtt > factor×min_rtt): pacing × congestion_scale/100 (减速)
-	 * 随机丢包 (rtt ≤ factor×min_rtt): pacing × 105/100 (补偿，保持吞吐)
-	 * 跨太平洋链路 1-5% 丢包多为随机丢包(光放大器 ASE 噪声)，不应降速 */
+	 * 随机丢包 (rtt ≤ factor×min_rtt): pacing ×1.05 补偿，保持吞吐
+	 * 真拥塞 (rtt > factor×min_rtt): 不干预，BBRv3 内部 loss_events_in_round/inflight_hi 处理
+	 * 核心原则: 绝不用速度换稳定性 */
 	if (bbrplusv3_acd_enable && rs->losses > 0 && rs->rtt_us > 0 &&
 	    bbr->min_rtt_us > 0) {
 		u32 threshold = bbr->min_rtt_us *
 				bbrplusv3_acd_rtt_factor / 100;
 
-		if (rs->rtt_us > threshold) {
-			/* 真拥塞: RTT 膨胀说明队列堆积，pacing 减速 */
-			u64 rate = READ_ONCE(sk->sk_pacing_rate);
-
-			rate = rate * bbrplusv3_acd_congestion_scale / 100;
-			WRITE_ONCE(sk->sk_pacing_rate, rate);
-
-			/* beta 加权 cwnd 缩减 (优化 D)
-			 * 仅在 Recovery 首入时执行一次, 避免持续减半
-			 * cwnd_new = max(cwnd × beta, 4) */
-			if (bbrplusv3_acd_cwnd_reduce &&
-			    bbr->prev_ca_state != TCP_CA_Recovery &&
-			    inet_csk(sk)->icsk_ca_state == TCP_CA_Recovery) {
-				struct tcp_sock *tp = tcp_sk(sk);
-				u32 cwnd = tcp_snd_cwnd(tp);
-				u32 new_cwnd = max_t(u32,
-					(u64)cwnd * bbr_beta / BBR_UNIT, 4);
-
-				tcp_snd_cwnd_set(tp, new_cwnd);
-			}
-		} else {
-			/* 随机丢包: RTT 正常说明非拥塞，pacing 轻微补偿 */
+		if (rs->rtt_us <= threshold) {
+			/* 随机丢包: RTT 正常 = 非拥塞, pacing +5% 补偿 */
 			u64 rate = READ_ONCE(sk->sk_pacing_rate);
 
 			rate = rate * 105 / 100;
 			WRITE_ONCE(sk->sk_pacing_rate, rate);
 		}
+		/* 真拥塞: 不做任何事, 不降速 */
 	}
 
 	/* Pacing Rate Scale (BMR alpha) */
@@ -503,12 +480,6 @@ MODULE_PARM_DESC(acd_enable, "BBR-ACD delay-gradient congestion detection (0=off
 
 module_param_named(acd_rtt_factor, bbrplusv3_acd_rtt_factor, int, 0644);
 MODULE_PARM_DESC(acd_rtt_factor, "ACD RTT threshold in % (200=2x min_rtt, 真拥塞判据)");
-
-module_param_named(acd_congestion_scale, bbrplusv3_acd_congestion_scale, int, 0644);
-MODULE_PARM_DESC(acd_congestion_scale, "ACD pacing scale on true congestion in % (70=减速到70%)");
-
-module_param_named(acd_cwnd_reduce, bbrplusv3_acd_cwnd_reduce, int, 0644);
-MODULE_PARM_DESC(acd_cwnd_reduce, "ACD beta-weighted cwnd reduction on true congestion (0=off, 1=on)");
 
 module_param_named(pacing_rate_scale, bbrplusv3_pacing_rate_scale, int, 0644);
 MODULE_PARM_DESC(pacing_rate_scale, "Pacing rate scale in % (100=100%, 90=90%)");

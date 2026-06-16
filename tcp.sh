@@ -971,8 +971,6 @@ EOF
     # 启用 BBR-ACD 双向 pacing（真拥塞减速 + 随机丢包补偿）
     echo 1 > "$param_dir/acd_enable" 2>/dev/null || true
     echo 200 > "$param_dir/acd_rtt_factor" 2>/dev/null || true
-    echo 70 > "$param_dir/acd_congestion_scale" 2>/dev/null || true
-    echo 1 > "$param_dir/acd_cwnd_reduce" 2>/dev/null || true
     # min_pacing_rate 默认关闭，用户可手动设置
     echo 0 > "$param_dir/min_pacing_rate" 2>/dev/null || true
     # GC 保持关闭
@@ -985,13 +983,10 @@ EOF
   mkdir -p "$CONF_DIR"
   cat > "$CONF_DIR/bbrplusv3.conf" <<'EOF'
 # BBRPlusV3 TLS 握手优化参数
-# tls_optimized profile: STARTUP 温和 + PROBE_BW standard + 丢包容忍
-# BBR-ACD: 真拥塞(rtt>2×min_rtt)减速 + 随机丢包补偿 + beta cwnd缩减
+# aggressive profile（不降速）+ ACD 纯补偿（随机丢包+5%，真拥塞不干预）
 profile=4
 acd_enable=1
 acd_rtt_factor=200
-acd_congestion_scale=70
-acd_cwnd_reduce=1
 gc_enable=0
 EOF
 
@@ -1004,7 +999,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'PARAM_DIR=/sys/module/tcp_bbrplusv3/parameters; [ -d "$PARAM_DIR" ] && echo 4 > $PARAM_DIR/profile && echo 1 > $PARAM_DIR/acd_enable && echo 200 > $PARAM_DIR/acd_rtt_factor && echo 70 > $PARAM_DIR/acd_congestion_scale && echo 1 > $PARAM_DIR/acd_cwnd_reduce && echo 0 > $PARAM_DIR/gc_enable 2>/dev/null || true'
+ExecStart=/bin/bash -c 'PARAM_DIR=/sys/module/tcp_bbrplusv3/parameters; [ -d "$PARAM_DIR" ] && echo 4 > $PARAM_DIR/profile && echo 1 > $PARAM_DIR/acd_enable && echo 200 > $PARAM_DIR/acd_rtt_factor && echo 0 > $PARAM_DIR/gc_enable 2>/dev/null || true'
 
 [Install]
 WantedBy=multi-user.target
