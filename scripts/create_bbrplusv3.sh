@@ -373,7 +373,7 @@ cat >> "$BBRPLUSV3_SRC" << 'BBRPLUSV3_ALGO_EOF'
 
 static int bbrplusv3_acd_enable;
 static int bbrplusv3_acd_rtt_factor = 200;
-static int bbrplusv3_acd_cwnd_reduce = 1;
+static int bbrplusv3_acd_cwnd_reduce = 0; /* 默认关闭, prev_ca_state 判断时机需验证 */
 static int bbrplusv3_pacing_rate_scale = 100;
 static u64 bbrplusv3_min_pacing_rate;
 static int bbrplusv3_gc_enable = 0;
