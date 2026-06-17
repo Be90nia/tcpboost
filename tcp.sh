@@ -829,6 +829,9 @@ net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_mtu_probing = 1
+
+# === Cloudflare TCP collapse（接收侧优化） ===
+net.ipv4.tcp_collapse_max_bytes = 2097152
 EOF
 
   sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1
@@ -869,6 +872,9 @@ net.core.netdev_max_backlog = 5000
 net.core.somaxconn = 32768
 net.ipv4.tcp_max_syn_backlog = 8192
 net.ipv4.tcp_max_tw_buckets = 5000
+
+# === Cloudflare TCP collapse（接收侧优化） ===
+net.ipv4.tcp_collapse_max_bytes = 8388608
 EOF
 
   sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1
@@ -944,6 +950,9 @@ net.ipv4.tcp_tw_recycle = 0
 net.ipv4.tcp_keepalive_time = 1800
 net.ipv4.tcp_keepalive_intvl = 60
 net.ipv4.tcp_keepalive_probes = 9
+
+# === Cloudflare TCP collapse（接收侧优化） ===
+net.ipv4.tcp_collapse_max_bytes = $((buf_max / 2))
 EOF
 
   # limits.conf 调优
@@ -1063,6 +1072,9 @@ net.ipv4.tcp_tw_recycle = 0
 net.ipv4.tcp_keepalive_time = 1800
 net.ipv4.tcp_keepalive_intvl = 60
 net.ipv4.tcp_keepalive_probes = 9
+
+# === Cloudflare TCP collapse（接收侧优化） ===
+net.ipv4.tcp_collapse_max_bytes = $((buf_max / 2))
 EOF
 
   # limits.conf 调优
