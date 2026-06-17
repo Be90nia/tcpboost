@@ -597,7 +597,7 @@ fi
 # 三处修改: ① 添加 net 变量 ② 添加 sysctl 检查+goto ③ 添加 do_not_collapse label
 if [ -f "$TCP_INPUT_FILE" ] && ! grep -q "tcp_collapse_max_bytes" "$TCP_INPUT_FILE" 2>/dev/null; then
   awk '
-  /static int tcp_prune_queue\(struct sock \*sk,/ { in_prune = 1 }
+  /static int tcp_prune_queue\(struct sock \*sk,/ && !/;[[:space:]]*$/ { in_prune = 1 }
   in_prune && /struct tcp_sock \*tp = tcp_sk\(sk\);/ && !added_net {
     print
     print "\tstruct net *net = sock_net(sk);"
