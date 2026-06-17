@@ -528,6 +528,131 @@ fi
 echo "[8/9] 已修改 Kconfig 和 Makefile"
 
 # ============================================
+# 9. Cloudflare TCP collapse patch（接收侧优化，独立于 CCA）
+# 来源: mfreemon@cloudflare.com (2022-03), 适配 Linux 6.12 LTS
+# 博客: https://blog.cloudflare.com/optimizing-tcp-for-high-throughput-and-low-latency/
+# sysctl: net.ipv4.tcp_collapse_max_bytes (0=禁用默认行为, >0=启用跳过collapse)
+# 效果: 高 BDP 链路上接收队列满时，跳过 collapse 操作避免 CPU 延迟尖峰
+# 幂等: 每个文件用 grep 检查是否已修改，重复运行安全
+# ============================================
+
+NETNS_FILE="include/net/netns/ipv4.h"
+TRACE_FILE="include/trace/events/tcp.h"
+SYSCTL_FILE="net/ipv4/sysctl_net_ipv4.c"
+TCP_INPUT_FILE="net/ipv4/tcp_input.c"
+TCP_IPV4_FILE="net/ipv4/tcp_ipv4.c"
+
+# --- 文件 1: include/net/netns/ipv4.h ---
+# 在 struct netns_ipv4 中添加字段声明
+# 6.12 锚点: sysctl_tcp_syn_linear_timeouts (6.12 新增字段)
+if [ -f "$NETNS_FILE" ] && ! grep -q "sysctl_tcp_collapse_max_bytes" "$NETNS_FILE" 2>/dev/null; then
+  sed -i '/sysctl_tcp_syn_linear_timeouts;/a\\tunsigned int\tsysctl_tcp_collapse_max_bytes;' "$NETNS_FILE"
+  echo "  [cloudflare] netns/ipv4.h: 已添加字段"
+fi
+
+# --- 文件 2: include/trace/events/tcp.h ---
+# 添加 tcp_collapse_max_bytes_exceeded trace 事件
+# 锚点: TRACE_EVENT(tcp_retransmit_synack 之前插入
+if [ -f "$TRACE_FILE" ] && ! grep -q "tcp_collapse_max_bytes_exceeded" "$TRACE_FILE" 2>/dev/null; then
+  awk '/TRACE_EVENT\(tcp_retransmit_synack,/ && !inserted {
+    print "DEFINE_EVENT(tcp_event_sk, tcp_collapse_max_bytes_exceeded,"
+    print ""
+    print "\tTP_PROTO(struct sock *sk),"
+    print ""
+    print "\tTP_ARGS(sk)"
+    print ");"
+    print ""
+    inserted = 1
+  }
+  { print }' "$TRACE_FILE" > "${TRACE_FILE}.tmp" && mv "${TRACE_FILE}.tmp" "$TRACE_FILE"
+  echo "  [cloudflare] trace/events/tcp.h: 已添加事件"
+fi
+
+# --- 文件 3: net/ipv4/sysctl_net_ipv4.c ---
+# 在 ipv4_net_table[] 中添加 tcp_collapse_max_bytes sysctl 条目
+# 锚点: tcp_shrink_window 条目闭合 }, 之后
+if [ -f "$SYSCTL_FILE" ] && ! grep -q "tcp_collapse_max_bytes" "$SYSCTL_FILE" 2>/dev/null; then
+  awk '
+  /"tcp_shrink_window"/ { in_entry = 1 }
+  in_entry && /^\t\}/ {
+    print
+    print "\t{"
+    print "\t\t.procname\t= \"tcp_collapse_max_bytes\","
+    print "\t\t.data\t\t= &init_net.ipv4.sysctl_tcp_collapse_max_bytes,"
+    print "\t\t.maxlen\t\t= sizeof(unsigned int),"
+    print "\t\t.mode\t\t= 0644,"
+    print "\t\t.proc_handler\t= proc_douintvec_minmax,"
+    print "\t},"
+    in_entry = 0
+    next
+  }
+  { print }
+  ' "$SYSCTL_FILE" > "${SYSCTL_FILE}.tmp" && mv "${SYSCTL_FILE}.tmp" "$SYSCTL_FILE"
+  echo "  [cloudflare] sysctl_net_ipv4.c: 已添加 sysctl 条目"
+fi
+
+# --- 文件 4: net/ipv4/tcp_input.c（核心修改） ---
+# 修改 tcp_prune_queue() 函数: 添加 sysctl 检查 + goto label
+# 6.12 函数签名: tcp_prune_queue(struct sock *sk, const struct sk_buff *in_skb)
+# 三处修改: ① 添加 net 变量 ② 添加 sysctl 检查+goto ③ 添加 do_not_collapse label
+if [ -f "$TCP_INPUT_FILE" ] && ! grep -q "tcp_collapse_max_bytes" "$TCP_INPUT_FILE" 2>/dev/null; then
+  awk '
+  /static int tcp_prune_queue\(struct sock \*sk,/ { in_prune = 1 }
+  in_prune && /struct tcp_sock \*tp = tcp_sk\(sk\);/ && !added_net {
+    print
+    print "\tstruct net *net = sock_net(sk);"
+    added_net = 1
+    next
+  }
+  in_prune && added_net && !added_check && /return 0;/ {
+    print
+    print ""
+    print "\t/* Cloudflare TCP collapse: skip collapse for large queues */"
+    print "\tif (net->ipv4.sysctl_tcp_collapse_max_bytes &&"
+    print "\t    (atomic_read(&sk->sk_rmem_alloc) > net->ipv4.sysctl_tcp_collapse_max_bytes)) {"
+    print "\t\ttrace_tcp_collapse_max_bytes_exceeded(sk);"
+    print "\t\tgoto do_not_collapse;"
+    print "\t}"
+    print ""
+    added_check = 1
+    next
+  }
+  in_prune && added_check && !added_label && /return 0;/ {
+    print
+    print ""
+    print "do_not_collapse:"
+    added_label = 1
+    in_prune = 0
+    next
+  }
+  { print }
+  ' "$TCP_INPUT_FILE" > "${TCP_INPUT_FILE}.tmp" && mv "${TCP_INPUT_FILE}.tmp" "$TCP_INPUT_FILE"
+  echo "  [cloudflare] tcp_input.c: 已修改 tcp_prune_queue()"
+fi
+
+# --- 文件 5: net/ipv4/tcp_ipv4.c ---
+# 在 tcp_sk_init() 中初始化 sysctl_tcp_collapse_max_bytes = 0
+# 锚点: sysctl_tcp_shrink_window = 0 之后
+if [ -f "$TCP_IPV4_FILE" ] && ! grep -q "sysctl_tcp_collapse_max_bytes" "$TCP_IPV4_FILE" 2>/dev/null; then
+  sed -i '/sysctl_tcp_shrink_window = 0;/a\\tnet->ipv4.sysctl_tcp_collapse_max_bytes = 0;' "$TCP_IPV4_FILE"
+  echo "  [cloudflare] tcp_ipv4.c: 已添加初始化"
+fi
+
+# --- 汇总 ---
+CLOUDFLARE_COUNT=0
+for f in "$NETNS_FILE" "$TRACE_FILE" "$SYSCTL_FILE" "$TCP_INPUT_FILE" "$TCP_IPV4_FILE"; do
+  grep -q "collapse_max_bytes" "$f" 2>/dev/null && CLOUDFLARE_COUNT=$((CLOUDFLARE_COUNT+1)) || :
+done
+
+if [ "$CLOUDFLARE_COUNT" -eq 5 ]; then
+  echo "[9/9] 已应用 Cloudflare TCP collapse patch (5/5 文件)"
+elif [ "$CLOUDFLARE_COUNT" -gt 0 ]; then
+  echo "[9/9] Cloudflare TCP collapse patch 部分应用 ($CLOUDFLARE_COUNT/5 文件)"
+else
+  echo "[9/9] Cloudflare TCP collapse patch 未应用 (内核源文件可能不存在)"
+fi
+
+# ============================================
 # 验证
 # ============================================
 echo ""
@@ -551,6 +676,12 @@ grep 'MODULE_PARM_DESC(profile' "$BBRPLUSV3_SRC"
 echo ""
 echo "--- Makefile ---"
 grep bbrplusv3 net/ipv4/Makefile
+
+echo ""
+echo "--- Cloudflare TCP collapse ---"
+echo "  sysctl: net.ipv4.tcp_collapse_max_bytes"
+echo "  启用: echo 6291456 > /proc/sys/net/ipv4/tcp_collapse_max_bytes  # 6MB"
+echo "  禁用: echo 0 > /proc/sys/net/ipv4/tcp_collapse_max_bytes       # 默认"
 
 echo ""
 echo "=== BBRPlusV3 创建完成 ==="
