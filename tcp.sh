@@ -499,6 +499,11 @@ write_bbrplusv3_service() {
   local s_probe_rtt_mode_ms=100
   local s_probe_rtt_win_ms=5000
   local s_min_pacing_rate=""
+  # lotspeed-1 参数 (默认空=不写入，保留 profile 默认值)
+  local s_hist_cache=""
+  local s_rtt_ttl=""
+  local s_rtt_min_samples=""
+  local s_rtt_max_entries=""
   local description="TCPBoost BBRPlusV3 Parameters"
 
   # 解析覆盖参数
@@ -509,6 +514,10 @@ write_bbrplusv3_service() {
       probe_rtt_win_ms=*)  s_probe_rtt_win_ms="${override#probe_rtt_win_ms=}" ;;
       probe_rtt_mode_ms=*) s_probe_rtt_mode_ms="${override#probe_rtt_mode_ms=}" ;;
       pacing_gain_down=*)  s_pacing_gain_down="${override#pacing_gain_down=}" ;;
+      historical_cache_enable=*) s_hist_cache="${override#historical_cache_enable=}" ;;
+      rtt_hist_ttl_sec=*)        s_rtt_ttl="${override#rtt_hist_ttl_sec=}" ;;
+      rtt_hist_min_samples=*)    s_rtt_min_samples="${override#rtt_hist_min_samples=}" ;;
+      rtt_hist_max_entries=*)    s_rtt_max_entries="${override#rtt_hist_max_entries=}" ;;
       description=*)       description="${override#description=}" ;;
     esac
   done
@@ -523,6 +532,19 @@ write_bbrplusv3_service() {
   if [ -n "$s_min_pacing_rate" ]; then
     params="${params} min_pacing_rate=${s_min_pacing_rate}"
     description="TCPBoost BBRPlusV3 Parameters (with min_pacing_rate)"
+  fi
+  # lotspeed-1 参数（仅在显式指定时写入，否则保留 profile 默认）
+  if [ -n "$s_hist_cache" ]; then
+    params="${params} historical_cache_enable=${s_hist_cache}"
+  fi
+  if [ -n "$s_rtt_ttl" ]; then
+    params="${params} rtt_hist_ttl_sec=${s_rtt_ttl}"
+  fi
+  if [ -n "$s_rtt_min_samples" ]; then
+    params="${params} rtt_hist_min_samples=${s_rtt_min_samples}"
+  fi
+  if [ -n "$s_rtt_max_entries" ]; then
+    params="${params} rtt_hist_max_entries=${s_rtt_max_entries}"
   fi
 
   # 生成参数写入脚本：retry modprobe → 逐个写入
@@ -704,6 +726,152 @@ EOF
   echo ""
   echo -e "  ${GREEN}预期:${NC} 视频流不再需要刷新 | 持续大流量吞吐更稳定"
   echo -e "  ${YELLOW}恢复默认:${NC} ./tcp.sh set-min-pacing-rate 0"
+}
+
+# 设置 lotspeed-1 跨连接 min_rtt 历史缓存
+# 机制: per-daddr hashtable 缓存 min_rtt，新连接 STARTUP 预填滤波器
+# 适用: 跨太平洋高延迟链路，新连接 cold start 时 cwnd/pacing 估计更精准
+#
+# 用法:
+#   ./tcp.sh set-lotspeed                     # 查看当前状态
+#   ./tcp.sh set-lotspeed on                  # 启用（默认 TTL=300s/min=8/max=4096）
+#   ./tcp.sh set-lotspeed on 600 16 8192      # 启用 + 自定义参数
+#   ./tcp.sh set-lotspeed off                 # 关闭
+#
+# 参数范围:
+#   ttl_sec:       60-3600    (1min-1hour，默认 300=5min)
+#   min_samples:   1-100      (默认 8，越大越保守)
+#   max_entries:   256-65536  (默认 4096，内存紧张可减小)
+#
+# 场景推荐:
+#   单 VPS 科学上网:     on 300 8 1024      (目标少，小 hashtable 足够)
+#   多目标/浏览器代理:   on 300 8 8192      (目标多，增大容量)
+#   稳定长连接:          on 600 16 4096     (增大 TTL + 样本数，更保守)
+set_lotspeed() {
+  local action="${1:-status}"
+  local param_dir="/sys/module/tcp_bbrplusv3/parameters"
+
+  if [ ! -d "$param_dir" ]; then
+    modprobe tcp_bbrplusv3 2>/dev/null || true
+  fi
+  if [ ! -d "$param_dir" ]; then
+    warn "tcp_bbrplusv3 模块不可用（内核未含 BBRPlusV3？）"
+    return 1
+  fi
+
+  # 旧内核兼容：lotspeed-1 参数不存在
+  if [ ! -f "$param_dir/historical_cache_enable" ]; then
+    warn "lotspeed-1 参数不可用（需要新版 tcpboost 内核，当前内核版本过低）"
+    echo "  当前内核: $(uname -r)"
+    echo "  需要重新编译包含 lotspeed-1 的 tcpboost 内核"
+    return 1
+  fi
+
+  case "$action" in
+    status|"")
+      local hce ttl ms me
+      hce=$(cat "$param_dir/historical_cache_enable" 2>/dev/null || echo "?")
+      ttl=$(cat "$param_dir/rtt_hist_ttl_sec" 2>/dev/null || echo "?")
+      ms=$(cat "$param_dir/rtt_hist_min_samples" 2>/dev/null || echo "?")
+      me=$(cat "$param_dir/rtt_hist_max_entries" 2>/dev/null || echo "?")
+      echo ""
+      echo "  lotspeed-1 跨连接 min_rtt 历史缓存"
+      echo "  ─────────────────────────────────────"
+      if [ "$hce" = "0" ]; then
+        echo -e "  状态:           ${YELLOW}关闭${NC} (historical_cache_enable=0)"
+      elif [ "$hce" = "1" ]; then
+        echo -e "  状态:           ${GREEN}启用${NC} (historical_cache_enable=1)"
+      else
+        echo -e "  状态:           ${RED}未知${NC} (historical_cache_enable=${hce})"
+      fi
+      echo "  TTL:            ${ttl}s (条目过期时间)"
+      echo "  min_samples:    ${ms} (信任阈值)"
+      echo "  max_entries:    ${me} (hashtable 容量上限)"
+      echo "  ─────────────────────────────────────"
+      echo ""
+      echo "  调优: ./tcp.sh set-lotspeed on [ttl] [min_samples] [max_entries]"
+      ;;
+    on)
+      local ttl="${2:-300}"
+      local min_samples="${3:-8}"
+      local max_entries="${4:-4096}"
+
+      # 参数范围验证
+      if [ "$ttl" -lt 60 ] || [ "$ttl" -gt 3600 ] 2>/dev/null; then
+        error "ttl_sec 范围 60-3600，当前: $ttl"
+        return 1
+      fi
+      if [ "$min_samples" -lt 1 ] || [ "$min_samples" -gt 100 ] 2>/dev/null; then
+        error "min_samples 范围 1-100，当前: $min_samples"
+        return 1
+      fi
+      if [ "$max_entries" -lt 256 ] || [ "$max_entries" -gt 65536 ] 2>/dev/null; then
+        error "max_entries 范围 256-65536，当前: $max_entries"
+        return 1
+      fi
+
+      # 写入 sysfs（即时生效）
+      echo 1 > "$param_dir/historical_cache_enable" || { warn "写入 historical_cache_enable 失败"; return 1; }
+      echo "$ttl" > "$param_dir/rtt_hist_ttl_sec" || warn "写入 rtt_hist_ttl_sec 失败"
+      echo "$min_samples" > "$param_dir/rtt_hist_min_samples" || warn "写入 rtt_hist_min_samples 失败"
+      echo "$max_entries" > "$param_dir/rtt_hist_max_entries" || warn "写入 rtt_hist_max_entries 失败"
+
+      # 持久化到 conf 文件
+      mkdir -p "$CONF_DIR"
+      local conf_file="$CONF_DIR/bbrplusv3.conf"
+      if [ -f "$conf_file" ]; then
+        sed -i "/^historical_cache_enable=/d; /^rtt_hist_ttl_sec=/d; /^rtt_hist_min_samples=/d; /^rtt_hist_max_entries=/d" "$conf_file"
+      else
+        : > "$conf_file"
+      fi
+      cat >> "$conf_file" <<EOF
+historical_cache_enable=1
+rtt_hist_ttl_sec=$ttl
+rtt_hist_min_samples=$min_samples
+rtt_hist_max_entries=$max_entries
+EOF
+
+      # 更新 systemd service（持久化重启后生效）
+      write_bbrplusv3_service \
+        historical_cache_enable=1 \
+        rtt_hist_ttl_sec=$ttl \
+        rtt_hist_min_samples=$min_samples \
+        rtt_hist_max_entries=$max_entries \
+        description="TCPBoost BBRPlusV3 Parameters (with lotspeed-1)"
+
+      echo ""
+      info "lotspeed-1 已启用"
+      echo -e "  ${CYAN}TTL:${NC}            ${ttl}s (条目过期时间)"
+      echo -e "  ${CYAN}min_samples:${NC}    ${min_samples} (信任阈值)"
+      echo -e "  ${CYAN}max_entries:${NC}    ${max_entries} (hashtable 容量)"
+      echo ""
+      echo -e "  ${GREEN}效果:${NC} 新连接 STARTUP 用同 daddr 历史 min_rtt 预填滤波器"
+      echo -e "  ${YELLOW}关闭:${NC} ./tcp.sh set-lotspeed off"
+      ;;
+    off)
+      echo 0 > "$param_dir/historical_cache_enable" || { warn "写入 historical_cache_enable 失败"; return 1; }
+
+      # 清理 conf 文件中的 lotspeed-1 参数
+      if [ -f "$CONF_DIR/bbrplusv3.conf" ]; then
+        sed -i "/^historical_cache_enable=/d; /^rtt_hist_ttl_sec=/d; /^rtt_hist_min_samples=/d; /^rtt_hist_max_entries=/d" "$CONF_DIR/bbrplusv3.conf"
+      fi
+
+      # 恢复 service 到不含 lotspeed-1 参数的版本
+      write_bbrplusv3_service
+
+      info "lotspeed-1 已关闭（historical_cache_enable=0）"
+      echo "  缓存条目保留至 TTL 过期或模块卸载，不影响已建立连接"
+      ;;
+    *)
+      error "用法: $0 set-lotspeed [on|off|status] [ttl_sec] [min_samples] [max_entries]"
+      echo "  示例:"
+      echo "    ./tcp.sh set-lotspeed                  # 查看状态"
+      echo "    ./tcp.sh set-lotspeed on               # 启用（默认参数）"
+      echo "    ./tcp.sh set-lotspeed on 600 16 8192   # 启用 + 自定义"
+      echo "    ./tcp.sh set-lotspeed off              # 关闭"
+      return 1
+      ;;
+  esac
 }
 
 # 测试 VPS 真实带宽并自动设置 min_pacing_rate
@@ -1356,6 +1524,19 @@ show_algorithm_status() {
       else
         echo "  startup_max_ms: ${smm}ms (A5 兜底)"
       fi
+      # lotspeed-1: 跨连接 min_rtt 历史缓存 (tcpboost-lotspeed-1)
+      local hce ttl ms me
+      hce=$(cat "$param_dir/historical_cache_enable" 2>/dev/null || echo "?")
+      if [ "$hce" = "?" ]; then
+        echo "  lotspeed-1:     N/A (旧内核无此参数)"
+      elif [ "$hce" = "0" ]; then
+        echo "  lotspeed-1:     off (historical_cache_enable=0)"
+      else
+        ttl=$(cat "$param_dir/rtt_hist_ttl_sec" 2>/dev/null || echo "?")
+        ms=$(cat "$param_dir/rtt_hist_min_samples" 2>/dev/null || echo "?")
+        me=$(cat "$param_dir/rtt_hist_max_entries" 2>/dev/null || echo "?")
+        echo "  lotspeed-1:     on (TTL=${ttl}s, min_samples=${ms}, max_entries=${me})"
+      fi
       if [ "$mpr" = "?" ] || [ "$mpr" = "0" ]; then
         echo "  min_pacing_rate: off"
       else
@@ -1547,6 +1728,10 @@ main() {
         exit 1
       fi
       set_min_pacing_rate "$2"
+      ;;
+    set-lotspeed)
+      shift
+      set_lotspeed "$@"
       ;;
     speedtest) speedtest_bandwidth ;;
     *)

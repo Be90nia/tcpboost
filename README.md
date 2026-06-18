@@ -147,6 +147,13 @@ cat /sys/module/tcp_bbrplusv3/parameters/historical_cache_enable  # lotspeed-1: 
 ./tcp.sh set-min-pacing-rate 0     # 关闭
 
 # 启用跨连接 min_rtt 缓存（aggressive profile 已默认开启，conservative/standard 需手动开启）
+# 方式 1: 使用 tcp.sh 便捷命令（推荐，自动持久化）
+./tcp.sh set-lotspeed                       # 查看当前状态
+./tcp.sh set-lotspeed on                    # 启用（默认 TTL=300s/min=8/max=4096）
+./tcp.sh set-lotspeed on 600 16 8192        # 启用 + 自定义参数
+./tcp.sh set-lotspeed off                   # 关闭
+
+# 方式 2: 手动 echo sysfs（即时生效，不持久化）
 echo 1 > /sys/module/tcp_bbrplusv3/parameters/historical_cache_enable
 echo 300 > /sys/module/tcp_bbrplusv3/parameters/rtt_hist_ttl_sec       # TTL 5min (默认)
 echo 8   > /sys/module/tcp_bbrplusv3/parameters/rtt_hist_min_samples   # 最少 8 样本才信任 (默认)
@@ -273,6 +280,16 @@ module_exit (卸载)
 | wifi | 1 | 启用（WiFi 场景） |
 
 **安全性**：默认关闭（`historical_cache_enable=0`），用户显式开启或选择 aggressive/wifi profile 才生效。卸载模块时 `synchronize_rcu` 双屏障 + `hash_for_each_safe` 安全释放全部条目。
+
+**状态查看**（`./tcp.sh status` 输出片段）：
+
+```
+  lotspeed-1:     on (TTL=300s, min_samples=8, max_entries=4096)
+```
+
+- `on` = 已启用（historical_cache_enable=1，aggressive/wifi profile 默认）
+- `off` = 已关闭（historical_cache_enable=0，conservative/standard profile 默认）
+- `N/A` = 旧内核无此参数（tcpboost 内核版本过低，需更新）
 
 > 学术基础：RFC 3124 macroflow（跨连接信息共享）+ [qiuxiuya/lotspeed](https://github.com/qiuxiuya/lotspeed) zeta_history_map。Oracle 架构审核 bg_5ccfb6cf：10 问全部 P0/P1/P2 已修。
 
