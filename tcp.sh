@@ -481,6 +481,86 @@ cleanup_kernels() {
   ls /boot/vmlinuz-* 2>/dev/null | sed 's|.*/vmlinuz-|    |' || echo "    (无)"
 }
 
+# 生成 BBRPlusV3 systemd service 文件（共享函数）
+# 修复 4 个历史 Bug:
+#   1. Boot竞态: 模块未加载时 [ -d "$PD" ] 跳过所有参数 → 加入 modprobe + 重试
+#   2. 静默失败: 2>/dev/null || true 隐藏错误 → 移除，错误输出到 journal
+#   3. profile重置: 写 profile=2 会重置所有参数为 aggressive 默认值 → 不写 profile
+#   4. service覆盖: 三处 service 模板不同步 → 统一入口
+#
+# 用法: write_bbrplusv3_service [key=value ...]
+#   覆盖参数: min_pacing_rate=<bps> probe_rtt_win_ms=<ms> probe_rtt_mode_ms=<ms> pacing_gain_down=<n>
+#   不传覆盖参数 = aggressive 基线 (beta=76, loss_thresh=38, ...)
+write_bbrplusv3_service() {
+  # 基线参数 (aggressive 优化覆盖)
+  local s_loss_thresh=8
+  local s_beta=76
+  local s_pacing_gain_down=217
+  local s_probe_rtt_mode_ms=100
+  local s_probe_rtt_win_ms=5000
+  local s_gc_enable=0
+  local s_gc_base_down=217
+  local s_min_pacing_rate=""
+  local description="TCPBoost BBRPlusV3 Parameters"
+
+  # 解析覆盖参数
+  local override
+  for override in "$@"; do
+    case "$override" in
+      min_pacing_rate=*)   s_min_pacing_rate="${override#min_pacing_rate=}" ;;
+      probe_rtt_win_ms=*)  s_probe_rtt_win_ms="${override#probe_rtt_win_ms=}" ;;
+      probe_rtt_mode_ms=*) s_probe_rtt_mode_ms="${override#probe_rtt_mode_ms=}" ;;
+      pacing_gain_down=*)  s_pacing_gain_down="${override#pacing_gain_down=}" ;;
+      gc_base_down=*)      s_gc_base_down="${override#gc_base_down=}" ;;
+      description=*)       description="${override#description=}" ;;
+    esac
+  done
+
+  # 构建 ExecStart 参数写入链
+  # 设计要点:
+  #   - 用 ; 分隔（非 &&），单个参数失败不影响其余参数
+  #   - 不写 profile：写 profile=N 会触发内核重置所有参数为 profile 默认值
+  #   - modprobe + 重试：确保 sysfs 参数目录存在
+  #   - 不吞错误：失败信息输出到 systemd journal
+  local params="loss_thresh=${s_loss_thresh} beta=${s_beta} pacing_gain_down=${s_pacing_gain_down} probe_rtt_mode_ms=${s_probe_rtt_mode_ms} probe_rtt_win_ms=${s_probe_rtt_win_ms} gc_enable=${s_gc_enable} gc_base_down=${s_pacing_gain_down}"
+  if [ -n "$s_min_pacing_rate" ]; then
+    params="${params} min_pacing_rate=${s_min_pacing_rate}"
+    description="TCPBoost BBRPlusV3 Parameters (with min_pacing_rate)"
+  fi
+
+  # 生成参数写入脚本：retry modprobe → 逐个写入
+  local exec_script='PD=/sys/module/tcp_bbrplusv3/parameters; '
+  exec_script+='for i in 1 2 3; do [ -d "$PD" ] && break; /sbin/modprobe tcp_bbrplusv3 2>/dev/null; sleep 1; done; '
+  exec_script+='[ -d "$PD" ] || { echo "tcpboost: tcp_bbrplusv3 module sysfs not found after 3 attempts" >&2; exit 1; }; '
+
+  # 逐个参数写入（; 分隔，独立执行）
+  local kv
+  for kv in $params; do
+    local k="${kv%%=*}"
+    local v="${kv#*=}"
+    exec_script+="echo ${v} > \$PD/${k}; "
+  done
+  # 移除末尾多余空格
+  exec_script="${exec_script% }"
+
+  cat > /etc/systemd/system/tcpboost-bbrplusv3.service <<EOF
+[Unit]
+Description=${description}
+After=network-online.target systemd-modules-load.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c '${exec_script}'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload || warn "systemctl daemon-reload 失败"
+  systemctl enable tcpboost-bbrplusv3 || warn "systemctl enable 失败"
+}
+
 # BBRPlusV3 参数设置（科学上网平衡优化配置）
 # 基于 BBRv3 核心机制 + 跨太平洋链路断流根因分析:
 #   保留: STARTUP 激进探测(startup_pacing_gain=2.885, cwnd_gain=2.5)
@@ -502,47 +582,56 @@ apply_bbrplusv3_params() {
   fi
 
   # 1. aggressive profile 作为基线（保留 STARTUP/PROBE_BW UP 激进探测优势）
-  echo 2 > "$param_dir/profile" 2>/dev/null || true
+  echo 2 > "$param_dir/profile" || warn "写入 profile 失败"
 
   # 2. 平衡优化覆盖（在 aggressive 基线上调整稳定性参数）
-  # loss_thresh: 30%→15% (38/256) — 容忍跨太平洋正常丢包(1-5%)，真实拥塞(>15%)降速
-  echo 38 > "$param_dir/loss_thresh" 2>/dev/null || true
-  # beta: 80%→30% (76/256) — BBRPlus 经典值，丢包后恢复 70%
-  echo 76 > "$param_dir/beta" 2>/dev/null || true
-  # pacing_gain_down: 0.75→0.85 (217/256) — PROBE_BW DOWN 阶段速率保持 85%，减少下载波动
-  echo 217 > "$param_dir/pacing_gain_down" 2>/dev/null || true
-  # probe_rtt_mode_ms: 50→100 — PROBE_RTT 持续时间减半深度，cwnd=4 窗口缩短
-  echo 100 > "$param_dir/probe_rtt_mode_ms" 2>/dev/null || true
-  # probe_rtt_win_ms: 2500→5000 — PROBE_RTT 触发频率减半，游戏延迟峰值减少
-  echo 5000 > "$param_dir/probe_rtt_win_ms" 2>/dev/null || true
+  # 注：新 aggressive profile 已包含这些值，覆盖作为双保险
+  # loss_thresh: 3% (8/256) — 匹配新aggressive默认，CF/SSH安全
+  echo 8 > "$param_dir/loss_thresh" || warn "写入 loss_thresh 失败"
+  # beta: 30% (76/256) — 匹配新aggressive默认，BBRPlus 经典值
+  echo 76 > "$param_dir/beta" || warn "写入 beta 失败"
+  # pacing_gain_down: 0.85 (217/256) — 匹配新aggressive默认
+  echo 217 > "$param_dir/pacing_gain_down" || warn "写入 pacing_gain_down 失败"
+  # gc_base_down: 同步 pacing_gain_down (C7修复：参数覆盖时GC基准值保持一致)
+  if [ -w "$param_dir/gc_base_down" ]; then
+    echo 217 > "$param_dir/gc_base_down" || warn "写入 gc_base_down 失败"
+  fi
+  # probe_rtt_mode_ms: 100 — 匹配新aggressive默认
+  echo 100 > "$param_dir/probe_rtt_mode_ms" || warn "写入 probe_rtt_mode_ms 失败"
+  # probe_rtt_win_ms: 5000 — 匹配新aggressive默认
+  echo 5000 > "$param_dir/probe_rtt_win_ms" || warn "写入 probe_rtt_win_ms 失败"
 
   # min_pacing_rate: 默认关闭(0)，用户根据 VPS 带宽设置
   # 用法: ./tcp.sh set-min-pacing-rate <Mbps>
   # 1Gbps VPS 推荐: set-min-pacing-rate 500
   # 跨太平洋高丢包链路推荐: set-min-pacing-rate 100
   if [ -w "$param_dir/min_pacing_rate" ]; then
-    echo 0 > "$param_dir/min_pacing_rate" 2>/dev/null || true
+    echo 0 > "$param_dir/min_pacing_rate" || warn "写入 min_pacing_rate 失败"
   fi
   # gc_enable: 默认关闭 (6.12.90 上 GC 打破 UP/DOWN 平衡)
   if [ -w "$param_dir/gc_enable" ]; then
-    echo 0 > "$param_dir/gc_enable" 2>/dev/null || true
+    echo 0 > "$param_dir/gc_enable" || warn "写入 gc_enable 失败"
   fi
 
   mkdir -p "$CONF_DIR"
   cat > "$CONF_DIR/bbrplusv3.conf" <<'EOF'
 # BBRPlusV3 科学上网平衡优化参数
-# 保留 STARTUP/PROBE_BW_UP 激进探测优势
-# 调整 loss/beta/pacing_down/PROBE_RTT 消除断流根因
+# 新 aggressive profile 已包含这些值，conf 文件作为持久化备份
 profile=2
-loss_thresh=38
+loss_thresh=8
 beta=76
 pacing_gain_down=217
 probe_rtt_mode_ms=100
 probe_rtt_win_ms=5000
 gc_enable=0
+gc_base_down=217
 EOF
 
-  info "BBRPlusV3 参数已设置 (loss=15%, beta=30%, pacing_down=0.85, probe_rtt=5s/100ms, gc=off)"
+  # modules-load.d: 确保模块在 systemd service 之前加载
+  # 修复 Boot 竞态：service ExecStart 有 modprobe 兜底，但 modules-load.d 更可靠
+  echo "tcp_bbrplusv3" > /etc/modules-load.d/tcpboost-bbrplusv3.conf
+
+  info "BBRPlusV3 参数已设置 (loss=3%, beta=30%, pacing_down=0.85, probe_rtt=5s/100ms, gc=off)"
 }
 
 # 设置 min_pacing_rate（保底速率）+ 自动应用全套配套优化
@@ -570,35 +659,25 @@ set_min_pacing_rate() {
   local bps=$((mbps * 1000000 / 8))
 
   # 写入 min_pacing_rate
-  echo "$bps" > "$param_dir/min_pacing_rate" 2>/dev/null
+  if ! echo "$bps" > "$param_dir/min_pacing_rate" 2>&1; then
+    warn "写入 min_pacing_rate 失败"
+  fi
 
   # 关闭保底：恢复默认参数 + 重写 service（恢复 aggressive 基线，不含 min_pacing_rate）
   if [ "$mbps" -eq 0 ]; then
-    echo 5000 > "$param_dir/probe_rtt_win_ms" 2>/dev/null || true
-    echo 100 > "$param_dir/probe_rtt_mode_ms" 2>/dev/null || true
-    echo 217 > "$param_dir/pacing_gain_down" 2>/dev/null || true
-
-    if [ -f "$CONF_DIR/bbrplusv3.conf" ]; then
-      sed -i "/^min_pacing_rate=/d; /^probe_rtt_win_ms=/d; /^probe_rtt_mode_ms=/d; /^pacing_gain_down=/d" "$CONF_DIR/bbrplusv3.conf"
+    echo 5000 > "$param_dir/probe_rtt_win_ms" || warn "写入 probe_rtt_win_ms 失败"
+    echo 100 > "$param_dir/probe_rtt_mode_ms" || warn "写入 probe_rtt_mode_ms 失败"
+    echo 217 > "$param_dir/pacing_gain_down" || warn "写入 pacing_gain_down 失败"
+    if [ -w "$param_dir/gc_base_down" ]; then
+      echo 217 > "$param_dir/gc_base_down" || warn "写入 gc_base_down 失败"
     fi
 
-    # 恢复 service 到 setup_bbrplusv3_persistent 基线（不含 min_pacing_rate 覆盖）
-    cat > /etc/systemd/system/tcpboost-bbrplusv3.service <<'EOF'
-[Unit]
-Description=TCPBoost BBRPlusV3 Parameters
-After=network-online.target
-Wants=network-online.target
+    if [ -f "$CONF_DIR/bbrplusv3.conf" ]; then
+      sed -i "/^min_pacing_rate=/d; /^probe_rtt_win_ms=/d; /^probe_rtt_mode_ms=/d; /^pacing_gain_down=/d; /^gc_base_down=/d" "$CONF_DIR/bbrplusv3.conf"
+    fi
 
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/bash -c 'PD=/sys/module/tcp_bbrplusv3/parameters; [ -d "$PD" ] && echo 2 > $PD/profile && echo 38 > $PD/loss_thresh && echo 76 > $PD/beta && echo 217 > $PD/pacing_gain_down && echo 100 > $PD/probe_rtt_mode_ms && echo 5000 > $PD/probe_rtt_win_ms && echo 0 > $PD/gc_enable 2>/dev/null || true'
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload 2>/dev/null || true
-    systemctl enable tcpboost-bbrplusv3 2>/dev/null || true
+    # 恢复 service 到 aggressive 基线（不含 min_pacing_rate 覆盖）
+    write_bbrplusv3_service
 
     info "min_pacing_rate 已关闭，配套参数已恢复 aggressive 基线"
     return 0
@@ -610,17 +689,20 @@ EOF
 
   # 1. PROBE_RTT 优化（核心！旧内核 cwnd=4 packets 无视 pacing 保底）
   #    延长周期 5s→10s（骤降频率减半）+ 缩短持续 100ms→50ms（深度减半）
-  echo 10000 > "$param_dir/probe_rtt_win_ms" 2>/dev/null || true
-  echo 50 > "$param_dir/probe_rtt_mode_ms" 2>/dev/null || true
+  echo 10000 > "$param_dir/probe_rtt_win_ms" || warn "写入 probe_rtt_win_ms 失败"
+  echo 50 > "$param_dir/probe_rtt_mode_ms" || warn "写入 probe_rtt_mode_ms 失败"
 
   # 2. pacing_gain_down: 0.85→0.90（减少 PROBE_BW DOWN 周期性降速）
-  echo 230 > "$param_dir/pacing_gain_down" 2>/dev/null || true
+  echo 230 > "$param_dir/pacing_gain_down" || warn "写入 pacing_gain_down 失败"
+  if [ -w "$param_dir/gc_base_down" ]; then
+    echo 230 > "$param_dir/gc_base_down" || warn "写入 gc_base_down 失败"
+  fi
 
   # === 持久化 ===
   mkdir -p "$CONF_DIR"
   local conf_file="$CONF_DIR/bbrplusv3.conf"
   if [ -f "$conf_file" ]; then
-    sed -i "/^min_pacing_rate=/d; /^probe_rtt_win_ms=/d; /^probe_rtt_mode_ms=/d; /^pacing_gain_down=/d" "$conf_file"
+    sed -i "/^min_pacing_rate=/d; /^probe_rtt_win_ms=/d; /^probe_rtt_mode_ms=/d; /^pacing_gain_down=/d; /^gc_base_down=/d" "$conf_file"
   else
     : > "$conf_file"
   fi
@@ -629,27 +711,11 @@ min_pacing_rate=$bps
 probe_rtt_win_ms=10000
 probe_rtt_mode_ms=50
 pacing_gain_down=230
+gc_base_down=230
 EOF
 
-  # systemd service 持久化（必须包含全套参数，避免覆盖 aggressive 配置）
-  # 问题历史：旧版只写 4 个参数，重启后 loss_thresh/beta 回到默认值（负优化）
-  # 修复：service 自洽，包含 profile + loss_thresh + beta + gc + 保底 + PROBE_RTT
-  cat > /etc/systemd/system/tcpboost-bbrplusv3.service <<EOF
-[Unit]
-Description=TCPBoost BBRPlusV3 Parameters (with min_pacing_rate)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/bash -c 'PD=/sys/module/tcp_bbrplusv3/parameters; [ -d "\$PD" ] && echo 2 > \$PD/profile && echo 38 > \$PD/loss_thresh && echo 76 > \$PD/beta && echo 0 > \$PD/gc_enable && echo $bps > \$PD/min_pacing_rate && echo 10000 > \$PD/probe_rtt_win_ms && echo 50 > \$PD/probe_rtt_mode_ms && echo 230 > \$PD/pacing_gain_down 2>/dev/null; true'
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl daemon-reload 2>/dev/null || true
-  systemctl enable tcpboost-bbrplusv3 2>/dev/null || true
+  # systemd service 持久化（统一入口，包含全套参数 + min_pacing_rate 覆盖）
+  write_bbrplusv3_service min_pacing_rate=$bps probe_rtt_win_ms=10000 probe_rtt_mode_ms=50 pacing_gain_down=230
 
   echo ""
   info "全套优化已应用（基于 ${mbps} Mbps 保底）"
@@ -765,22 +831,7 @@ speedtest_bandwidth() {
 
 # 开机自动应用 bbrplusv3 参数
 setup_bbrplusv3_persistent() {
-  cat > /etc/systemd/system/tcpboost-bbrplusv3.service <<'EOF'
-[Unit]
-Description=TCPBoost BBRPlusV3 Parameters
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/bash -c 'PARAM_DIR=/sys/module/tcp_bbrplusv3/parameters; [ -d "$PARAM_DIR" ] && echo 2 > $PARAM_DIR/profile && echo 38 > $PARAM_DIR/loss_thresh && echo 76 > $PARAM_DIR/beta && echo 217 > $PARAM_DIR/pacing_gain_down && echo 100 > $PARAM_DIR/probe_rtt_mode_ms && echo 5000 > $PARAM_DIR/probe_rtt_win_ms && echo 0 > $PARAM_DIR/gc_enable 2>/dev/null || true'
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl daemon-reload 2>/dev/null || true
-  systemctl enable tcpboost-bbrplusv3 2>/dev/null || true
+  write_bbrplusv3_service
 }
 
 # 备份当前配置

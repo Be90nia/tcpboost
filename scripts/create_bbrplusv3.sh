@@ -98,50 +98,48 @@ echo "[3/9] 已去掉可调参数的 const 限定符"
 # 4. 应用 BBRPlus aggressive 参数值（默认 profile）
 # ============================================
 
-# 4a. pacing_gain UP: 5/4 → 3/2（更激进的带宽探测）
-sed -i 's/BBR_UNIT \* 5 \/ 4,\t\/\* UP: probe for more available bw \*\//BBR_UNIT * 3 \/ 2,\t\/* UP: aggressive bandwidth probing (BBRPlus-style) *\//' "$BBRPLUSV3_SRC"
+# 4a. pacing_gain UP: 5/4 → 11/8（适度激进的带宽探测，消除正反馈循环H2）
+sed -i 's/BBR_UNIT \* 5 \/ 4,\t\/\* UP: probe for more available bw \*\//BBR_UNIT * 11 \/ 8,\t\/* UP: balanced bandwidth probing (BBRPlusV3) *\//' "$BBRPLUSV3_SRC"
 
-# 4b. pacing_gain DOWN: 91/100 → 3/4（更积极地排空队列）
-sed -i 's/BBR_UNIT \* 91 \/ 100,\t\/\* DOWN: drain queue and\/or yield bw \*\//BBR_UNIT * 3 \/ 4,\t\/* DOWN: aggressive drain (BBRPlus-style) *\//' "$BBRPLUSV3_SRC"
+# 4b. pacing_gain DOWN: 91/100 → 17/20（温和排空，减少吞吐波动）
+sed -i 's/BBR_UNIT \* 91 \/ 100,\t\/\* DOWN: drain queue and\/or yield bw \*\//BBR_UNIT * 17 \/ 20,\t\/* DOWN: balanced drain (BBRPlusV3) *\//' "$BBRPLUSV3_SRC"
 
-# 4c. startup_cwnd_gain: 2 → 5/2（BBRPlus 核心思想：STARTUP 时更激进地填充管道）
-sed -i 's/bbr_startup_cwnd_gain.*BBR_UNIT \* 2;/bbr_startup_cwnd_gain = BBR_UNIT * 5 \/ 2;/' "$BBRPLUSV3_SRC"
+# 4c. startup_cwnd_gain: 2 → 9/4（折中：比原版温和激进，消除过冲风险）
+sed -i 's/bbr_startup_cwnd_gain.*BBR_UNIT \* 2;/bbr_startup_cwnd_gain = BBR_UNIT * 9 \/ 4;/' "$BBRPLUSV3_SRC"
 
-# 4d. bbr_beta: 30% → 20%（丢包时减少更少，保持更高吞吐）
-sed -i 's/bbr_beta = BBR_UNIT \* 30 \/ 100;/bbr_beta = BBR_UNIT * 20 \/ 100;/' "$BBRPLUSV3_SRC"
+# 4d. bbr_beta: 保持 30%（BBRv3原版值，SSH/CF安全。不再降为20%）
+# 三轮审计确认：beta=20%是SSH/CF断连根因，恢复30%
 
-# 4e. loss_thresh: 2% → 5%（丢包容忍度提高，高丢包链路不会过早降速）
-sed -i 's/bbr_loss_thresh = BBR_UNIT \* 2 \/ 100;.*/bbr_loss_thresh = BBR_UNIT * 5 \/ 100;/' "$BBRPLUSV3_SRC"
+# 4e. loss_thresh: 2% → 3%（适度提高丢包容忍，CF/SSH安全）
+sed -i 's/bbr_loss_thresh = BBR_UNIT \* 2 \/ 100;.*/bbr_loss_thresh = BBR_UNIT * 3 \/ 100;/' "$BBRPLUSV3_SRC"
 
 echo "[4/9] 已应用 BBRPlus aggressive 参数值"
 
 # ============================================
-# 5. PROBE_RTT 优化（200→50ms, 5000→2500ms）
+# 5. PROBE_RTT 优化（200→100ms, 5000ms保持，减少PROBE_RTT频率）
 # ============================================
 
-# BBRv3 的 PROBE_RTT 停留时间默认 200ms，缩短到 50ms 减少吞吐量损失
-sed -i 's/bbr_probe_rtt_mode_ms = 200;/bbr_probe_rtt_mode_ms = 50;/' "$BBRPLUSV3_SRC"
+# BBRv3 的 PROBE_RTT 停留时间默认 200ms，缩短到 100ms 平衡吞吐损失和游戏延迟
+sed -i 's/bbr_probe_rtt_mode_ms = 200;/bbr_probe_rtt_mode_ms = 100;/' "$BBRPLUSV3_SRC"
 
-# bbr_probe_rtt_win_ms: 5000 → 2500（更频繁地探测 min_rtt）
-# 每次只停 50ms（vs BBRv3 的 200ms），总吞吐量损失更小
-sed -i 's/bbr_probe_rtt_win_ms = 5000;/bbr_probe_rtt_win_ms = 2500;/' "$BBRPLUSV3_SRC"
-
-echo "[5/9] 已优化 PROBE_RTT 参数"
+# bbr_probe_rtt_win_ms: 保持 5000（每5s探测一次min_rtt，减少频率降低延迟尖峰）
+# 不再缩短到2500ms：三轮审计确认2500ms导致PROBE_RTT过于频繁，影响游戏/视频
+echo "[5/9] 已优化 PROBE_RTT 参数 (mode=100ms, win=5000ms)"
 
 # ============================================
 # 6. ECN/loss 参数调整
 # ============================================
 
-# bbr_ecn_thresh: 50% → 70%（ECN 标记容忍度提高）
-sed -i 's/bbr_ecn_thresh = BBR_UNIT \* 1 \/ 2;.*/bbr_ecn_thresh = BBR_UNIT * 7 \/ 10;/' "$BBRPLUSV3_SRC"
+# bbr_ecn_thresh: 保持 50%（BBRv3原版值，响应AQM早期拥塞信号）
+# 三轮审计确认：70%架空fq_codel/cake的ECN标记，改回50%
 
 # bbr_full_loss_cnt: 6 → 3（更快响应严重丢包退出 STARTUP）
 sed -i 's/bbr_full_loss_cnt = 6;/bbr_full_loss_cnt = 3;/' "$BBRPLUSV3_SRC"
 
-# bbr_inflight_headroom: 15% → 10%（保留更少的 headroom，更激进利用带宽）
-sed -i 's/bbr_inflight_headroom = BBR_UNIT \* 15 \/ 100;/bbr_inflight_headroom = BBR_UNIT * 10 \/ 100;/' "$BBRPLUSV3_SRC"
+# bbr_inflight_headroom: 15% → 12%（适度减少headroom，平衡激进利用和稳定性）
+sed -i 's/bbr_inflight_headroom = BBR_UNIT \* 15 \/ 100;/bbr_inflight_headroom = BBR_UNIT * 12 \/ 100;/' "$BBRPLUSV3_SRC"
 
-echo "[6/9] 已调整 ECN/loss 参数"
+echo "[6/9] 已调整 ECN/loss 参数 (ecn=50%, full_loss_cnt=3, headroom=12%)"
 
 # ============================================
 # 7. 追加 module_param 声明 + 三档 Profile 系统
@@ -185,6 +183,7 @@ struct bbrplusv3_profile_params {
 	u32  ecn_thresh;
 	u32  full_loss_cnt;
 	u32  inflight_headroom;
+	u32  min_rtt_win_sec;
 };
 
 static const struct bbrplusv3_profile_params
@@ -203,6 +202,7 @@ bbrplusv3_profile_table[] = {
 		.ecn_thresh		= BBR_UNIT * 1 / 2,
 		.full_loss_cnt		= 6,
 		.inflight_headroom	= BBR_UNIT * 15 / 100,
+		.min_rtt_win_sec	= 10,
 	},
 	[BBRPLUSV3_PROFILE_STANDARD] = {
 		.pacing_gain_up		= BBR_UNIT * 11 / 8,
@@ -218,21 +218,23 @@ bbrplusv3_profile_table[] = {
 		.ecn_thresh		= BBR_UNIT * 3 / 5,
 		.full_loss_cnt		= 4,
 		.inflight_headroom	= BBR_UNIT * 12 / 100,
+		.min_rtt_win_sec	= 10,
 	},
 	[BBRPLUSV3_PROFILE_AGGRESSIVE] = {
-		.pacing_gain_up		= BBR_UNIT * 3 / 2,
-		.pacing_gain_down	= BBR_UNIT * 3 / 4,
-		.startup_cwnd_gain	= BBR_UNIT * 5 / 2,
+		.pacing_gain_up		= BBR_UNIT * 11 / 8,
+		.pacing_gain_down	= BBR_UNIT * 17 / 20,
+		.startup_cwnd_gain	= BBR_UNIT * 9 / 4,
 		.startup_pacing_gain	= BBR_UNIT * 2885 / 1000 + 1,
-		.drain_gain		= BBR_UNIT * 1200 / 2885,
-		.beta			= BBR_UNIT * 20 / 100,
-		.loss_thresh		= BBR_UNIT * 5 / 100,
-		.full_bw_thresh		= BBR_UNIT * 11 / 10,
-		.probe_rtt_mode_ms	= 50,
-		.probe_rtt_win_ms	= 2500,
-		.ecn_thresh		= BBR_UNIT * 7 / 10,
+		.drain_gain		= BBR_UNIT * 1000 / 2885,
+		.beta			= BBR_UNIT * 30 / 100,
+		.loss_thresh		= BBR_UNIT * 3 / 100,
+		.full_bw_thresh		= BBR_UNIT * 5 / 4,
+		.probe_rtt_mode_ms	= 100,
+		.probe_rtt_win_ms	= 5000,
+		.ecn_thresh		= BBR_UNIT * 1 / 2,
 		.full_loss_cnt		= 3,
-		.inflight_headroom	= BBR_UNIT * 10 / 100,
+		.inflight_headroom	= BBR_UNIT * 12 / 100,
+		.min_rtt_win_sec	= 10,
 	},
 	[BBRPLUSV3_PROFILE_WIFI] = {
 		.pacing_gain_up		= BBR_UNIT * 3 / 2,
@@ -248,6 +250,7 @@ bbrplusv3_profile_table[] = {
 		.ecn_thresh		= BBR_UNIT * 7 / 10,
 		.full_loss_cnt		= 4,
 		.inflight_headroom	= BBR_UNIT * 10 / 100,
+		.min_rtt_win_sec	= 10,
 	},
 };
 
@@ -286,6 +289,7 @@ static int bbrplusv3_profile_set(const char *val,
 	bbr_ecn_thresh			= p->ecn_thresh;
 	bbr_full_loss_cnt		= p->full_loss_cnt;
 	bbr_inflight_headroom		= p->inflight_headroom;
+	bbr_min_rtt_win_sec		= p->min_rtt_win_sec;
 
 	pr_info("BBRPlusV3: profile switched to %d (%s)\n",
 		bbrplusv3_profile,
@@ -324,6 +328,8 @@ module_param_named(probe_rtt_win_ms, bbr_probe_rtt_win_ms, uint, 0644);
 module_param_named(ecn_thresh, bbr_ecn_thresh, uint, 0644);
 module_param_named(full_loss_cnt, bbr_full_loss_cnt, uint, 0644);
 module_param_named(inflight_headroom, bbr_inflight_headroom, uint, 0644);
+module_param_named(min_rtt_win_sec, bbr_min_rtt_win_sec, uint, 0644);
+MODULE_PARM_DESC(min_rtt_win_sec, "Min RTT filter window in seconds (default=10, BBRv3 original)");
 BBRPLUSV3_PARAMS_EOF
 
 echo "[7/9] 已追加 module_param + 四档 Profile 系统"
@@ -335,7 +341,7 @@ echo "[7/9] 已追加 module_param + 四档 Profile 系统"
 # 前向声明 bbrplusv3_main（在 cong_ops 之前注入）
 sed -i '/static struct tcp_congestion_ops tcp_bbrplusv3_cong_ops/i\
 static void bbrplusv3_main(struct sock *sk, u32 ack, int flag, const struct rate_sample *rs);\
-static int bbrplusv3_gc_base_down;	/* profile 原始 DOWN gain, GC 基准值 */' "$BBRPLUSV3_SRC"
+static int bbrplusv3_gc_base_down = 217;	/* C8: 初始化为 aggressive pacing_gain_down(0.85), 避免GC静默禁用 */' "$BBRPLUSV3_SRC"
 
 # 替换 cong_control 回调: bbr_main → bbrplusv3_main
 sed -i 's/\.cong_control.*=.*bbr_main,.*/.cong_control\t= bbrplusv3_main,/' "$BBRPLUSV3_SRC"
@@ -355,22 +361,53 @@ static int bbrplusv3_pacing_rate_scale = 100;
 static u64 bbrplusv3_min_pacing_rate;
 static int bbrplusv3_gc_enable = 0;
 
+/* tcpboost-4cf: 参数范围验证标志（首次 ACK 时验证一次） */
+static atomic_t bbrplusv3_params_checked = ATOMIC_INIT(0);
+
 static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 			   const struct rate_sample *rs)
 {
 	struct bbr *bbr = inet_csk_ca(sk);
 
+	/* tcpboost-4cf: 首次调用时验证关键参数范围
+	 * 防止用户通过 sysfs 写入极端值导致 PROBE_RTT 风暴 */
+	if (unlikely(!atomic_read(&bbrplusv3_params_checked))) {
+		if (READ_ONCE(bbr_probe_rtt_win_ms) > 0 &&
+		    READ_ONCE(bbr_probe_rtt_win_ms) < 1000)
+			WRITE_ONCE(bbr_probe_rtt_win_ms, 1000);
+		if (READ_ONCE(bbr_probe_rtt_mode_ms) == 0)
+			WRITE_ONCE(bbr_probe_rtt_mode_ms, 1);
+		atomic_set(&bbrplusv3_params_checked, 1);
+	}
+
+	/* 先调用原始 BBRv3 主逻辑 */
 	bbr_main(sk, ack, flag, rs);
 
-	/* Pacing Rate Scale (BMR alpha) */
+	/* C1: PROBE_RTT 期间不做任何 pacing/cwnd 修改
+	 * PROBE_RTT 需要将 cwnd 压缩到 probe_rtt_cwnd，
+	 * min_pacing_rate floor / pacing scale 会破坏这个过程，
+	 * 导致 inflight 无法降到 probe_rtt_cwnd，PROBE_RTT 无法退出 */
+	if (bbr->mode == BBR_PROBE_RTT)
+		return;
+
+	/* Pacing Rate Scale (BMR alpha) + C4: 同步 cwnd */
 	if (bbrplusv3_pacing_rate_scale != 100) {
 		u64 rate = READ_ONCE(sk->sk_pacing_rate);
+		u32 cwnd = tcp_snd_cwnd(tcp_sk(sk));
 
 		rate = rate * bbrplusv3_pacing_rate_scale / 100;
 		WRITE_ONCE(sk->sk_pacing_rate, rate);
+
+		/* C4: pacing 变化后同步 cwnd，避免 cwnd/pacing 失同步
+		 * 按 scale 比例调整，但不低于 cwnd_min_target */
+		cwnd = max_t(u32,
+			      cwnd * bbrplusv3_pacing_rate_scale / 100,
+			      bbr_cwnd_min_target);
+		tcp_snd_cwnd_set(tcp_sk(sk), cwnd);
 	}
 
-	/* Minimum pacing rate floor (单流保底) */
+	/* Minimum pacing rate floor (单流保底)
+	 * C1: PROBE_RTT 期间已在上面 return */
 	if (bbrplusv3_min_pacing_rate > 0) {
 		u64 rate = READ_ONCE(sk->sk_pacing_rate);
 
@@ -379,14 +416,15 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 				   bbrplusv3_min_pacing_rate);
 	}
 
-	/* BBR-GC: Gamma Correction 自适应 pacing gain (优化 E)
+	/* BBR-GC: Gamma Correction 自适应 pacing gain
 	 * 论文: Sensors 2023 "Optimization of BBR based on pacing gain model"
-	 * 改进: 用 sqrt 近似 gamma=2, 基于 queue_ratio 平滑过渡
+	 * C6: 使用内核精确 int_sqrt() 替代错误牛顿法近似(原4x误差)
+	 * C7: gc_base_down 已添加 module_param 供 sysfs 同步
+	 * C9: gc_enable=0 时恢复全局 pacing_gain[DOWN] 到基准值
 	 * queue_ratio = (rtt - min_rtt) / min_rtt (队列膨胀比例)
-	 * gc_down = BBR_UNIT - range × sqrt(queue_ratio)
-	 * 无队列(q=0): gc_down → cap 0.91 (不降速)
-	 * 满队列(q=1): gc_down → base_down (profile DOWN gain)
-	 * sqrt 用整数牛顿法 1 次迭代近似 */
+	 * gc_down = BBR_UNIT - range * sqrt(queue_ratio)
+	 * 无队列(q=0): gc_down -> cap 0.91 (不降速)
+	 * 满队列(q=1): gc_down -> base_down (profile DOWN gain) */
 	if (bbrplusv3_gc_enable && rs->rtt_us > 0 &&
 	    bbr->min_rtt_us > 0 && bbrplusv3_gc_base_down > 0) {
 		u32 queue_ratio = 0;
@@ -402,15 +440,8 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 				queue_ratio = BBR_UNIT;
 		}
 
-		/* sqrt 近似 (牛顿法 1 次迭代) */
-		if (queue_ratio == 0) {
-			sqrt_q = 0;
-		} else {
-			u32 x = queue_ratio / 2 + 1;
-
-			x = (x + queue_ratio / x) / 2;
-			sqrt_q = x;
-		}
+		/* C6: 使用内核精确 int_sqrt() 替代错误近似 */
+		sqrt_q = int_sqrt(queue_ratio);
 
 		gc_down = BBR_UNIT - range * sqrt_q / BBR_UNIT;
 
@@ -425,11 +456,18 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 		if (gc_down < base_down)
 			gc_down = base_down;
 
-		/* 直接更新全局 DOWN gain
-		 * 只影响 PROBE_BW DOWN phase
+		/* 更新全局 DOWN gain (只影响 PROBE_BW DOWN phase)
 		 * UP/CRUISE/REFILL 完全不受影响 */
 		WRITE_ONCE(bbr_pacing_gain[BBR_BW_PROBE_DOWN],
 			   gc_down);
+	} else if (!bbrplusv3_gc_enable && bbrplusv3_gc_base_down > 0) {
+		/* C9: gc 禁用时恢复全局 DOWN gain 到 profile 基准值
+		 * 防止 GC 最后修改的值永久残留 */
+		u32 current = READ_ONCE(bbr_pacing_gain[BBR_BW_PROBE_DOWN]);
+
+		if (current != bbrplusv3_gc_base_down)
+			WRITE_ONCE(bbr_pacing_gain[BBR_BW_PROBE_DOWN],
+				   bbrplusv3_gc_base_down);
 	}
 }
 
@@ -441,36 +479,73 @@ MODULE_PARM_DESC(min_pacing_rate, "Min pacing rate bytes/s (0=off, e.g. 1250000=
 
 module_param_named(gc_enable, bbrplusv3_gc_enable, int, 0644);
 MODULE_PARM_DESC(gc_enable, "BBR-GC adaptive pacing gain (0=off, 1=on)");
+
+/* C7: gc_base_down 暴露为 module_param, 允许 tcp.sh 在覆盖 pacing_gain_down 时同步 */
+module_param_named(gc_base_down, bbrplusv3_gc_base_down, int, 0644);
+MODULE_PARM_DESC(gc_base_down, "BBR-GC base DOWN gain (sync with pacing_gain_down when overriding)");
 BBRPLUSV3_ALGO_EOF
 
 echo "[7b/9] 已注入 Pacing Scale + cong_control wrapper + BBR-GC"
 
 # ============================================
-# 7c. STARTUP 阶段优化（单流性能改进）
-# 基于 tsunami-v3 基准验证 (616 vs 494 Mbps) + nanqinlang STARTUP 抗早退:
-#   - drain_gain 0.347→0.416: 温和 DRAIN（tsunami-v3 验证）
-#   - min_rtt_win 10→20s: 长 RTT 链路更稳定（tsunami-v3）
-#   - full_bw_thresh 1.25→2.0: STARTUP 抗早退（nanqinlang）
-#   - startup_pacing_gain 2.77→2.885: 更快爬升（BBRv3e1）
+# 7c. STARTUP 阶段优化（三轮审计后修正版）
+# 审计修正：
+#   - drain_gain 保持 0.347 (=1/startup_pacing_gain，修复H1数学不一致)
+#   - min_rtt_win_sec 保持 10s (修复C10/65m RTT不公平性)
+#   - full_bw_thresh 保持 1.25 (修复C5 STARTUP持续过久)
+#   - startup_pacing_gain 2.885 (保留，BBRv3e1论文值)
 # ============================================
 
-# DRAIN gain: 0.347 → 0.416 (tsunami-v3 验证值)
-sed -i 's/bbr_drain_gain = BBR_UNIT \* 1000 \/ 2885/bbr_drain_gain = BBR_UNIT * 1200 \/ 2885/' "$BBRPLUSV3_SRC"
+# DRAIN gain: 保持 BBRv3 原版 0.347 (1000/2885)
+# 三轮审计确认：drain_gain=0.416 导致 DRAIN 不充分(H1)，改回原版值
+# 不再执行 sed 修改，保持 BBRv3 源码原值
 
-# min_rtt 窗口: 10s → 20s (tsunami-v3, 长 RTT 链路 min_rtt 估值更稳定)
-sed -i 's/bbr_min_rtt_win_sec = 10/bbr_min_rtt_win_sec = 20/' "$BBRPLUSV3_SRC"
+# min_rtt_win_sec: 保持 BBRv3 原版 10s
+# 三轮审计确认：20s 导致 RTT 不公平性复合放大(C10/65m)和 spurious RTO 风险(lzc)
+# 不再执行 sed 修改，保持 BBRv3 源码原值
 
-# full_bw_thresh: 1.25 → 1.10 (降低增长判定阈值, STARTUP 充分探测带宽后再退出)
-# BBR STARTUP 退出条件: 连续 full_bw_cnt(3) 个 round 带宽增长不到 full_bw_thresh
-# 原版 1.25 要求每 round 增长 25% 才算"显著增长"(重置计数器)
-# 改为 1.10 只要 10% 增长即可, 避免 STARTUP 过早退出导致 full_bw 估计偏低
-# 注: 之前的 2.0 方向反了 — 翻倍才算"显著"导致第 3 个 round 就退出 STARTUP
-sed -i 's/bbr_full_bw_thresh = BBR_UNIT \* 5 \/ 4/bbr_full_bw_thresh = BBR_UNIT * 11 \/ 10/' "$BBRPLUSV3_SRC"
+# full_bw_thresh: 保持 BBRv3 原版 1.25 (5/4)
+# 三轮审计确认：1.10 导致 STARTUP 持续过久(C5)，buffer overflow → SSH/CF断连
+# 不再执行 sed 修改，保持 BBRv3 源码原值
 
 # STARTUP pacing gain: 2.77 → 2.885 (BBRv3e1 论文, 2/ln(2))
 sed -i 's/bbr_startup_pacing_gain = BBR_UNIT \* 277 \/ 100 + 1/bbr_startup_pacing_gain = BBR_UNIT * 2885 \/ 1000 + 1/' "$BBRPLUSV3_SRC"
 
-echo "[7c/9] 已优化 STARTUP/DRAIN (tsunami-v3+nanqinlang: drain=0.416, win=20s, thresh=1.10, pacing=2.885)"
+echo "[7c/9] STARTUP 优化修正版 (drain=0.347, win=10s, thresh=1.25, pacing=2.885)"
+
+# ============================================
+# 7d. tcpboost-wia: sed 替换验证
+# 验证所有关键 sed 修改已成功执行，防止静默 fallback 到 vanilla BBRv3
+# ============================================
+echo "[7d/9] 验证 sed 修改..."
+SED_ERRORS=0
+
+verify_pattern() {
+    if ! grep -qF "$1" "$BBRPLUSV3_SRC"; then
+        echo "  [FAIL] $2 — 模式未找到: $1" >&2
+        echo "         可能原因：BBRv3 源码版本变化，sed 替换未匹配" >&2
+        SED_ERRORS=$((SED_ERRORS + 1))
+    fi
+}
+
+# 验证关键算法参数已被正确修改
+verify_pattern 'BBR_UNIT * 11 / 8' "pacing_gain UP=1.375"
+verify_pattern 'BBR_UNIT * 17 / 20' "pacing_gain DOWN=0.85"
+verify_pattern 'BBR_UNIT * 9 / 4' "startup_cwnd_gain=2.25"
+verify_pattern 'BBR_UNIT * 3 / 100' "loss_thresh=3%"
+verify_pattern 'bbr_probe_rtt_mode_ms = 100' "probe_rtt_mode_ms=100"
+verify_pattern 'bbrplusv3_main' "cong_control wrapper"
+verify_pattern '"bbrplusv3"' "module name"
+verify_pattern 'BBR_UNIT * 2885' "startup_pacing_gain=2.885"
+
+if [ "$SED_ERRORS" -gt 0 ]; then
+    echo "" >&2
+    echo "WARNING: $SED_ERRORS 个 sed 验证失败！" >&2
+    echo "  生成的模块可能行为异常（可能得到 vanilla BBRv3）" >&2
+    echo "  建议：检查 BBRv3 源码版本兼容性，或手动调整 sed 模式" >&2
+else
+    echo "  所有关键 sed 修改验证通过"
+fi
 
 # ============================================
 # 8. 修改 Kconfig 和 Makefile
@@ -512,14 +587,32 @@ fi
 
 # 修改 ICSK_CA_PRIV_SIZE 以容纳 bbrplusv3
 # BBRv3 struct bbr 约 144 bytes，bbrplusv3 同样大小（我们没改 struct）
-# 使用动态检测，兼容任意当前值
+# tcpboost-e6f: 兼容多种 ICSK_CA_PRIV_SIZE 定义格式（数组字面量/define/enum）
 PRIV_FILE="include/net/inet_connection_sock.h"
 if [ -f "$PRIV_FILE" ]; then
-  CURRENT_PRIV_SIZE=$(grep -oP 'icsk_ca_priv\[\K\d+' "$PRIV_FILE" 2>/dev/null || echo "0")
+  # 方式1: 从 icsk_ca_priv[N / sizeof(u64)] 格式中提取 N（兼容 grep -E）
+  CURRENT_PRIV_SIZE=$(grep -oE 'icsk_ca_priv\[[0-9]+' "$PRIV_FILE" 2>/dev/null | grep -oE '[0-9]+$' | head -1 || echo "")
+  
+  # 方式2: 如果方式1失败，尝试从 #define ICSK_CA_PRIV_SIZE 提取
+  if [ -z "$CURRENT_PRIV_SIZE" ]; then
+    CURRENT_PRIV_SIZE=$(grep -oE '#define[[:space:]]+ICSK_CA_PRIV_SIZE[[:space:]]+[0-9]+' "$PRIV_FILE" 2>/dev/null | grep -oE '[0-9]+$' | head -1 || echo "")
+  fi
+  
+  # 默认值：无法检测时假设安全
+  [ -z "$CURRENT_PRIV_SIZE" ] && CURRENT_PRIV_SIZE=0
+  
   NEED=144
-  if [ "$CURRENT_PRIV_SIZE" -lt "$NEED" ]; then
+  if [ "$CURRENT_PRIV_SIZE" -gt 0 ] && [ "$CURRENT_PRIV_SIZE" -lt "$NEED" ]; then
     echo "增大 ICSK_CA_PRIV_SIZE ($CURRENT_PRIV_SIZE → $NEED)..."
     sed -i "s/icsk_ca_priv\[$CURRENT_PRIV_SIZE \/ sizeof(u64)\]/icsk_ca_priv[$NEED \/ sizeof(u64)]/" "$PRIV_FILE"
+    # 验证修改成功
+    if ! grep -qF "icsk_ca_priv[$NEED / sizeof(u64)]" "$PRIV_FILE"; then
+      echo "WARNING: ICSK_CA_PRIV_SIZE 修改可能未生效（格式不兼容）" >&2
+      echo "  建议：手动检查 $PRIV_FILE 中 icsk_ca_priv 的定义" >&2
+    fi
+  elif [ "$CURRENT_PRIV_SIZE" = "0" ]; then
+    echo "WARNING: 无法自动检测 ICSK_CA_PRIV_SIZE（可能使用 enum/非标准格式）" >&2
+    echo "  建议：手动确认 struct bbr 不超过当前 ICSK_CA_PRIV_SIZE" >&2
   else
     echo "ICSK_CA_PRIV_SIZE 已为 $CURRENT_PRIV_SIZE (≥$NEED)，无需修改"
   fi
@@ -627,7 +720,19 @@ if [ -f "$TCP_INPUT_FILE" ] && ! grep -q "tcp_collapse_max_bytes" "$TCP_INPUT_FI
   }
   { print }
   ' "$TCP_INPUT_FILE" > "${TCP_INPUT_FILE}.tmp" && mv "${TCP_INPUT_FILE}.tmp" "$TCP_INPUT_FILE"
-  echo "  [cloudflare] tcp_input.c: 已修改 tcp_prune_queue()"
+  
+  # tcpboost-2fp: 验证 tcp_input.c 的 3 处修改都已正确注入
+  TCP_INPUT_OK=1
+  grep -qF 'struct net *net = sock_net(sk);' "$TCP_INPUT_FILE" 2>/dev/null || { echo "  [cloudflare] WARNING: tcp_input.c net 变量注入失败" >&2; TCP_INPUT_OK=0; }
+  grep -qF 'goto do_not_collapse;' "$TCP_INPUT_FILE" 2>/dev/null || { echo "  [cloudflare] WARNING: tcp_input.c sysctl 检查注入失败" >&2; TCP_INPUT_OK=0; }
+  grep -qF 'do_not_collapse:' "$TCP_INPUT_FILE" 2>/dev/null || { echo "  [cloudflare] WARNING: tcp_input.c label 注入失败" >&2; TCP_INPUT_OK=0; }
+  
+  if [ "$TCP_INPUT_OK" = "1" ]; then
+    echo "  [cloudflare] tcp_input.c: 已修改 tcp_prune_queue() (3/3 处验证通过)"
+  else
+    echo "  [cloudflare] WARNING: tcp_input.c 注入不完整，可能编译失败" >&2
+    echo "  建议：检查内核版本兼容性，tcp_prune_queue 函数签名或锚点可能已变化" >&2
+  fi
 fi
 
 # --- 文件 5: net/ipv4/tcp_ipv4.c ---
