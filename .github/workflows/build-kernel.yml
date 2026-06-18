@@ -172,12 +172,12 @@ jobs:
       - name: Fix patch compatibility (6.12 API + conflict resolution)
         working-directory: linux-src
         run: |
-          # 1. ICSK_CA_PRIV_SIZE - must be 144 bytes for BBRv3 struct bbr
+          # 1. ICSK_CA_PRIV_SIZE - must be 152 bytes for BBRv3 struct bbr + A5 startup_start_stamp
           echo "Fixing ICSK_CA_PRIV_SIZE..."
           FILE="include/net/inet_connection_sock.h"
           CURRENT=$(grep -oP 'icsk_ca_priv\[\K\d+' "$FILE" 2>/dev/null || echo "0")
           echo "Current ICSK_CA_PRIV_SIZE: $CURRENT / sizeof(u64)"
-          NEED=144
+          NEED=152
           if [ "$CURRENT" -lt "$NEED" ]; then
             echo "Increasing ICSK_CA_PRIV_SIZE ($CURRENT -> $NEED)..."
             sed -i "s/icsk_ca_priv\[$CURRENT \/ sizeof(u64)\]/icsk_ca_priv[$NEED \/ sizeof(u64)]/" "$FILE"

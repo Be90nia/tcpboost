@@ -1329,13 +1329,15 @@ show_algorithm_status() {
   if [ "$current_algo" = "bbrplusv3" ]; then
     local param_dir="/sys/module/tcp_bbrplusv3/parameters"
     if [ -d "$param_dir" ]; then
-      local lt beta mpr pgd prt_mode prt_win
+      local lt beta mpr pgd prt_mode prt_win flc smm
       lt=$(cat "$param_dir/loss_thresh" 2>/dev/null || echo "?")
       beta=$(cat "$param_dir/beta" 2>/dev/null || echo "?")
       mpr=$(cat "$param_dir/min_pacing_rate" 2>/dev/null || echo "?")
       pgd=$(cat "$param_dir/pacing_gain_down" 2>/dev/null || echo "?")
       prt_mode=$(cat "$param_dir/probe_rtt_mode_ms" 2>/dev/null || echo "?")
       prt_win=$(cat "$param_dir/probe_rtt_win_ms" 2>/dev/null || echo "?")
+      flc=$(cat "$param_dir/full_loss_cnt" 2>/dev/null || echo "?")
+      smm=$(cat "$param_dir/startup_max_ms" 2>/dev/null || echo "?")
       local lt_pct=$((lt * 100 / 256))
       local beta_pct=$((beta * 100 / 256))
       local mpr_mb=$((mpr * 8 / 1000000))
@@ -1344,6 +1346,16 @@ show_algorithm_status() {
       echo "  beta:           ${beta} (${beta_pct}%)"
       echo "  pacing_down:    ${pgd} (${pgd_pct}%)"
       echo "  probe_rtt:      ${prt_win}ms周期/${prt_mode}ms持续"
+      if [ "$flc" = "0" ]; then
+        echo "  full_loss_cnt:  0 (A5: STARTUP loss退出禁用)"
+      else
+        echo "  full_loss_cnt:  ${flc}"
+      fi
+      if [ "$smm" = "?" ] || [ "$smm" = "0" ]; then
+        echo "  startup_max_ms: off"
+      else
+        echo "  startup_max_ms: ${smm}ms (A5 兜底)"
+      fi
       if [ "$mpr" = "?" ] || [ "$mpr" = "0" ]; then
         echo "  min_pacing_rate: off"
       else

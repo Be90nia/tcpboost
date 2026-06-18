@@ -615,7 +615,7 @@ if ! grep -q "tcp_bbrplusv3" net/ipv4/Makefile 2>/dev/null; then
 fi
 
 # 修改 ICSK_CA_PRIV_SIZE 以容纳 bbrplusv3
-# BBRv3 struct bbr 约 144 bytes，bbrplusv3 同样大小（我们没改 struct）
+# BBRv3 struct bbr 约 148 bytes（tcpboost-A5 加了 startup_start_stamp u32 4 bytes）
 # tcpboost-e6f: 兼容多种 ICSK_CA_PRIV_SIZE 定义格式（数组字面量/define/enum）
 PRIV_FILE="include/net/inet_connection_sock.h"
 if [ -f "$PRIV_FILE" ]; then
@@ -630,7 +630,7 @@ if [ -f "$PRIV_FILE" ]; then
   # 默认值：无法检测时假设安全
   [ -z "$CURRENT_PRIV_SIZE" ] && CURRENT_PRIV_SIZE=0
   
-  NEED=144
+  NEED=152
   if [ "$CURRENT_PRIV_SIZE" -gt 0 ] && [ "$CURRENT_PRIV_SIZE" -lt "$NEED" ]; then
     echo "增大 ICSK_CA_PRIV_SIZE ($CURRENT_PRIV_SIZE → $NEED)..."
     sed -i "s/icsk_ca_priv\[$CURRENT_PRIV_SIZE \/ sizeof(u64)\]/icsk_ca_priv[$NEED \/ sizeof(u64)]/" "$PRIV_FILE"

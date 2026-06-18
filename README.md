@@ -132,6 +132,7 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/Be90nia
 ```bash
 # 查看参数
 cat /sys/module/tcp_bbrplusv3/parameters/loss_thresh
+cat /sys/module/tcp_bbrplusv3/parameters/startup_max_ms  # A5: STARTUP 兜底(ms), 0=禁用, 默认10000
 
 # 设置保底速率（推荐匹配 VPS 实际带宽）
 ./tcp.sh set-min-pacing-rate 100   # 100 Mbps
