@@ -277,7 +277,6 @@ static int bbrplusv3_profile_set(const char *val,
 
 	bbr_pacing_gain[BBR_BW_PROBE_UP]	= p->pacing_gain_up;
 	bbr_pacing_gain[BBR_BW_PROBE_DOWN]	= p->pacing_gain_down;
-	bbrplusv3_gc_base_down		= p->pacing_gain_down;
 	bbr_startup_cwnd_gain		= p->startup_cwnd_gain;
 	bbr_startup_pacing_gain		= p->startup_pacing_gain;
 	bbr_drain_gain			= p->drain_gain;
@@ -335,13 +334,12 @@ BBRPLUSV3_PARAMS_EOF
 echo "[7/9] 已追加 module_param + 四档 Profile 系统"
 
 # ============================================
-# 7b. 注入算法优化（Pacing Scale + cong_control wrapper + BBR-GC）
+# 7b. 注入算法优化（cong_control wrapper + min_pacing_rate floor）
 # ============================================
 
 # 前向声明 bbrplusv3_main（在 cong_ops 之前注入）
 sed -i '/static struct tcp_congestion_ops tcp_bbrplusv3_cong_ops/i\
-static void bbrplusv3_main(struct sock *sk, u32 ack, int flag, const struct rate_sample *rs);\
-static int bbrplusv3_gc_base_down = 217;	/* C8: 初始化为 aggressive pacing_gain_down(0.85), 避免GC静默禁用 */' "$BBRPLUSV3_SRC"
+static void bbrplusv3_main(struct sock *sk, u32 ack, int flag, const struct rate_sample *rs);' "$BBRPLUSV3_SRC"
 
 # 替换 cong_control 回调: bbr_main → bbrplusv3_main
 sed -i 's/\.cong_control.*=.*bbr_main,.*/.cong_control\t= bbrplusv3_main,/' "$BBRPLUSV3_SRC"
@@ -352,14 +350,10 @@ cat >> "$BBRPLUSV3_SRC" << 'BBRPLUSV3_ALGO_EOF'
 /* ============================================
  * BBRPlusV3 算法优化
  *
- * Pacing Scale: 全局 pacing rate 缩放 (BMR alpha)
- * Minimum pacing rate: 单流保底速率
- * BBR-GC: 自适应 pacing gain (gamma correction)
+ * Minimum pacing rate: 全局 pacing 保底速率 (PROBE_RTT 除外)
  * ============================================ */
 
-static int bbrplusv3_pacing_rate_scale = 100;
 static u64 bbrplusv3_min_pacing_rate;
-static int bbrplusv3_gc_enable = 0;
 
 /* tcpboost-4cf: 参数范围验证标志（首次 ACK 时验证一次） */
 static atomic_t bbrplusv3_params_checked = ATOMIC_INIT(0);
@@ -383,30 +377,14 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 	/* 先调用原始 BBRv3 主逻辑 */
 	bbr_main(sk, ack, flag, rs);
 
-	/* C1: PROBE_RTT 期间不做任何 pacing/cwnd 修改
+	/* C1: PROBE_RTT 期间不做任何 pacing 修改
 	 * PROBE_RTT 需要将 cwnd 压缩到 probe_rtt_cwnd，
-	 * min_pacing_rate floor / pacing scale 会破坏这个过程，
+	 * min_pacing_rate floor 会破坏这个过程，
 	 * 导致 inflight 无法降到 probe_rtt_cwnd，PROBE_RTT 无法退出 */
 	if (bbr->mode == BBR_PROBE_RTT)
 		return;
 
-	/* Pacing Rate Scale (BMR alpha) + C4: 同步 cwnd */
-	if (bbrplusv3_pacing_rate_scale != 100) {
-		u64 rate = READ_ONCE(sk->sk_pacing_rate);
-		u32 cwnd = tcp_snd_cwnd(tcp_sk(sk));
-
-		rate = rate * bbrplusv3_pacing_rate_scale / 100;
-		WRITE_ONCE(sk->sk_pacing_rate, rate);
-
-		/* C4: pacing 变化后同步 cwnd，避免 cwnd/pacing 失同步
-		 * 按 scale 比例调整，但不低于 cwnd_min_target */
-		cwnd = max_t(u32,
-			      cwnd * bbrplusv3_pacing_rate_scale / 100,
-			      bbr_cwnd_min_target);
-		tcp_snd_cwnd_set(tcp_sk(sk), cwnd);
-	}
-
-	/* Minimum pacing rate floor (单流保底)
+	/* Minimum pacing rate floor (全局保底, PROBE_RTT 除外)
 	 * C1: PROBE_RTT 期间已在上面 return */
 	if (bbrplusv3_min_pacing_rate > 0) {
 		u64 rate = READ_ONCE(sk->sk_pacing_rate);
@@ -416,76 +394,13 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 				   bbrplusv3_min_pacing_rate);
 	}
 
-	/* BBR-GC: Gamma Correction 自适应 pacing gain
-	 * 论文: Sensors 2023 "Optimization of BBR based on pacing gain model"
-	 * C6: 使用内核精确 int_sqrt() 替代错误牛顿法近似(原4x误差)
-	 * C7: gc_base_down 已添加 module_param 供 sysfs 同步
-	 * C9: gc_enable=0 时恢复全局 pacing_gain[DOWN] 到基准值
-	 * queue_ratio = (rtt - min_rtt) / min_rtt (队列膨胀比例)
-	 * gc_down = BBR_UNIT - range * sqrt(queue_ratio)
-	 * 无队列(q=0): gc_down -> cap 0.91 (不降速)
-	 * 满队列(q=1): gc_down -> base_down (profile DOWN gain) */
-	if (bbrplusv3_gc_enable && rs->rtt_us > 0 &&
-	    bbr->min_rtt_us > 0 && bbrplusv3_gc_base_down > 0) {
-		u32 queue_ratio = 0;
-		u32 base_down = bbrplusv3_gc_base_down;
-		u32 range = BBR_UNIT - base_down;
-		u32 sqrt_q;
-		u32 gc_down;
-
-		if (rs->rtt_us > bbr->min_rtt_us) {
-			queue_ratio = (u32)((u64)(rs->rtt_us - bbr->min_rtt_us) *
-					    BBR_UNIT / bbr->min_rtt_us);
-			if (queue_ratio > BBR_UNIT)
-				queue_ratio = BBR_UNIT;
-		}
-
-		/* C6: 使用内核精确 int_sqrt() 替代错误近似 */
-		sqrt_q = int_sqrt(queue_ratio);
-
-		gc_down = BBR_UNIT - range * sqrt_q / BBR_UNIT;
-
-		/* Cap at 0.91 (保留温和排空, 避免 0-drain 上传退化) */
-		{
-			u32 gc_cap = BBR_UNIT * 91 / 100;
-
-			if (gc_down > gc_cap)
-				gc_down = gc_cap;
-		}
-		/* 不低于 base_down (保持最小排空能力) */
-		if (gc_down < base_down)
-			gc_down = base_down;
-
-		/* 更新全局 DOWN gain (只影响 PROBE_BW DOWN phase)
-		 * UP/CRUISE/REFILL 完全不受影响 */
-		WRITE_ONCE(bbr_pacing_gain[BBR_BW_PROBE_DOWN],
-			   gc_down);
-	} else if (!bbrplusv3_gc_enable && bbrplusv3_gc_base_down > 0) {
-		/* C9: gc 禁用时恢复全局 DOWN gain 到 profile 基准值
-		 * 防止 GC 最后修改的值永久残留 */
-		u32 cur_down = READ_ONCE(bbr_pacing_gain[BBR_BW_PROBE_DOWN]);
-
-		if (cur_down != bbrplusv3_gc_base_down)
-			WRITE_ONCE(bbr_pacing_gain[BBR_BW_PROBE_DOWN],
-				   bbrplusv3_gc_base_down);
-	}
 }
-
-module_param_named(pacing_rate_scale, bbrplusv3_pacing_rate_scale, int, 0644);
-MODULE_PARM_DESC(pacing_rate_scale, "Pacing rate scale in % (100=100%, 90=90%)");
 
 module_param_named(min_pacing_rate, bbrplusv3_min_pacing_rate, ullong, 0644);
 MODULE_PARM_DESC(min_pacing_rate, "Min pacing rate bytes/s (0=off, e.g. 1250000=10Mbps)");
-
-module_param_named(gc_enable, bbrplusv3_gc_enable, int, 0644);
-MODULE_PARM_DESC(gc_enable, "BBR-GC adaptive pacing gain (0=off, 1=on)");
-
-/* C7: gc_base_down 暴露为 module_param, 允许 tcp.sh 在覆盖 pacing_gain_down 时同步 */
-module_param_named(gc_base_down, bbrplusv3_gc_base_down, int, 0644);
-MODULE_PARM_DESC(gc_base_down, "BBR-GC base DOWN gain (sync with pacing_gain_down when overriding)");
 BBRPLUSV3_ALGO_EOF
 
-echo "[7b/9] 已注入 Pacing Scale + cong_control wrapper + BBR-GC"
+echo "[7b/9] 已注入 cong_control wrapper + min_pacing_rate floor"
 
 # ============================================
 # 7c. STARTUP 阶段优化（三轮审计后修正版）

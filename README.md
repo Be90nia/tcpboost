@@ -118,10 +118,8 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/Be90nia
 | `pacing_gain_down` | 0.85 (217/256) | PROBE_BW DOWN 阶段速率，减少下载波动 |
 | `probe_rtt_mode_ms` | 100 | PROBE_RTT 持续时间，延迟峰值深度 |
 | `probe_rtt_win_ms` | 5000 | PROBE_RTT 触发周期，游戏延迟峰值频率 |
-| `min_pacing_rate` | 0 (关闭) | 保底发送速率，防 STARTUP 早退 |
+| `min_pacing_rate` | 0 (关闭) | 全局 pacing 保底速率（PROBE_RTT 除外，需匹配 VPS 带宽）|
 | `profile` | aggressive (2) | 参数预设：conservative/standard/aggressive/wifi |
-| `pacing_rate_scale` | 100 (%) | 全局 pacing rate 缩放系数（100=不调整）|
-| `gc_enable` | 0 (关闭) | BBR-GC 自适应 pacing gain（实验性，sqrt 近似 gamma correction）|
 
 > **保留的激进参数**（不变）：`startup_pacing_gain=2.885`、`startup_cwnd_gain=2.5`、`pacing_gain_up=1.5`、`drain_gain=0.416`、`min_rtt_win_sec=20s` — 这些是跨太平洋加速的核心优势。
 
@@ -138,9 +136,6 @@ cat /sys/module/tcp_bbrplusv3/parameters/loss_thresh
 
 # 应用 TLS 握手优化（aggressive profile + TLS sysctl + IW10，不降速）
 ./tcp.sh tls-optimize
-
-# 启用 BBR-GC 自适应 pacing gain（实验性，跨太平洋高丢包链路可尝试）
-echo 1 > /sys/module/tcp_bbrplusv3/parameters/gc_enable
 ```
 
 ## 网络优化方案

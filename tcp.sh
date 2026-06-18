@@ -498,8 +498,6 @@ write_bbrplusv3_service() {
   local s_pacing_gain_down=217
   local s_probe_rtt_mode_ms=100
   local s_probe_rtt_win_ms=5000
-  local s_gc_enable=0
-  local s_gc_base_down=217
   local s_min_pacing_rate=""
   local description="TCPBoost BBRPlusV3 Parameters"
 
@@ -511,7 +509,6 @@ write_bbrplusv3_service() {
       probe_rtt_win_ms=*)  s_probe_rtt_win_ms="${override#probe_rtt_win_ms=}" ;;
       probe_rtt_mode_ms=*) s_probe_rtt_mode_ms="${override#probe_rtt_mode_ms=}" ;;
       pacing_gain_down=*)  s_pacing_gain_down="${override#pacing_gain_down=}" ;;
-      gc_base_down=*)      s_gc_base_down="${override#gc_base_down=}" ;;
       description=*)       description="${override#description=}" ;;
     esac
   done
@@ -522,7 +519,7 @@ write_bbrplusv3_service() {
   #   - 不写 profile：写 profile=N 会触发内核重置所有参数为 profile 默认值
   #   - modprobe + 重试：确保 sysfs 参数目录存在
   #   - 不吞错误：失败信息输出到 systemd journal
-  local params="loss_thresh=${s_loss_thresh} beta=${s_beta} pacing_gain_down=${s_pacing_gain_down} probe_rtt_mode_ms=${s_probe_rtt_mode_ms} probe_rtt_win_ms=${s_probe_rtt_win_ms} gc_enable=${s_gc_enable} gc_base_down=${s_pacing_gain_down}"
+  local params="loss_thresh=${s_loss_thresh} beta=${s_beta} pacing_gain_down=${s_pacing_gain_down} probe_rtt_mode_ms=${s_probe_rtt_mode_ms} probe_rtt_win_ms=${s_probe_rtt_win_ms}"
   if [ -n "$s_min_pacing_rate" ]; then
     params="${params} min_pacing_rate=${s_min_pacing_rate}"
     description="TCPBoost BBRPlusV3 Parameters (with min_pacing_rate)"
@@ -592,10 +589,6 @@ apply_bbrplusv3_params() {
   echo 76 > "$param_dir/beta" || warn "写入 beta 失败"
   # pacing_gain_down: 0.85 (217/256) — 匹配新aggressive默认
   echo 217 > "$param_dir/pacing_gain_down" || warn "写入 pacing_gain_down 失败"
-  # gc_base_down: 同步 pacing_gain_down (C7修复：参数覆盖时GC基准值保持一致)
-  if [ -w "$param_dir/gc_base_down" ]; then
-    echo 217 > "$param_dir/gc_base_down" || warn "写入 gc_base_down 失败"
-  fi
   # probe_rtt_mode_ms: 100 — 匹配新aggressive默认
   echo 100 > "$param_dir/probe_rtt_mode_ms" || warn "写入 probe_rtt_mode_ms 失败"
   # probe_rtt_win_ms: 5000 — 匹配新aggressive默认
@@ -608,11 +601,6 @@ apply_bbrplusv3_params() {
   if [ -w "$param_dir/min_pacing_rate" ]; then
     echo 0 > "$param_dir/min_pacing_rate" || warn "写入 min_pacing_rate 失败"
   fi
-  # gc_enable: 默认关闭 (6.12.90 上 GC 打破 UP/DOWN 平衡)
-  if [ -w "$param_dir/gc_enable" ]; then
-    echo 0 > "$param_dir/gc_enable" || warn "写入 gc_enable 失败"
-  fi
-
   mkdir -p "$CONF_DIR"
   cat > "$CONF_DIR/bbrplusv3.conf" <<'EOF'
 # BBRPlusV3 科学上网平衡优化参数
@@ -623,15 +611,13 @@ beta=76
 pacing_gain_down=217
 probe_rtt_mode_ms=100
 probe_rtt_win_ms=5000
-gc_enable=0
-gc_base_down=217
 EOF
 
   # modules-load.d: 确保模块在 systemd service 之前加载
   # 修复 Boot 竞态：service ExecStart 有 modprobe 兜底，但 modules-load.d 更可靠
   echo "tcp_bbrplusv3" > /etc/modules-load.d/tcpboost-bbrplusv3.conf
 
-  info "BBRPlusV3 参数已设置 (loss=3%, beta=30%, pacing_down=0.85, probe_rtt=5s/100ms, gc=off)"
+  info "BBRPlusV3 参数已设置 (loss=3%, beta=30%, pacing_down=0.85, probe_rtt=5s/100ms)"
 }
 
 # 设置 min_pacing_rate（保底速率）+ 自动应用全套配套优化
@@ -668,12 +654,9 @@ set_min_pacing_rate() {
     echo 5000 > "$param_dir/probe_rtt_win_ms" || warn "写入 probe_rtt_win_ms 失败"
     echo 100 > "$param_dir/probe_rtt_mode_ms" || warn "写入 probe_rtt_mode_ms 失败"
     echo 217 > "$param_dir/pacing_gain_down" || warn "写入 pacing_gain_down 失败"
-    if [ -w "$param_dir/gc_base_down" ]; then
-      echo 217 > "$param_dir/gc_base_down" || warn "写入 gc_base_down 失败"
-    fi
 
     if [ -f "$CONF_DIR/bbrplusv3.conf" ]; then
-      sed -i "/^min_pacing_rate=/d; /^probe_rtt_win_ms=/d; /^probe_rtt_mode_ms=/d; /^pacing_gain_down=/d; /^gc_base_down=/d" "$CONF_DIR/bbrplusv3.conf"
+      sed -i "/^min_pacing_rate=/d; /^probe_rtt_win_ms=/d; /^probe_rtt_mode_ms=/d; /^pacing_gain_down=/d" "$CONF_DIR/bbrplusv3.conf"
     fi
 
     # 恢复 service 到 aggressive 基线（不含 min_pacing_rate 覆盖）
@@ -694,15 +677,12 @@ set_min_pacing_rate() {
 
   # 2. pacing_gain_down: 0.85→0.90（减少 PROBE_BW DOWN 周期性降速）
   echo 230 > "$param_dir/pacing_gain_down" || warn "写入 pacing_gain_down 失败"
-  if [ -w "$param_dir/gc_base_down" ]; then
-    echo 230 > "$param_dir/gc_base_down" || warn "写入 gc_base_down 失败"
-  fi
 
   # === 持久化 ===
   mkdir -p "$CONF_DIR"
   local conf_file="$CONF_DIR/bbrplusv3.conf"
   if [ -f "$conf_file" ]; then
-    sed -i "/^min_pacing_rate=/d; /^probe_rtt_win_ms=/d; /^probe_rtt_mode_ms=/d; /^pacing_gain_down=/d; /^gc_base_down=/d" "$conf_file"
+    sed -i "/^min_pacing_rate=/d; /^probe_rtt_win_ms=/d; /^probe_rtt_mode_ms=/d; /^pacing_gain_down=/d" "$conf_file"
   else
     : > "$conf_file"
   fi
@@ -711,7 +691,6 @@ min_pacing_rate=$bps
 probe_rtt_win_ms=10000
 probe_rtt_mode_ms=50
 pacing_gain_down=230
-gc_base_down=230
 EOF
 
   # systemd service 持久化（统一入口，包含全套参数 + min_pacing_rate 覆盖）
@@ -1350,11 +1329,10 @@ show_algorithm_status() {
   if [ "$current_algo" = "bbrplusv3" ]; then
     local param_dir="/sys/module/tcp_bbrplusv3/parameters"
     if [ -d "$param_dir" ]; then
-      local lt beta mpr gc pgd prt_mode prt_win
+      local lt beta mpr pgd prt_mode prt_win
       lt=$(cat "$param_dir/loss_thresh" 2>/dev/null || echo "?")
       beta=$(cat "$param_dir/beta" 2>/dev/null || echo "?")
       mpr=$(cat "$param_dir/min_pacing_rate" 2>/dev/null || echo "?")
-      gc=$(cat "$param_dir/gc_enable" 2>/dev/null || echo "?")
       pgd=$(cat "$param_dir/pacing_gain_down" 2>/dev/null || echo "?")
       prt_mode=$(cat "$param_dir/probe_rtt_mode_ms" 2>/dev/null || echo "?")
       prt_win=$(cat "$param_dir/probe_rtt_win_ms" 2>/dev/null || echo "?")
@@ -1370,13 +1348,6 @@ show_algorithm_status() {
         echo "  min_pacing_rate: off"
       else
         echo "  min_pacing_rate: ${mpr} (${mpr_mb} Mbps)"
-      fi
-      if [ "$gc" = "1" ]; then
-        echo "  BBR-GC:         on (adaptive pacing gain)"
-      elif [ "$gc" = "0" ]; then
-        echo "  BBR-GC:         off"
-      else
-        echo "  BBR-GC:         ${gc}"
       fi
     fi
   fi
