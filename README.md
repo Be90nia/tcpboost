@@ -17,7 +17,7 @@
 
 跨太平洋链路实测（RTT ~161ms，Debian 12 VPS）：
 
-| 方向 | CUBIC | BBRPlusV3 (15%/30%) | 提升 |
+| 方向 | CUBIC | BBRPlusV3 (3%/30%) | 提升 |
 |------|-------|---------------------|------|
 | 下载单流 | 0.3 Mbps | 53.5 Mbps | **178x** |
 | 下载多流 | 2.6 Mbps | 77.7 Mbps | **30x** |
@@ -113,7 +113,7 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/Be90nia
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `loss_thresh` | 15% (38/256) | 丢包阈值，容忍跨太平洋正常丢包(1-5%)，真实拥塞(>15%)降速 |
+| `loss_thresh` | 3% (7/256) | 丢包阈值，容忍跨太平洋正常丢包(1-3%)，真实拥塞(>3%)降速 |
 | `beta` | 30% (76/256) | BBRPlus 经典值，丢包后恢复 70% |
 | `pacing_gain_down` | 0.85 (217/256) | PROBE_BW DOWN 阶段速率，减少下载波动 |
 | `probe_rtt_mode_ms` | 100 | PROBE_RTT 持续时间，延迟峰值深度 |
@@ -121,7 +121,7 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/Be90nia
 | `min_pacing_rate` | 0 (关闭) | 全局 pacing 保底速率（PROBE_RTT 除外，需匹配 VPS 带宽）|
 | `profile` | aggressive (2) | 参数预设：conservative/standard/aggressive/wifi |
 
-> **保留的激进参数**（不变）：`startup_pacing_gain=2.885`、`startup_cwnd_gain=2.5`、`pacing_gain_up=1.5`、`drain_gain=0.416`、`min_rtt_win_sec=20s` — 这些是跨太平洋加速的核心优势。
+> **保留的激进参数**（不变）：`startup_pacing_gain=2.885`、`startup_cwnd_gain=2.25`、`pacing_gain_up=1.375`、`drain_gain=0.347`、`min_rtt_win_sec=10s` — 这些是跨太平洋加速的核心优势。
 
 **运行时调参**（无需重编译）：
 
@@ -144,7 +144,7 @@ cat /sys/module/tcp_bbrplusv3/parameters/loss_thresh
 |------|---------|---------|---------|---------|
 | 保守 | ≤100Mbps VPS | bbrplusv3 | 标准 | — |
 | 均衡 | 1Gbps VPS | bbrplusv3 | 锐速风格 | initcwnd=32 |
-| 激进 | 科学上网 | bbrplusv3 15%/30% | 锐速风格 + sysctl 调优 | initcwnd=32 + 可设 min_pacing |
+| 激进 | 科学上网 | bbrplusv3 3%/30% | 锐速风格 + sysctl 调优 | initcwnd=32 + 可设 min_pacing |
 | **TLS优化** | **跨太平洋握手稳定性** | **bbrplusv3 aggressive** | **BDP 动态** | **TLS sysctl + IW10（不降速）** |
 
 ## 无感切换
@@ -163,11 +163,11 @@ cat /sys/module/tcp_bbrplusv3/parameters/loss_thresh
 
 BBRPlusV3 = Google BBRv3 核心 + BBRPlus 激进参数 + tsunami-v3 单流优化：
 
-- **STARTUP 抗早退** — `full_bw_thresh` 1.25→1.10，STARTUP 充分探测带宽后再退出
-- **温和 DRAIN** — `drain_gain` 0.347→0.416，减少 STARTUP 后的过度排空
+- **STARTUP 抗早退** — `full_bw_thresh` 保持 1.25 (BBRv3 原版值)，三轮审计确认 1.10 导致 STARTUP 持续过久
+- **DRAIN gain** — `drain_gain` 保持 0.347 (= 1/startup_pacing_gain，数学对称)，三轮审计确认 0.416 DRAIN 不充分
 - **快爬升** — `startup_pacing_gain` 2.77→2.885 (BBRv3e1: 2/ln(2))
-- **长 RTT 稳定** — `min_rtt_win_sec` 10→20s，跨太平洋链路 min_rtt 估值更稳
-- **丢包容忍** — `loss_thresh` 2%→15%（运行时），容忍跨太平洋正常丢包，真实拥塞时降速
+- **min_rtt 窗口** — `min_rtt_win_sec` 保持 10s (BBRv3 原版值)，三轮审计确认 20s 导致 RTT 不公平性
+- **丢包容忍** — `loss_thresh` 2%→3%，容忍跨太平洋正常丢包(1-3%)，真实拥塞(>3%)降速
 - **稳定性优化** — `pacing_gain_down`=0.85、`probe_rtt` 5s/100ms，减少下载波动和游戏延迟峰值
 - **TLS 握手优化** — tls-optimize 命令叠加 TLS sysctl（synack_retries=2/fastopen=3/slow_start_after_idle=0）+ IW10，不降速
 - **保底 pacing** — `min_pacing_rate` 防 STARTUP 阶段 pacing 过低

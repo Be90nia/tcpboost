@@ -363,14 +363,59 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 {
 	struct bbr *bbr = inet_csk_ca(sk);
 
-	/* tcpboost-4cf: 首次调用时验证关键参数范围
-	 * 防止用户通过 sysfs 写入极端值导致 PROBE_RTT 风暴 */
+	/* tcpboost-4cf + lotspeed-2: 首次调用时验证全部关键参数范围
+	 * 防止用户通过 sysfs 写入极端值导致 PROBE_RTT 风暴或性能异常
+	 * 扩展覆盖全部 13 个可调参数 */
 	if (unlikely(!atomic_read(&bbrplusv3_params_checked))) {
+		/* PROBE_RTT 参数（防风暴，最危险） */
 		if (READ_ONCE(bbr_probe_rtt_win_ms) > 0 &&
 		    READ_ONCE(bbr_probe_rtt_win_ms) < 1000)
 			WRITE_ONCE(bbr_probe_rtt_win_ms, 1000);
+		if (READ_ONCE(bbr_probe_rtt_win_ms) > 60000)
+			WRITE_ONCE(bbr_probe_rtt_win_ms, 10000);
 		if (READ_ONCE(bbr_probe_rtt_mode_ms) == 0)
 			WRITE_ONCE(bbr_probe_rtt_mode_ms, 1);
+		if (READ_ONCE(bbr_probe_rtt_mode_ms) > 1000)
+			WRITE_ONCE(bbr_probe_rtt_mode_ms, 200);
+		/* loss_thresh: [1%, 50%] */
+		if (READ_ONCE(bbr_loss_thresh) < BBR_UNIT / 100 ||
+		    READ_ONCE(bbr_loss_thresh) > BBR_UNIT / 2)
+			WRITE_ONCE(bbr_loss_thresh, BBR_UNIT * 3 / 100);
+		/* beta: [10%, 90%] */
+		if (READ_ONCE(bbr_beta) < BBR_UNIT / 10 ||
+		    READ_ONCE(bbr_beta) > BBR_UNIT * 9 / 10)
+			WRITE_ONCE(bbr_beta, BBR_UNIT * 30 / 100);
+		/* full_bw_thresh: [1.0, 1.5] */
+		if (READ_ONCE(bbr_full_bw_thresh) < BBR_UNIT ||
+		    READ_ONCE(bbr_full_bw_thresh) > BBR_UNIT * 3 / 2)
+			WRITE_ONCE(bbr_full_bw_thresh, BBR_UNIT * 5 / 4);
+		/* full_loss_cnt: [1, 20] */
+		if (READ_ONCE(bbr_full_loss_cnt) == 0 ||
+		    READ_ONCE(bbr_full_loss_cnt) > 20)
+			WRITE_ONCE(bbr_full_loss_cnt, 3);
+		/* inflight_headroom: [0%, 50%] */
+		if (READ_ONCE(bbr_inflight_headroom) > BBR_UNIT / 2)
+			WRITE_ONCE(bbr_inflight_headroom, BBR_UNIT * 12 / 100);
+		/* ecn_thresh: [10%, 100%] */
+		if (READ_ONCE(bbr_ecn_thresh) < BBR_UNIT / 10 ||
+		    READ_ONCE(bbr_ecn_thresh) > BBR_UNIT)
+			WRITE_ONCE(bbr_ecn_thresh, BBR_UNIT / 2);
+		/* min_rtt_win_sec: [1, 60] */
+		if (READ_ONCE(bbr_min_rtt_win_sec) == 0 ||
+		    READ_ONCE(bbr_min_rtt_win_sec) > 60)
+			WRITE_ONCE(bbr_min_rtt_win_sec, 10);
+		/* STARTUP 参数: [1.0, 5.0] */
+		if (READ_ONCE(bbr_startup_pacing_gain) < BBR_UNIT ||
+		    READ_ONCE(bbr_startup_pacing_gain) > BBR_UNIT * 5)
+			WRITE_ONCE(bbr_startup_pacing_gain,
+				   BBR_UNIT * 2885 / 1000 + 1);
+		if (READ_ONCE(bbr_startup_cwnd_gain) < BBR_UNIT ||
+		    READ_ONCE(bbr_startup_cwnd_gain) > BBR_UNIT * 5)
+			WRITE_ONCE(bbr_startup_cwnd_gain, BBR_UNIT * 9 / 4);
+		/* drain_gain: [0.1, 1.0] */
+		if (READ_ONCE(bbr_drain_gain) < BBR_UNIT / 10 ||
+		    READ_ONCE(bbr_drain_gain) > BBR_UNIT)
+			WRITE_ONCE(bbr_drain_gain, BBR_UNIT * 1000 / 2885);
 		atomic_set(&bbrplusv3_params_checked, 1);
 	}
 
@@ -429,6 +474,24 @@ sed -i 's/bbr_startup_pacing_gain = BBR_UNIT \* 277 \/ 100 + 1/bbr_startup_pacin
 echo "[7c/9] STARTUP 优化修正版 (drain=0.347, win=10s, thresh=1.25, pacing=2.885)"
 
 # ============================================
+# 7c-bis. tcpboost-A4: PROBE_RTT 期间冻结 lower bound 更新
+# 来源: BBR-dev 邮件列表 Dave Täht 讨论 + Oracle 评审 P0
+# 机制: bbr_adapt_lower_bounds() 入口添加 phase check
+# 原理: PROBE_RTT 期间 cwnd=4 包，单次丢包即 25% loss rate，
+#        远超 loss_thresh=3%，会错误触发 loss_lower_bounds 收紧 inflight_lo。
+#        这是统计噪声（cwnd=4 的采样偏差），不是真实拥塞信号。
+# 效果: 消除 PROBE_RTT 后 inflight_lo 无故下降的问题
+# 安全性: 不破坏 4 相位状态机，不阻止 PROBE_RTT 排空（cwnd=4 排空由核心处理）
+# ============================================
+
+sed -i '/u32 ecn_inflight_lo = ~0U;/a\
+\t/* tcpboost-A4: PROBE_RTT 冻结 lower bound 更新 */\
+\tif (bbr->mode == BBR_PROBE_RTT)\
+\t\treturn;' "$BBRPLUSV3_SRC"
+
+echo "[7c-bis/9] 已注入 A4: PROBE_RTT 期间冻结 lower bound 更新"
+
+# ============================================
 # 7d. tcpboost-wia: sed 替换验证
 # 验证所有关键 sed 修改已成功执行，防止静默 fallback 到 vanilla BBRv3
 # ============================================
@@ -452,6 +515,7 @@ verify_pattern 'bbr_probe_rtt_mode_ms = 100' "probe_rtt_mode_ms=100"
 verify_pattern 'bbrplusv3_main' "cong_control wrapper"
 verify_pattern '"bbrplusv3"' "module name"
 verify_pattern 'BBR_UNIT * 2885' "startup_pacing_gain=2.885"
+verify_pattern 'tcpboost-A4: PROBE_RTT 冻结 lower bound' "A4 PROBE_RTT phase check"
 
 if [ "$SED_ERRORS" -gt 0 ]; then
     echo "" >&2
@@ -716,21 +780,22 @@ echo "单独参数调整（BBR_UNIT = 256）:"
 echo "  cat  /sys/module/tcp_bbrplusv3/parameters/beta"
 echo "  echo 76 > /sys/module/tcp_bbrplusv3/parameters/beta   # 30%"
 echo ""
-echo "Profile 参数对比:"
+echo "Profile 参数对比 (BBR_UNIT = 256):"
 echo "                     conservative  standard  aggressive  wifi"
-echo "  pacing_gain UP:    1.25 (320)   1.375(352) 1.50 (384) 1.50(384)"
-echo "  pacing_gain DOWN:  0.91 (232)   0.85 (217) 0.75 (192) 0.90(230)"
-echo "  startup_cwnd_gain: 2.0  (512)   2.25 (576) 2.50 (640) 2.25(576)"
-echo "  startup_pacing:    2.77 (709)   2.885(739) 2.885(739) 2.885(739)"
-echo "  drain_gain:        0.35 (89)    0.38 (97)  0.42 (107) 0.42(107)"
-echo "  beta:              30% (76)     25% (64)   20% (51)   25% (64)"
-echo "  loss_thresh:       2%  (5)      3.5%(8)    5%  (12)   5%  (12)"
-echo "  full_bw_thresh:    1.25(320)    1.20(307)  1.10(281)  1.10(281)"
-echo "  probe_rtt_mode_ms: 200          100        50         100"
-echo "  probe_rtt_win_ms:  5000         3000       2500       3000"
-echo "  ecn_thresh:        50% (128)    60% (153)  70% (179)  70%(179)"
+echo "  pacing_gain UP:    1.25 (320)   1.375(352) 1.375(352) 1.50(384)"
+echo "  pacing_gain DOWN:  0.91 (232)   0.85 (217) 0.85 (217) 0.90(230)"
+echo "  startup_cwnd_gain: 2.0  (512)   2.25 (576) 2.25 (576) 2.25(576)"
+echo "  startup_pacing:    2.77 (710)   2.885(739) 2.885(739) 2.885(739)"
+echo "  drain_gain:        0.35 (89)    0.38 (97)  0.35 (89)  0.42(107)"
+echo "  beta:              30% (76)     25% (64)   30% (76)   25% (64)"
+echo "  loss_thresh:       2%  (5)      3.5%(8)    3%  (7)    5%  (12)"
+echo "  full_bw_thresh:    1.25(320)    1.20(307)  1.25(320)  1.10(281)"
+echo "  probe_rtt_mode_ms: 200          100        100        100"
+echo "  probe_rtt_win_ms:  5000         3000       5000       3000"
+echo "  ecn_thresh:        50% (128)    60% (153)  50% (128)  70% (179)"
 echo "  full_loss_cnt:     6            4          3          4"
-echo "  inflight_headroom: 15% (38)     12% (30)   10% (25)   10%(25)"
+echo "  inflight_headroom: 15% (38)     12% (30)   12% (30)   10% (25)"
+echo "  min_rtt_win_sec:   10           10         10         10"
 echo ""
 echo "TLS 握手优化:"
 echo "  使用 aggressive profile + apply_bbrplusv3_params 覆盖 + TLS sysctl"
