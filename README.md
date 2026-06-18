@@ -119,9 +119,13 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/Be90nia
 | `probe_rtt_mode_ms` | 100 | PROBE_RTT 持续时间，延迟峰值深度 |
 | `probe_rtt_win_ms` | 5000 | PROBE_RTT 触发周期，游戏延迟峰值频率 |
 | `min_pacing_rate` | 0 (关闭) | 全局 pacing 保底速率（PROBE_RTT 除外，需匹配 VPS 带宽）|
+| `full_loss_cnt` | 0 (A5禁用) | STARTUP loss 退出事件数，0=禁用。跨太背景丢包不再误退出 STARTUP |
+| `startup_max_ms` | 10000 | STARTUP 超时兜底(ms)，防止 bw plateau 检测失败时永不退出，0=禁用 |
 | `profile` | aggressive (2) | 参数预设：conservative/standard/aggressive/wifi |
 
 > **保留的激进参数**（不变）：`startup_pacing_gain=2.885`、`startup_cwnd_gain=2.25`、`pacing_gain_up=1.375`、`drain_gain=0.347`、`min_rtt_win_sec=10s` — 这些是跨太平洋加速的核心优势。
+>
+> **tcpboost-A5 新增**：`full_loss_cnt=0`（禁用 STARTUP loss 退出）+ `startup_max_ms=10000`（10s 兜底）— 消除跨太平洋背景丢包(1-3%)导致的 STARTUP 误退出，STARTUP 持续到真正 bw plateau。来源 BBRv3e2 论文，Oracle 架构审核确认纯正向。
 
 **运行时调参**（无需重编译）：
 
@@ -164,6 +168,7 @@ cat /sys/module/tcp_bbrplusv3/parameters/loss_thresh
 BBRPlusV3 = Google BBRv3 核心 + BBRPlus 激进参数 + tsunami-v3 单流优化：
 
 - **STARTUP 抗早退** — `full_bw_thresh` 保持 1.25 (BBRv3 原版值)，三轮审计确认 1.10 导致 STARTUP 持续过久
+- **STARTUP loss 退出禁用 (tcpboost-A5)** — `full_loss_cnt=0` 移除 STARTUP loss 退出条件。跨太平洋 1-3% 背景丢包会触发误退出导致吞吐不足。移除后仅靠 bw plateau 退出 + `startup_max_ms=10000` (10s) 兜底防永不退出。来源 BBRv3e2 (Mahmud et al. ICNC 2026)，Oracle 架构审核确认 `inflight_hi` 保持 `~0U` 安全（代码 line 1746 显式处理）
 - **DRAIN gain** — `drain_gain` 保持 0.347 (= 1/startup_pacing_gain，数学对称)，三轮审计确认 0.416 DRAIN 不充分
 - **快爬升** — `startup_pacing_gain` 2.77→2.885 (BBRv3e1: 2/ln(2))
 - **min_rtt 窗口** — `min_rtt_win_sec` 保持 10s (BBRv3 原版值)，三轮审计确认 20s 导致 RTT 不公平性

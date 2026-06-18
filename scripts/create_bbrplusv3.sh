@@ -133,13 +133,14 @@ echo "[5/9] 已优化 PROBE_RTT 参数 (mode=100ms, win=5000ms)"
 # bbr_ecn_thresh: 保持 50%（BBRv3原版值，响应AQM早期拥塞信号）
 # 三轮审计确认：70%架空fq_codel/cake的ECN标记，改回50%
 
-# bbr_full_loss_cnt: 6 → 3（更快响应严重丢包退出 STARTUP）
-sed -i 's/bbr_full_loss_cnt = 6;/bbr_full_loss_cnt = 3;/' "$BBRPLUSV3_SRC"
+# bbr_full_loss_cnt: 6 → 0（tcpboost-A5: 移除 STARTUP loss 退出，仅靠 bw plateau + startup_max_ms 兜底）
+# 理由：跨太平洋 1-3% 背景丢包触发误退出导致吞吐不足；BBRv3 原版 line 2380 支持 0=disabled
+sed -i 's/bbr_full_loss_cnt = 6;/bbr_full_loss_cnt = 0;/' "$BBRPLUSV3_SRC"
 
 # bbr_inflight_headroom: 15% → 12%（适度减少headroom，平衡激进利用和稳定性）
 sed -i 's/bbr_inflight_headroom = BBR_UNIT \* 15 \/ 100;/bbr_inflight_headroom = BBR_UNIT * 12 \/ 100;/' "$BBRPLUSV3_SRC"
 
-echo "[6/9] 已调整 ECN/loss 参数 (ecn=50%, full_loss_cnt=3, headroom=12%)"
+echo "[6/9] 已调整 ECN/loss 参数 (ecn=50%, full_loss_cnt=0/A5禁用, headroom=12%)"
 
 # ============================================
 # 7. 追加 module_param 声明 + 三档 Profile 系统
@@ -184,6 +185,7 @@ struct bbrplusv3_profile_params {
 	u32  full_loss_cnt;
 	u32  inflight_headroom;
 	u32  min_rtt_win_sec;
+	u32  startup_max_ms;	/* tcpboost-A5: STARTUP timeout floor */
 };
 
 static const struct bbrplusv3_profile_params
@@ -203,6 +205,7 @@ bbrplusv3_profile_table[] = {
 		.full_loss_cnt		= 6,
 		.inflight_headroom	= BBR_UNIT * 15 / 100,
 		.min_rtt_win_sec	= 10,
+		.startup_max_ms		= 0,	/* tcpboost-A5: conservative keeps loss exit */
 	},
 	[BBRPLUSV3_PROFILE_STANDARD] = {
 		.pacing_gain_up		= BBR_UNIT * 11 / 8,
@@ -219,6 +222,7 @@ bbrplusv3_profile_table[] = {
 		.full_loss_cnt		= 4,
 		.inflight_headroom	= BBR_UNIT * 12 / 100,
 		.min_rtt_win_sec	= 10,
+		.startup_max_ms		= 30000,	/* tcpboost-A5: 30s fallback */
 	},
 	[BBRPLUSV3_PROFILE_AGGRESSIVE] = {
 		.pacing_gain_up		= BBR_UNIT * 11 / 8,
@@ -232,9 +236,10 @@ bbrplusv3_profile_table[] = {
 		.probe_rtt_mode_ms	= 100,
 		.probe_rtt_win_ms	= 5000,
 		.ecn_thresh		= BBR_UNIT * 1 / 2,
-		.full_loss_cnt		= 3,
+		.full_loss_cnt		= 0,	/* tcpboost-A5: disabled */
 		.inflight_headroom	= BBR_UNIT * 12 / 100,
 		.min_rtt_win_sec	= 10,
+		.startup_max_ms		= 10000,	/* tcpboost-A5: 10s fallback */
 	},
 	[BBRPLUSV3_PROFILE_WIFI] = {
 		.pacing_gain_up		= BBR_UNIT * 3 / 2,
@@ -251,6 +256,7 @@ bbrplusv3_profile_table[] = {
 		.full_loss_cnt		= 4,
 		.inflight_headroom	= BBR_UNIT * 10 / 100,
 		.min_rtt_win_sec	= 10,
+		.startup_max_ms		= 30000,	/* tcpboost-A5: 30s fallback */
 	},
 };
 
@@ -289,6 +295,7 @@ static int bbrplusv3_profile_set(const char *val,
 	bbr_full_loss_cnt		= p->full_loss_cnt;
 	bbr_inflight_headroom		= p->inflight_headroom;
 	bbr_min_rtt_win_sec		= p->min_rtt_win_sec;
+	bbrplusv3_startup_max_ms	= p->startup_max_ms;
 
 	pr_info("BBRPlusV3: profile switched to %d (%s)\n",
 		bbrplusv3_profile,
@@ -329,6 +336,8 @@ module_param_named(full_loss_cnt, bbr_full_loss_cnt, uint, 0644);
 module_param_named(inflight_headroom, bbr_inflight_headroom, uint, 0644);
 module_param_named(min_rtt_win_sec, bbr_min_rtt_win_sec, uint, 0644);
 MODULE_PARM_DESC(min_rtt_win_sec, "Min RTT filter window in seconds (default=10, BBRv3 original)");
+module_param_named(startup_max_ms, bbrplusv3_startup_max_ms, uint, 0644);
+MODULE_PARM_DESC(startup_max_ms, "STARTUP timeout floor in ms (0=disabled, default=10000)");
 BBRPLUSV3_PARAMS_EOF
 
 echo "[7/9] 已追加 module_param + 四档 Profile 系统"
@@ -389,10 +398,9 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 		if (READ_ONCE(bbr_full_bw_thresh) < BBR_UNIT ||
 		    READ_ONCE(bbr_full_bw_thresh) > BBR_UNIT * 3 / 2)
 			WRITE_ONCE(bbr_full_bw_thresh, BBR_UNIT * 5 / 4);
-		/* full_loss_cnt: [1, 20] */
-		if (READ_ONCE(bbr_full_loss_cnt) == 0 ||
-		    READ_ONCE(bbr_full_loss_cnt) > 20)
-			WRITE_ONCE(bbr_full_loss_cnt, 3);
+		/* full_loss_cnt: [0, 20], 0=disabled (tcpboost-A5: STARTUP loss exit disabled) */
+		if (READ_ONCE(bbr_full_loss_cnt) > 20)
+			WRITE_ONCE(bbr_full_loss_cnt, 0);
 		/* inflight_headroom: [0%, 50%] */
 		if (READ_ONCE(bbr_inflight_headroom) > BBR_UNIT / 2)
 			WRITE_ONCE(bbr_inflight_headroom, BBR_UNIT * 12 / 100);
@@ -404,6 +412,9 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 		if (READ_ONCE(bbr_min_rtt_win_sec) == 0 ||
 		    READ_ONCE(bbr_min_rtt_win_sec) > 60)
 			WRITE_ONCE(bbr_min_rtt_win_sec, 10);
+		/* startup_max_ms: [0, 60000], 0=disabled (tcpboost-A5) */
+		if (READ_ONCE(bbrplusv3_startup_max_ms) > 60000)
+			WRITE_ONCE(bbrplusv3_startup_max_ms, 10000);
 		/* STARTUP 参数: [1.0, 5.0] */
 		if (READ_ONCE(bbr_startup_pacing_gain) < BBR_UNIT ||
 		    READ_ONCE(bbr_startup_pacing_gain) > BBR_UNIT * 5)
@@ -492,6 +503,42 @@ sed -i '/u32 ecn_inflight_lo = ~0U;/a\
 echo "[7c-bis/9] 已注入 A4: PROBE_RTT 期间冻结 lower bound 更新"
 
 # ============================================
+# 7c-ter. tcpboost-A5: STARTUP loss 退出禁用 + startup_max_ms 兜底
+# 来源: BBRv3e2 (Mahmud et al. ICNC 2026) + Oracle 架构审核 (bg_6d6191f2)
+# 机制: (1) full_loss_cnt=0 禁用 STARTUP loss 退出（步骤6已完成）
+#        (2) struct bbr 加 startup_start_stamp + bbr_check_drain 超时检查
+# 原理: 跨太平洋 1-3% 背景丢包触发 STARTUP loss 误退出 → 吞吐不足
+#        移除后仅靠 bw plateau 退出 + 10s 兜底防永不退出
+# 安全性: inflight_hi 保持 ~0U（代码验证安全，line 1746 显式处理）
+# 效果: STARTUP 持续到真正 bw plateau，消除背景丢包噪声导致的提前退出
+# ============================================
+
+# A5-1: struct bbr 加 startup_start_stamp 字段（在 unused_4 之前注入）
+sed -i '/u8[[:space:]]*unused_4;/i\
+	u32	startup_start_stamp;\t/* tcpboost-A5: STARTUP begin jiffies */' "$BBRPLUSV3_SRC"
+
+# A5-2: bbrplusv3_startup_max_ms 全局变量定义（在 bbr_full_loss_cnt 定义之后注入）
+sed -i '/static u32 bbr_full_loss_cnt/a\
+\
+/* tcpboost-A5: STARTUP timeout floor (ms), 0=disabled */\
+static u32 bbrplusv3_startup_max_ms = 10000;' "$BBRPLUSV3_SRC"
+
+# A5-3: bbr_reset_startup_mode() 记录 STARTUP 开始时间
+sed -i '/bbr->mode = BBR_STARTUP;/a\
+	bbr->startup_start_stamp = tcp_jiffies32;	/* tcpboost-A5 */' "$BBRPLUSV3_SRC"
+
+# A5-4: bbr_check_drain() 入口注入 STARTUP 超时检查
+# 在 STARTUP→DRAIN 转换条件之前注入超时强制退出
+sed -i '/if (bbr->mode == BBR_STARTUP && bbr_full_bw_reached(sk))/i\
+	/* tcpboost-A5: STARTUP timeout floor (default 10s, 0=disabled) */\
+	if (bbr->mode == BBR_STARTUP && READ_ONCE(bbrplusv3_startup_max_ms) &&\
+	    (s32)(tcp_jiffies32 - bbr->startup_start_stamp) >\
+	    msecs_to_jiffies(bbrplusv3_startup_max_ms))\
+		bbr->full_bw_reached = 1;' "$BBRPLUSV3_SRC"
+
+echo "[7c-ter/9] 已注入 A5: STARTUP loss 退出禁用 + startup_max_ms 兜底 (10s default)"
+
+# ============================================
 # 7d. tcpboost-wia: sed 替换验证
 # 验证所有关键 sed 修改已成功执行，防止静默 fallback 到 vanilla BBRv3
 # ============================================
@@ -516,6 +563,9 @@ verify_pattern 'bbrplusv3_main' "cong_control wrapper"
 verify_pattern '"bbrplusv3"' "module name"
 verify_pattern 'BBR_UNIT * 2885' "startup_pacing_gain=2.885"
 verify_pattern 'tcpboost-A4: PROBE_RTT 冻结 lower bound' "A4 PROBE_RTT phase check"
+verify_pattern 'bbr_full_loss_cnt = 0' "A5 full_loss_cnt=0 (STARTUP loss exit disabled)"
+verify_pattern 'bbrplusv3_startup_max_ms' "A5 startup_max_ms variable"
+verify_pattern 'tcpboost-A5' "A5 STARTUP timeout injection"
 
 if [ "$SED_ERRORS" -gt 0 ]; then
     echo "" >&2
@@ -751,7 +801,7 @@ echo "--- pacing_gain 数组（aggressive 默认值）---"
 grep -A4 'bbr_pacing_gain\[' "$BBRPLUSV3_SRC" | head -5
 echo ""
 echo "--- 关键参数（aggressive 默认值）---"
-grep -E 'bbr_startup_cwnd_gain =|bbr_drain_gain =|bbr_beta =|bbr_loss_thresh =|bbr_full_bw_thresh =|bbr_probe_rtt_mode_ms =|bbr_probe_rtt_win_ms =|bbr_ecn_thresh =|bbr_full_loss_cnt =|bbr_inflight_headroom =' "$BBRPLUSV3_SRC" | grep -v 'profile_table\|struct\|\.' | head -12
+grep -E 'bbr_startup_cwnd_gain =|bbr_drain_gain =|bbr_beta =|bbr_loss_thresh =|bbr_full_bw_thresh =|bbr_probe_rtt_mode_ms =|bbr_probe_rtt_win_ms =|bbr_ecn_thresh =|bbr_full_loss_cnt =|bbr_inflight_headroom =|bbrplusv3_startup_max_ms =' "$BBRPLUSV3_SRC" | grep -v 'profile_table\|struct\|\.' | head -13
 echo ""
 echo "--- Profile 系统 ---"
 PARAM_COUNT=$(grep -c 'module_param' "$BBRPLUSV3_SRC")
@@ -793,9 +843,10 @@ echo "  full_bw_thresh:    1.25(320)    1.20(307)  1.25(320)  1.10(281)"
 echo "  probe_rtt_mode_ms: 200          100        100        100"
 echo "  probe_rtt_win_ms:  5000         3000       5000       3000"
 echo "  ecn_thresh:        50% (128)    60% (153)  50% (128)  70% (179)"
-echo "  full_loss_cnt:     6            4          3          4"
+echo "  full_loss_cnt:     6            4          0(A5禁用) 4"
 echo "  inflight_headroom: 15% (38)     12% (30)   12% (30)   10% (25)"
 echo "  min_rtt_win_sec:   10           10         10         10"
+echo "  startup_max_ms:    0(off)       30000      10000      30000     # tcpboost-A5"
 echo ""
 echo "TLS 握手优化:"
 echo "  使用 aggressive profile + apply_bbrplusv3_params 覆盖 + TLS sysctl"
