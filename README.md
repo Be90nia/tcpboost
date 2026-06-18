@@ -121,11 +121,17 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/Be90nia
 | `min_pacing_rate` | 0 (关闭) | 全局 pacing 保底速率（PROBE_RTT 除外，需匹配 VPS 带宽）|
 | `full_loss_cnt` | 0 (A5禁用) | STARTUP loss 退出事件数，0=禁用。跨太背景丢包不再误退出 STARTUP |
 | `startup_max_ms` | 10000 | STARTUP 超时兜底(ms)，防止 bw plateau 检测失败时永不退出，0=禁用 |
+| `historical_cache_enable` | 0 (off) | 跨连接 min_rtt 缓存开关 (0=关闭, 1=开启)。aggressive/wifi profile 默认开启 |
+| `rtt_hist_ttl_sec` | 300 | RTT 缓存 TTL（秒），超过后样本重置 |
+| `rtt_hist_min_samples` | 8 | 信任缓存 min_rtt 所需最小样本数 |
+| `rtt_hist_max_entries` | 4096 | RTT 缓存最大条目数（per-daddr），防止内存膨胀 |
 | `profile` | aggressive (2) | 参数预设：conservative/standard/aggressive/wifi |
 
 > **保留的激进参数**（不变）：`startup_pacing_gain=2.885`、`startup_cwnd_gain=2.25`、`pacing_gain_up=1.375`、`drain_gain=0.347`、`min_rtt_win_sec=10s` — 这些是跨太平洋加速的核心优势。
 >
 > **tcpboost-A5 新增**：`full_loss_cnt=0`（禁用 STARTUP loss 退出）+ `startup_max_ms=10000`（10s 兜底）— 消除跨太平洋背景丢包(1-3%)导致的 STARTUP 误退出，STARTUP 持续到真正 bw plateau。来源 BBRv3e2 论文，Oracle 架构审核确认纯正向。
+>
+> **tcpboost-lotspeed-1 新增**：跨连接 min_rtt 历史缓存（per-daddr hashtable）— 解决新连接 STARTUP 早期 `tcp_min_rtt` 含排队延迟导致 BDP 估计过高的问题。机制：同 daddr 历史样本预填 BBR 滤波器。学术基础 RFC 3124 macroflow + qiuxiuya/lotspeed zeta_history_map。Oracle 审核通过（RCU 读 + spinlock 写 + 容量上限 + TTL + fast-path）。默认关闭（conservative/standard），aggressive/wifi profile 自动启用。
 
 **运行时调参**（无需重编译）：
 
@@ -133,11 +139,18 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/Be90nia
 # 查看参数
 cat /sys/module/tcp_bbrplusv3/parameters/loss_thresh
 cat /sys/module/tcp_bbrplusv3/parameters/startup_max_ms  # A5: STARTUP 兜底(ms), 0=禁用, 默认10000
+cat /sys/module/tcp_bbrplusv3/parameters/historical_cache_enable  # lotspeed-1: 跨连接缓存, 0=关, 1=开
 
 # 设置保底速率（推荐匹配 VPS 实际带宽）
 ./tcp.sh set-min-pacing-rate 100   # 100 Mbps
 ./tcp.sh set-min-pacing-rate 500   # 500 Mbps
 ./tcp.sh set-min-pacing-rate 0     # 关闭
+
+# 启用跨连接 min_rtt 缓存（aggressive profile 已默认开启，conservative/standard 需手动开启）
+echo 1 > /sys/module/tcp_bbrplusv3/parameters/historical_cache_enable
+echo 300 > /sys/module/tcp_bbrplusv3/parameters/rtt_hist_ttl_sec       # TTL 5min (默认)
+echo 8   > /sys/module/tcp_bbrplusv3/parameters/rtt_hist_min_samples   # 最少 8 样本才信任 (默认)
+echo 4096 > /sys/module/tcp_bbrplusv3/parameters/rtt_hist_max_entries  # 最大条目数 (默认)
 
 # 应用 TLS 握手优化（aggressive profile + TLS sysctl + IW10，不降速）
 ./tcp.sh tls-optimize
@@ -170,6 +183,7 @@ BBRPlusV3 = Google BBRv3 核心 + BBRPlus 激进参数 + tsunami-v3 单流优化
 
 - **STARTUP 抗早退** — `full_bw_thresh` 保持 1.25 (BBRv3 原版值)，三轮审计确认 1.10 导致 STARTUP 持续过久
 - **STARTUP loss 退出禁用 (tcpboost-A5)** — `full_loss_cnt=0` 移除 STARTUP loss 退出条件。跨太平洋 1-3% 背景丢包会触发误退出导致吞吐不足。移除后仅靠 bw plateau 退出 + `startup_max_ms=10000` (10s) 兜底防永不退出。来源 BBRv3e2 (Mahmud et al. ICNC 2026)，Oracle 架构审核确认 `inflight_hi` 保持 `~0U` 安全（代码 line 1746 显式处理）
+- **跨连接 min_rtt 种子化 (tcpboost-lotspeed-1)** — per-daddr hashtable 缓存历史 min_rtt，新连接 `bbr_init` 预填 BBR 滤波器，避免 STARTUP 早期 `tcp_min_rtt` 含排队延迟导致 BDP 估计过高。`bbr_update_min_rtt` 实时回写。RCU 读路径（lookup）+ spinlock 写路径（update）+ fast-path 跳过同秒写入 + 容量上限 4096 + TTL 5min + min_samples=8。`module_exit` 调用 `synchronize_rcu` + `hash_for_each_safe` 安全释放全部条目。学术基础 RFC 3124 macroflow + qiuxiuya/lotspeed zeta_history_map。Oracle 审核 bg_5ccfb6cf：10 问 P0/P1/P2 全部已修
 - **DRAIN gain** — `drain_gain` 保持 0.347 (= 1/startup_pacing_gain，数学对称)，三轮审计确认 0.416 DRAIN 不充分
 - **快爬升** — `startup_pacing_gain` 2.77→2.885 (BBRv3e1: 2/ln(2))
 - **min_rtt 窗口** — `min_rtt_win_sec` 保持 10s (BBRv3 原版值)，三轮审计确认 20s 导致 RTT 不公平性
@@ -213,6 +227,54 @@ T ≈ MSS × 1.22 / (RTT × √p)
 3. **3% 是平衡点**：高于噪声上限、低于拥塞下限
 
 > 参考文献：Lakshman & Madhow, "The Performance of TCP/IP for Networks with High Bandwidth-Delay Products and Random Loss", IEEE/ACM Trans. Networking, 5(5), 1997.
+
+### 跨连接 min_rtt 种子化 (tcpboost-lotspeed-1)
+
+**问题**：BBR STARTUP 阶段使用 `bbr->min_rtt_us` 计算 BDP（`inflight_hi = bw * min_rtt_us * gain`）。新连接初始 `min_rtt_us = tcp_min_rtt(tp)`，但早期样本常含排队延迟（前面连接留下的 buffer queue），导致 BDP 估计偏高，cwnd/pacing 过度激进，触发丢包和 PROBE_RTT 频繁介入。
+
+**机制**：per-daddr hashtable 缓存历史 min_rtt，新连接在 `bbr_init` 预填滤波器：
+
+```
+新连接 bbr_init()
+  └─ bbrplusv3_rtt_hist_lookup(daddr)
+       └─ 找到 cached min_rtt → 覆盖 bbr->min_rtt_us
+
+bbr_update_min_rtt() (周期性)
+  └─ bbrplusv3_rtt_hist_update(daddr, bbr->min_rtt_us)
+       └─ 更新缓存（带 EMA 平滑 + 同秒 fast-path 跳过）
+
+module_exit (卸载)
+  └─ synchronize_rcu + hash_for_each_safe + kfree
+```
+
+**数据结构**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `daddr` | `__be32` | 目的 IPv4 地址（IPv6 返回 0，no-op） |
+| `min_rtt_us` | `u32` | EMA 平滑后的 min_rtt（权重 3:1） |
+| `sample_cnt` | `u32` | 累计样本数，低于 `min_samples=8` 不被信任 |
+| `last_update_jif` | `u64` | 上次更新 jiffies，配合 TTL=300s 判定过期 |
+
+**并发安全**：
+- **读路径**（`bbrplusv3_rtt_hist_lookup`）：`rcu_read_lock` + `hash_for_each_possible_rcu`，无锁查找
+- **写路径**（`bbrplusv3_rtt_hist_update`）：先 RCU peek 同秒 fast-path 跳过（per-ACK 热路径优化），再 `spin_lock_bh` + `hash_for_each_possible` 安全更新
+- **内存序**：`WRITE_ONCE` + `smp_store_release` 写，`smp_load_acquire` 读，跨 CPU 内存屏障严格
+- **容量上限**：`atomic_t cnt` 跟踪条目数，达到 `max_entries=4096` 时 fail-open（直接跳过插入，不阻塞）
+- **TTL 过期**：超过 `ttl_sec=300`（5min）的条目在下次 update 时重置 `sample_cnt=1`，防止陈旧数据
+
+**profile 默认值**：
+
+| Profile | `historical_cache_enable` | 说明 |
+|---------|---------------------------|------|
+| conservative | 0 | 关闭（保守，不引入跨连接耦合） |
+| standard | 0 | 关闭（标准） |
+| aggressive | 1 | 启用（科学上网首选） |
+| wifi | 1 | 启用（WiFi 场景） |
+
+**安全性**：默认关闭（`historical_cache_enable=0`），用户显式开启或选择 aggressive/wifi profile 才生效。卸载模块时 `synchronize_rcu` 双屏障 + `hash_for_each_safe` 安全释放全部条目。
+
+> 学术基础：RFC 3124 macroflow（跨连接信息共享）+ [qiuxiuya/lotspeed](https://github.com/qiuxiuya/lotspeed) zeta_history_map。Oracle 架构审核 bg_5ccfb6cf：10 问全部 P0/P1/P2 已修。
 
 ### 编译架构
 
