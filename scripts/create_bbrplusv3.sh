@@ -463,9 +463,9 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 	} else if (!bbrplusv3_gc_enable && bbrplusv3_gc_base_down > 0) {
 		/* C9: gc 禁用时恢复全局 DOWN gain 到 profile 基准值
 		 * 防止 GC 最后修改的值永久残留 */
-		u32 current = READ_ONCE(bbr_pacing_gain[BBR_BW_PROBE_DOWN]);
+		u32 cur_down = READ_ONCE(bbr_pacing_gain[BBR_BW_PROBE_DOWN]);
 
-		if (current != bbrplusv3_gc_base_down)
+		if (cur_down != bbrplusv3_gc_base_down)
 			WRITE_ONCE(bbr_pacing_gain[BBR_BW_PROBE_DOWN],
 				   bbrplusv3_gc_base_down);
 	}
