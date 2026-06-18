@@ -563,6 +563,15 @@ echo "[7c-ter/9] 已注入 A5: STARTUP loss 退出禁用 + startup_max_ms 兜底
 # 效果: 新连接 STARTUP 用历史 min_rtt，cwnd/pacing 更精准
 # ============================================
 
+# A6-0: 前向声明（解决 bbr_update_min_rtt 在 bbr_init 之前调用的问题）
+# bbr_update_min_rtt 在文件中部 (line ~917)，bbr_init 在文件后部 (line ~2117)
+# A6-1 代码块注入到 bbr_init 之前 → 函数定义在使用之后 → 需要前向声明
+sed -i '/static void bbr_update_min_rtt(struct sock/i\
+/* tcpboost-lotspeed-1: forward declarations (A6-1 code block defined later) */\
+static u32 bbrplusv3_rtt_hist_lookup(__be32 daddr);\
+static void bbrplusv3_rtt_hist_update(__be32 daddr, u32 min_rtt_us);\
+static inline __be32 bbrplusv3_get_daddr(const struct sock *sk);' "$BBRPLUSV3_SRC"
+
 # A6-1: struct + 全局 + helper + lookup + update (注入到 bbr_init 之前)
 # 代码块约 90 行，使用 heredoc 写入临时文件后用 awk 注入（不适合 sed）
 cat > /tmp/lotspeed1_block1.c <<'LOTSPEED1_EOF'
@@ -609,8 +618,8 @@ static u32 bbrplusv3_rtt_hist_lookup(__be32 daddr)
 				   (__force u32)daddr) {
 		if (entry->daddr == daddr &&
 		    READ_ONCE(entry->sample_cnt) >= READ_ONCE(bbrplusv3_rtt_hist_min_samples) &&
-		    jiffies_to_secs(jiffies - smp_load_acquire(&entry->last_update_jif)) <
-		    READ_ONCE(bbrplusv3_rtt_hist_ttl_sec)) {
+	    (jiffies - smp_load_acquire(&entry->last_update_jif)) / HZ <
+	    READ_ONCE(bbrplusv3_rtt_hist_ttl_sec)) {
 			result = READ_ONCE(entry->min_rtt_us);
 			break;
 		}
@@ -634,7 +643,7 @@ static void bbrplusv3_rtt_hist_update(__be32 daddr, u32 min_rtt_us)
 	hash_for_each_possible_rcu(bbrplusv3_rtt_hist_table, entry, node,
 				   (__force u32)daddr) {
 		if (entry->daddr == daddr) {
-			if (jiffies_to_secs(now - smp_load_acquire(&entry->last_update_jif)) == 0) {
+			if ((now - smp_load_acquire(&entry->last_update_jif)) / HZ == 0) {
 				rcu_read_unlock();
 				return;
 			}
@@ -655,7 +664,7 @@ static void bbrplusv3_rtt_hist_update(__be32 daddr, u32 min_rtt_us)
 
 	if (found) {
 		/* TTL expired: reset as fresh sample */
-		if (jiffies_to_secs(now - found->last_update_jif) >= ttl_sec) {
+		if ((now - found->last_update_jif) / HZ >= ttl_sec) {
 			WRITE_ONCE(found->min_rtt_us, min_rtt_us);
 			WRITE_ONCE(found->sample_cnt, 1);
 			smp_store_release(&found->last_update_jif, now);
