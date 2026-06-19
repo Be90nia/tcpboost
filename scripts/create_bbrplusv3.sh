@@ -843,14 +843,15 @@ fi
 # 修改 ICSK_CA_PRIV_SIZE 以容纳 bbrplusv3
 # BBRv3 struct bbr 约 148 bytes（tcpboost-A5 加了 startup_start_stamp u32 4 bytes）
 # tcpboost-e6f: 兼容多种 ICSK_CA_PRIV_SIZE 定义格式（数组字面量/define/enum）
+# tcpboost-fix: 修复 BBRv3 patch 括号格式 (144) 不匹配的问题
 PRIV_FILE="include/net/inet_connection_sock.h"
 if [ -f "$PRIV_FILE" ]; then
-  # 方式1: 从 icsk_ca_priv[N / sizeof(u64)] 格式中提取 N（兼容 grep -E）
+  # 方式1: 从 icsk_ca_priv[N / sizeof(u64)] 格式中提取 N（直接数字格式）
   CURRENT_PRIV_SIZE=$(grep -oE 'icsk_ca_priv\[[0-9]+' "$PRIV_FILE" 2>/dev/null | grep -oE '[0-9]+$' | head -1 || echo "")
   
-  # 方式2: 如果方式1失败，尝试从 #define ICSK_CA_PRIV_SIZE 提取
+  # 方式2: 从 #define ICSK_CA_PRIV_SIZE (N) 或 ICSK_CA_PRIV_SIZE N 提取（支持括号格式）
   if [ -z "$CURRENT_PRIV_SIZE" ]; then
-    CURRENT_PRIV_SIZE=$(grep -oE '#define[[:space:]]+ICSK_CA_PRIV_SIZE[[:space:]]+[0-9]+' "$PRIV_FILE" 2>/dev/null | grep -oE '[0-9]+$' | head -1 || echo "")
+    CURRENT_PRIV_SIZE=$(grep -oE '#define[[:space:]]+ICSK_CA_PRIV_SIZE[[:space:]]+\(?[0-9]+' "$PRIV_FILE" 2>/dev/null | grep -oE '[0-9]+$' | head -1 || echo "")
   fi
   
   # 默认值：无法检测时假设安全
@@ -859,11 +860,24 @@ if [ -f "$PRIV_FILE" ]; then
   NEED=152
   if [ "$CURRENT_PRIV_SIZE" -gt 0 ] && [ "$CURRENT_PRIV_SIZE" -lt "$NEED" ]; then
     echo "增大 ICSK_CA_PRIV_SIZE ($CURRENT_PRIV_SIZE → $NEED)..."
-    sed -i "s/icsk_ca_priv\[$CURRENT_PRIV_SIZE \/ sizeof(u64)\]/icsk_ca_priv[$NEED \/ sizeof(u64)]/" "$PRIV_FILE"
-    # 验证修改成功
-    if ! grep -qF "icsk_ca_priv[$NEED / sizeof(u64)]" "$PRIV_FILE"; then
+    
+    # 优先方式A: 替换 #define ICSK_CA_PRIV_SIZE 行（BBRv3 patch 用宏引用 icsk_ca_priv[ICSK_CA_PRIV_SIZE / sizeof(u64)]）
+    if grep -qE "#define[[:space:]]+ICSK_CA_PRIV_SIZE[[:space:]]+\($CURRENT_PRIV_SIZE\)" "$PRIV_FILE"; then
+      sed -i "s/#define[[:space:]]\+ICSK_CA_PRIV_SIZE.*/#define ICSK_CA_PRIV_SIZE ($NEED)/" "$PRIV_FILE"
+    # 方式B: 替换 icsk_ca_priv[N / sizeof(u64)] 直接数字格式
+    elif grep -qE "icsk_ca_priv\[$CURRENT_PRIV_SIZE / sizeof" "$PRIV_FILE"; then
+      sed -i "s/icsk_ca_priv\[$CURRENT_PRIV_SIZE \/ sizeof(u64)\]/icsk_ca_priv[$NEED \/ sizeof(u64)]/" "$PRIV_FILE"
+    else
+      echo "WARNING: ICSK_CA_PRIV_SIZE 格式不兼容，无法自动修改" >&2
+    fi
+    
+    # 验证修改成功（两种格式之一）
+    if grep -qE "#define[[:space:]]+ICSK_CA_PRIV_SIZE[[:space:]]+\($NEED\)" "$PRIV_FILE" || \
+       grep -qF "icsk_ca_priv[$NEED / sizeof(u64)]" "$PRIV_FILE"; then
+      echo "ICSK_CA_PRIV_SIZE 已扩展到 $NEED ✓"
+    else
       echo "WARNING: ICSK_CA_PRIV_SIZE 修改可能未生效（格式不兼容）" >&2
-      echo "  建议：手动检查 $PRIV_FILE 中 icsk_ca_priv 的定义" >&2
+      echo "  建议：手动检查 $PRIV_FILE 中 ICSK_CA_PRIV_SIZE 的定义" >&2
     fi
   elif [ "$CURRENT_PRIV_SIZE" = "0" ]; then
     echo "WARNING: 无法自动检测 ICSK_CA_PRIV_SIZE（可能使用 enum/非标准格式）" >&2
