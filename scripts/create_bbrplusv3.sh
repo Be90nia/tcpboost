@@ -685,7 +685,7 @@ static void bbrplusv3_rtt_hist_update(__be32 daddr, u32 min_rtt_us)
 			found->min_rtt_us = min_rtt_us;
 			found->sample_cnt = 1;
 			found->last_update_jif = now;
-			hash_add_rcu(&bbrplusv3_rtt_hist_table, &found->node,
+			hash_add_rcu(bbrplusv3_rtt_hist_table, &found->node,
 				     (__force u32)daddr);
 			atomic_inc(&bbrplusv3_rtt_hist_cnt);
 		}
