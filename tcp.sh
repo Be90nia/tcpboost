@@ -586,13 +586,13 @@ EOF
 
 # BBRPlusV3 参数设置（科学上网平衡优化配置）
 # 基于 BBRv3 核心机制 + 跨太平洋链路断流根因分析:
-#   保留: STARTUP 激进探测(startup_pacing_gain=2.885, cwnd_gain=2.5)
-#   保留: PROBE_BW UP 激进(pacing_gain_up=1.5) — 跨太平洋带宽探测优势
-#   保留: min_rtt_win=20s — 长 RTT 链路 min_rtt 估值稳定
-#   调整: loss_thresh=15% — 容忍跨太平洋正常丢包(1-5%)，真实拥塞(>15%)降速
+#   保留: STARTUP 激进探测(startup_pacing_gain=2.885, cwnd_gain=2.25)
+#   保留: PROBE_BW UP(pacing_gain_up=1.375) — 跨太平洋带宽探测
+#   保留: probe_rtt_win=5s / min_rtt_win_sec=10s — 长 RTT 链路 min_rtt 估值稳定
+#   调整: loss_thresh=3.125%(8/256) — 优化覆盖aggressive默认(7)，跨太3%背景丢包零误判
 #   调整: beta=30% — BBRPlus 经典值，丢包后恢复 70%
-#   调整: pacing_gain_down=0.85 — 减少下载速率周期性波动(原 0.75)
-#   调整: probe_rtt 每5s/100ms — 减少游戏延迟峰值频率和深度(原 2.5s/50ms)
+#   调整: pacing_gain_down=0.85 — 减少下载速率周期性波动(conservative 0.91)
+#   调整: probe_rtt 每5s/100ms — 减少游戏延迟峰值(conservative 5s/200ms)
 #   测试基线 (跨太平洋链路, RTT ~161ms): vs cubic 提升 10-100x
 apply_bbrplusv3_params() {
   local param_dir="/sys/module/tcp_bbrplusv3/parameters"
@@ -616,7 +616,7 @@ apply_bbrplusv3_params() {
 
   # 2. 平衡优化覆盖（在 aggressive 基线上调整稳定性参数）
   # 注：新 aggressive profile 已包含这些值，覆盖作为双保险
-  # loss_thresh: 3% (8/256) — 匹配新aggressive默认，CF/SSH安全
+  # loss_thresh: 3.125% (8/256) — 优化覆盖aggressive默认(7=2.73%)，跨太3%背景丢包零误判
   echo 8 > "$param_dir/loss_thresh" || warn "写入 loss_thresh 失败"
   # beta: 30% (76/256) — 匹配新aggressive默认，BBRPlus 经典值
   echo 76 > "$param_dir/beta" || warn "写入 beta 失败"
@@ -1198,7 +1198,7 @@ EOF
       info "初始拥塞窗口已设为 32 (initcwnd/initrwnd)" || true
   fi
 
-  info "已应用激进方案 (bbrplusv3 15%/30% 平衡优化 + 锐速风格 TCP 栈优化)"
+  info "已应用激进方案 (bbrplusv3 3%/30% 平衡优化 + 锐速风格 TCP 栈优化)"
   echo ""
   echo -e "  ${CYAN}无感切换已启用:${NC}"
   echo "    xray / sing-box / 通用网络 → 自动使用 BBRPlusV3"
@@ -1232,7 +1232,7 @@ apply_profile_tls_optimized() {
   cat > "$SYSCTL_FILE" <<EOF
 # TCPBoost Profile: TLS 握手优化方案
 # 适用: 跨太平洋高延迟(100ms+)高丢包(1-5%)链路, xray/sing-box 代理
-# 核心: aggressive profile(2.885/2.5/1.5/0.75) + loss/beta覆盖 + TLS sysctl
+# 核心: aggressive profile(2.885/2.25/1.375/0.85) + loss/beta覆盖 + TLS sysctl
 # 生成时间: $(date)
 
 # === 拥塞控制 ===
@@ -1325,7 +1325,7 @@ EOF
 
   echo ""
   info "已应用 TLS 握手优化方案"
-  echo -e "  ${CYAN}CC 参数:${NC} aggressive profile + loss=15%/beta=30%（与激进方案一致，不降速）"
+  echo -e "  ${CYAN}CC 参数:${NC} aggressive profile + loss=3%/beta=30%（与激进方案一致，不降速）"
   echo -e "  ${CYAN}TLS sysctl:${NC} synack_retries=2, syn_retries=3, fastopen=3, slow_start_after_idle=0"
   echo -e "  ${CYAN}IW10:${NC} 初始拥塞窗口 10（TLS 证书链全覆盖）"
   echo ""
@@ -1467,7 +1467,7 @@ smart_recommend() {
     modprobe tcp_brutal 2>/dev/null && info "已加载 tcp_brutal（Hysteria2 可用）"
   fi
 
-  echo -e "  ${GREEN}→ 应用 BBRPlusV3 (15%/30%) 平衡优化配置${NC}"
+  echo -e "  ${GREEN}→ 应用 BBRPlusV3 (3%/30%) 平衡优化配置${NC}"
   echo ""
 
   # 直接应用激进方案
@@ -1520,10 +1520,10 @@ show_algorithm_status() {
       prt_win=$(cat "$param_dir/probe_rtt_win_ms" 2>/dev/null || echo "?")
       flc=$(cat "$param_dir/full_loss_cnt" 2>/dev/null || echo "?")
       smm=$(cat "$param_dir/startup_max_ms" 2>/dev/null || echo "?")
-      local lt_pct=$((lt * 100 / 256))
-      local beta_pct=$((beta * 100 / 256))
-      local mpr_mb=$((mpr * 8 / 1000000))
-      local pgd_pct=$((pgd * 100 / 256))
+      local lt_pct=$(((lt * 100 + 128) / 256))
+      local beta_pct=$(((beta * 100 + 128) / 256))
+      local mpr_mb=$(((mpr * 8 + 500000) / 1000000))
+      local pgd_pct=$(((pgd * 100 + 128) / 256))
       echo "  loss_thresh:    ${lt} (${lt_pct}%)"
       echo "  beta:           ${beta} (${beta_pct}%)"
       echo "  pacing_down:    ${pgd} (${pgd_pct}%)"
@@ -1639,7 +1639,7 @@ show_menu() {
   echo "     bbrplusv3 + 激进 sysctl + 锐速风格 TCP 栈"
   echo ""
   echo "  4) 激进方案  科学上网推荐"
-  echo "     bbrplusv3 15%/30% 平衡优化 + 锐速风格 + 可设保底速率"
+  echo "     bbrplusv3 3%/30% 平衡优化 + 锐速风格 + 可设保底速率"
   echo ""
   echo "  5) TLS优化方案  跨太平洋握手稳定性推荐"
   echo "     aggressive profile + TLS sysctl + IW10（不降速）"
