@@ -1155,11 +1155,12 @@ net.ipv4.tcp_max_tw_buckets = 10000
 net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_tw_recycle = 0
 
-# === Keepalive（稳定性修正） ===
-# 空闲 30 分钟后开始探测，总超时 30min + 9*60s = 39min（原 15min 过激进）
-net.ipv4.tcp_keepalive_time = 1800
-net.ipv4.tcp_keepalive_intvl = 60
-net.ipv4.tcp_keepalive_probes = 9
+# === Keepalive（NAT 保活修正） ===
+# 60s 开始探测，15s 间隔，4 次失败 = 总超时 60+15*4=120s
+# 远小于 NAT 表过期（5-10min），防止 SSH/代理半开连接（客户端显示连着但操作无响应）
+net.ipv4.tcp_keepalive_time = 60
+net.ipv4.tcp_keepalive_intvl = 15
+net.ipv4.tcp_keepalive_probes = 4
 
 # === Cloudflare TCP collapse（接收侧优化） ===
 net.ipv4.tcp_collapse_max_bytes = $((buf_max / 2))
@@ -1278,10 +1279,11 @@ net.ipv4.tcp_max_tw_buckets = 10000
 net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_tw_recycle = 0
 
-# === Keepalive ===
-net.ipv4.tcp_keepalive_time = 1800
-net.ipv4.tcp_keepalive_intvl = 60
-net.ipv4.tcp_keepalive_probes = 9
+# === Keepalive（NAT 保活修正） ===
+# 60s 开始探测，15s 间隔，4 次失败 = 总超时 120s（防半开连接）
+net.ipv4.tcp_keepalive_time = 60
+net.ipv4.tcp_keepalive_intvl = 15
+net.ipv4.tcp_keepalive_probes = 4
 
 # === Cloudflare TCP collapse（接收侧优化） ===
 net.ipv4.tcp_collapse_max_bytes = $((buf_max / 2))
