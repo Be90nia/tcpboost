@@ -526,9 +526,13 @@ write_bbrplusv3_service() {
   # 设计要点:
   #   - 用 ; 分隔（非 &&），单个参数失败不影响其余参数
   #   - 不写 profile：写 profile=N 会触发内核重置所有参数为 profile 默认值
+  #     但 lotspeed-1 的 historical_cache_enable 依赖 profile_set 回调
+  #     所以显式写入 historical_cache_enable=1 作为 aggressive 基线持久化
   #   - modprobe + 重试：确保 sysfs 参数目录存在
   #   - 不吞错误：失败信息输出到 systemd journal
   local params="loss_thresh=${s_loss_thresh} beta=${s_beta} pacing_gain_down=${s_pacing_gain_down} probe_rtt_mode_ms=${s_probe_rtt_mode_ms} probe_rtt_win_ms=${s_probe_rtt_win_ms}"
+  # lotspeed-1: aggressive profile 默认启用跨连接 min_rtt 缓存（持久化重启后生效）
+  params="${params} historical_cache_enable=1"
   if [ -n "$s_min_pacing_rate" ]; then
     params="${params} min_pacing_rate=${s_min_pacing_rate}"
     description="TCPBoost BBRPlusV3 Parameters (with min_pacing_rate)"
@@ -603,6 +607,13 @@ apply_bbrplusv3_params() {
   # 1. aggressive profile 作为基线（保留 STARTUP/PROBE_BW UP 激进探测优势）
   echo 2 > "$param_dir/profile" || warn "写入 profile 失败"
 
+  # 1b. lotspeed-1: aggressive profile 默认启用跨连接 min_rtt 缓存
+  # 显式写入双保险（profile_set 回调已设，但 write_bbrplusv3_service 不含 profile，
+  # 重启后需此值持久化）
+  if [ -w "$param_dir/historical_cache_enable" ]; then
+    echo 1 > "$param_dir/historical_cache_enable" || warn "写入 historical_cache_enable 失败"
+  fi
+
   # 2. 平衡优化覆盖（在 aggressive 基线上调整稳定性参数）
   # 注：新 aggressive profile 已包含这些值，覆盖作为双保险
   # loss_thresh: 3% (8/256) — 匹配新aggressive默认，CF/SSH安全
@@ -633,6 +644,7 @@ beta=76
 pacing_gain_down=217
 probe_rtt_mode_ms=100
 probe_rtt_win_ms=5000
+historical_cache_enable=1
 EOF
 
   # modules-load.d: 确保模块在 systemd service 之前加载
@@ -856,8 +868,8 @@ EOF
         sed -i "/^historical_cache_enable=/d; /^rtt_hist_ttl_sec=/d; /^rtt_hist_min_samples=/d; /^rtt_hist_max_entries=/d" "$CONF_DIR/bbrplusv3.conf"
       fi
 
-      # 恢复 service 到不含 lotspeed-1 参数的版本
-      write_bbrplusv3_service
+      # 恢复 service，显式关闭 lotspeed-1（防止默认 historical_cache_enable=1 覆盖）
+      write_bbrplusv3_service historical_cache_enable=0
 
       info "lotspeed-1 已关闭（historical_cache_enable=0）"
       echo "  缓存条目保留至 TTL 过期或模块卸载，不影响已建立连接"
