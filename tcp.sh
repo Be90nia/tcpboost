@@ -531,8 +531,10 @@ write_bbrplusv3_service() {
   #   - modprobe + 重试：确保 sysfs 参数目录存在
   #   - 不吞错误：失败信息输出到 systemd journal
   local params="loss_thresh=${s_loss_thresh} beta=${s_beta} pacing_gain_down=${s_pacing_gain_down} probe_rtt_mode_ms=${s_probe_rtt_mode_ms} probe_rtt_win_ms=${s_probe_rtt_win_ms}"
-  # lotspeed-1: aggressive profile 默认启用跨连接 min_rtt 缓存（持久化重启后生效）
-  params="${params} historical_cache_enable=1"
+  # lotspeed-1: 默认启用跨连接缓存（aggressive profile）；historical_cache_enable= 参数可覆盖
+  if [ -z "$s_hist_cache" ]; then
+    params="${params} historical_cache_enable=1"
+  fi
   if [ -n "$s_min_pacing_rate" ]; then
     params="${params} min_pacing_rate=${s_min_pacing_rate}"
     description="TCPBoost BBRPlusV3 Parameters (with min_pacing_rate)"
@@ -589,10 +591,10 @@ EOF
 #   保留: STARTUP 激进探测(startup_pacing_gain=2.885, cwnd_gain=2.25)
 #   保留: PROBE_BW UP(pacing_gain_up=1.375) — 跨太平洋带宽探测
 #   保留: probe_rtt_win=5s / min_rtt_win_sec=10s — 长 RTT 链路 min_rtt 估值稳定
-#   调整: loss_thresh=3.125%(8/256) — 优化覆盖aggressive默认(7)，跨太3%背景丢包零误判
-#   调整: beta=30% — BBRPlus 经典值，丢包后恢复 70%
-#   调整: pacing_gain_down=0.85 — 减少下载速率周期性波动(conservative 0.91)
-#   调整: probe_rtt 每5s/100ms — 减少游戏延迟峰值(conservative 5s/200ms)
+#   profile=2 (aggressive) 设定全部参数默认值
+#   覆盖: loss_thresh=3.125%(8/256) — 优化覆盖aggressive默认(7)，跨太3%背景丢包零误判
+#   beta/pacing_gain_down/probe_rtt_*_ms: 与 aggressive profile 一致，不冗余写入
+#   min_pacing_rate: 由 set_min_pacing_rate 管理，此处读 conf 恢复用户设置
 #   测试基线 (跨太平洋链路, RTT ~161ms): vs cubic 提升 10-100x
 apply_bbrplusv3_params() {
   local param_dir="/sys/module/tcp_bbrplusv3/parameters"
@@ -614,36 +616,27 @@ apply_bbrplusv3_params() {
     echo 1 > "$param_dir/historical_cache_enable" || warn "写入 historical_cache_enable 失败"
   fi
 
-  # 2. 平衡优化覆盖（在 aggressive 基线上调整稳定性参数）
-  # 注：新 aggressive profile 已包含这些值，覆盖作为双保险
-  # loss_thresh: 3.125% (8/256) — 优化覆盖aggressive默认(7=2.73%)，跨太3%背景丢包零误判
+  # 2. loss_thresh 覆盖（aggressive profile 默认 7=2.73%，需 8=3.125% 适配跨太 3% 背景丢包）
+  #    beta/pacing_gain_down/probe_rtt_*_ms 与 aggressive profile 默认一致，不冗余写入
   echo 8 > "$param_dir/loss_thresh" || warn "写入 loss_thresh 失败"
-  # beta: 30% (76/256) — 匹配新aggressive默认，BBRPlus 经典值
-  echo 76 > "$param_dir/beta" || warn "写入 beta 失败"
-  # pacing_gain_down: 0.85 (217/256) — 匹配新aggressive默认
-  echo 217 > "$param_dir/pacing_gain_down" || warn "写入 pacing_gain_down 失败"
-  # probe_rtt_mode_ms: 100 — 匹配新aggressive默认
-  echo 100 > "$param_dir/probe_rtt_mode_ms" || warn "写入 probe_rtt_mode_ms 失败"
-  # probe_rtt_win_ms: 5000 — 匹配新aggressive默认
-  echo 5000 > "$param_dir/probe_rtt_win_ms" || warn "写入 probe_rtt_win_ms 失败"
 
-  # min_pacing_rate: 默认关闭(0)，用户根据 VPS 带宽设置
-  # 用法: ./tcp.sh set-min-pacing-rate <Mbps>
-  # 1Gbps VPS 推荐: set-min-pacing-rate 500
-  # 跨太平洋高丢包链路推荐: set-min-pacing-rate 100
+  # min_pacing_rate 及配套参数(probe_rtt_win_ms/probe_rtt_mode_ms/pacing_gain_down)
+  # 由 set_min_pacing_rate 全权管理。读 conf 恢复用户已有设置，不无条件清零
   if [ -w "$param_dir/min_pacing_rate" ]; then
-    echo 0 > "$param_dir/min_pacing_rate" || warn "写入 min_pacing_rate 失败"
+    local saved_mpr=""
+    if [ -f "$CONF_DIR/bbrplusv3.conf" ]; then
+      saved_mpr=$(grep -E '^min_pacing_rate=' "$CONF_DIR/bbrplusv3.conf" 2>/dev/null | cut -d= -f2)
+    fi
+    echo "${saved_mpr:-0}" > "$param_dir/min_pacing_rate" || warn "写入 min_pacing_rate 失败"
   fi
   mkdir -p "$CONF_DIR"
-  cat > "$CONF_DIR/bbrplusv3.conf" <<'EOF'
-# BBRPlusV3 科学上网平衡优化参数
-# 新 aggressive profile 已包含这些值，conf 文件作为持久化备份
+  # 持久化：只更新 aggressive 基线字段，保留 set_min_pacing_rate 写入的自定义参数
+  local conf_file="$CONF_DIR/bbrplusv3.conf"
+  touch "$conf_file"
+  sed -i "/^profile=/d; /^loss_thresh=/d; /^historical_cache_enable=/d" "$conf_file" 2>/dev/null
+  cat >> "$conf_file" <<'EOF'
 profile=2
 loss_thresh=8
-beta=76
-pacing_gain_down=217
-probe_rtt_mode_ms=100
-probe_rtt_win_ms=5000
 historical_cache_enable=1
 EOF
 
@@ -651,7 +644,7 @@ EOF
   # 修复 Boot 竞态：service ExecStart 有 modprobe 兜底，但 modules-load.d 更可靠
   echo "tcp_bbrplusv3" > /etc/modules-load.d/tcpboost-bbrplusv3.conf
 
-  info "BBRPlusV3 参数已设置 (loss=3%, beta=30%, pacing_down=0.85, probe_rtt=5s/100ms)"
+  info "BBRPlusV3 参数已设置 (profile=aggressive, loss=3.125%, lotspeed=on)"
 }
 
 # 设置 min_pacing_rate（保底速率）+ 自动应用全套配套优化
@@ -988,11 +981,6 @@ speedtest_bandwidth() {
   fi
 }
 
-# 开机自动应用 bbrplusv3 参数
-setup_bbrplusv3_persistent() {
-  write_bbrplusv3_service
-}
-
 # 备份当前配置
 backup_configs() {
   mkdir -p "$BACKUP_DIR"
@@ -1188,7 +1176,7 @@ EOF
 
   # BBRPlusV3 最优参数（科学上网场景测试验证）
   apply_bbrplusv3_params
-  setup_bbrplusv3_persistent
+  write_bbrplusv3_service
 
   # 锐速风格：增大初始拥塞窗口（默认 10 → 32）
   local DEF_ROUTE
@@ -1313,7 +1301,7 @@ EOF
   # TLS 优化方案不降速: 使用与激进方案完全相同的 CC 参数
   # 区别仅在 sysctl 层面（TLS 握手优化）+ IW10
   apply_bbrplusv3_params
-  setup_bbrplusv3_persistent
+  write_bbrplusv3_service
 
   # IW10: 初始拥塞窗口 10 (RFC 6928, TLS 证书链约 2 MSS, IW10 足够覆盖)
   local DEF_ROUTE
@@ -1594,7 +1582,7 @@ switch_algorithm() {
   # 切换到 bbrplusv3 时自动设置最优参数（无感切换）
   if [ "$algo" = "bbrplusv3" ]; then
     apply_bbrplusv3_params
-    setup_bbrplusv3_persistent
+    write_bbrplusv3_service
   fi
 
   # 持久化

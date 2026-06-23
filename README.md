@@ -99,13 +99,14 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/Be90nia
 
 ## 拥塞控制算法
 
-| 算法 | 推荐场景 | 说明 |
-|------|---------|------|
-| **BBRPlusV3** | 科学上网首选 | BBRv3 + 激进探测 + tsunami-v3 单流优化 |
-| **BBRPlus** | 高丢包链路 | 原版 BBRPlus，丢包场景性能好 |
-| **TCP Brutal** | sing-box mux | 需 sing-mux 配合，确定性带宽 |
-| **CUBIC** | 系统默认 | 公平性好，适合多用户共享 |
-| **Reno** | 兼容性 | 经典算法 |
+| 算法 | 推荐场景 | 对应方案 | 说明 |
+|------|---------|---------|------|
+| **BBRPlusV3** | 科学上网首选 | 激进 / TLS优化 | BBRv3 + 激进探测 + tsunami-v3 单流优化 |
+| **BBRPlus** | 1Gbps VPS | 均衡 | 原版 BBRPlus，丢包场景性能好 |
+| **BBR** | 低带宽 / 最大稳定 | 保守 | Google 原版 BBR，经大规模验证 |
+| **TCP Brutal** | sing-box mux | 手动切换 | 需 sing-mux 配合，确定性带宽 |
+| **CUBIC** | 系统默认 | （恢复默认）| 公平性好，适合多用户共享 |
+| **Reno** | 兼容性 | 手动切换 | 经典算法 |
 
 ### BBRPlusV3 参数
 
@@ -167,20 +168,22 @@ echo 4096 > /sys/module/tcp_bbrplusv3/parameters/rtt_hist_max_entries  # 最大�
 
 | 方案 | 适用场景 | CC 算法 | TCP 缓冲 | 特殊优化 |
 |------|---------|---------|---------|---------|
-| 保守 | ≤100Mbps VPS | bbrplusv3 | 标准 | — |
-| 均衡 | 1Gbps VPS | bbrplusv3 | 锐速风格 | initcwnd=32 |
+| 保守 | ≤100Mbps VPS | bbr（Google 原版） | 标准 | — |
+| 均衡 | 1Gbps VPS | bbrplus | 锐速风格 | initcwnd=32 |
 | 激进 | 科学上网 | bbrplusv3 3%/30% | 锐速风格 + sysctl 调优 | initcwnd=32 + 可设 min_pacing |
 | **TLS优化** | **跨太平洋握手稳定性** | **bbrplusv3 aggressive** | **BDP 动态** | **TLS sysctl + IW10（不降速）** |
 
 ## 无感切换
 
-安装 tcpboost 内核后，所有 TCP 连接自动使用 BBRPlusV3：
+安装 tcpboost 内核后，根据选择的优化方案自动应用对应的拥塞控制算法（保守=bbr / 均衡=bbrplus / 激进·TLS=bbrplusv3）。选择激进或 TLS 方案后，所有 TCP 连接自动使用 BBRPlusV3：
 
 - **xray** — 无需改配置，自动享受加速
 - **sing-box** — 无需改配置，自动享受加速
   - 如需确定性带宽：配置 `multiplex.brutal.{enabled,up_mbps,down_mbps}`，自动切换到 TCP Brutal
 - **Hysteria2** — 基于 QUIC，使用内置拥塞控制，不依赖内核 CC
 - **通用网络** — Web、SSH、SCP 等全部受益
+
+> **算法选择建议**：科学上网（xray/sing-box）选**激进**或 **TLS优化**方案获得 BBRPlusV3 加速；低带宽 VPS 或追求最大稳定性的场景选**保守**方案（原版 BBR，经 Google 大规模验证）。
 
 ## 技术细节
 

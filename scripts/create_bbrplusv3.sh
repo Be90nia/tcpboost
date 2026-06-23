@@ -160,7 +160,7 @@ cat >> "$BBRPLUSV3_SRC" << 'BBRPLUSV3_PARAMS_EOF'
  *
  * 单独参数也可覆盖 profile 值（BBR_UNIT = 256）:
  *   echo 76 > .../beta          (76/256 = 30%)
- *   echo 13 > .../loss_thresh   (13/256 = 5%)
+ *   echo 7 > .../loss_thresh    (7/256 ≈ 3%, aggressive 默认)
  * ============================================ */
 
 /* Profile 枚举 */
@@ -1087,6 +1087,7 @@ echo "  full_loss_cnt:     6            4          0(A5禁用) 4"
 echo "  inflight_headroom: 15% (38)     12% (30)   12% (30)   10% (25)"
 echo "  min_rtt_win_sec:   10           10         10         10"
 echo "  startup_max_ms:    0(off)       30000      10000      30000     # tcpboost-A5"
+echo "  hist_cache(lotspeed): off(0)    off(0)     on(1)      on(1)     # tcpboost-lotspeed-1"
 echo ""
 echo "TLS 握手优化:"
 echo "  使用 aggressive profile + apply_bbrplusv3_params 覆盖 + TLS sysctl"
