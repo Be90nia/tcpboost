@@ -391,8 +391,7 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 	 * 扩展覆盖全部 13 个可调参数 */
 	if (unlikely(!atomic_read(&bbrplusv3_params_checked))) {
 		/* PROBE_RTT 参数（防风暴，最危险） */
-		if (READ_ONCE(bbr_probe_rtt_win_ms) > 0 &&
-		    READ_ONCE(bbr_probe_rtt_win_ms) < 1000)
+		if (READ_ONCE(bbr_probe_rtt_win_ms) < 1000)
 			WRITE_ONCE(bbr_probe_rtt_win_ms, 1000);
 		if (READ_ONCE(bbr_probe_rtt_win_ms) > 60000)
 			WRITE_ONCE(bbr_probe_rtt_win_ms, 10000);
@@ -414,7 +413,7 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 			WRITE_ONCE(bbr_full_bw_thresh, BBR_UNIT * 5 / 4);
 		/* full_loss_cnt: [0, 20], 0=disabled (tcpboost-A5: STARTUP loss exit disabled) */
 		if (READ_ONCE(bbr_full_loss_cnt) > 20)
-			WRITE_ONCE(bbr_full_loss_cnt, 0);
+			WRITE_ONCE(bbr_full_loss_cnt, 20);
 		/* inflight_headroom: [0%, 50%] */
 		if (READ_ONCE(bbr_inflight_headroom) > BBR_UNIT / 2)
 			WRITE_ONCE(bbr_inflight_headroom, BBR_UNIT * 12 / 100);
