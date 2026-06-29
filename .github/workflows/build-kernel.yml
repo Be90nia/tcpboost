@@ -302,8 +302,25 @@ jobs:
               fi
             done
           else
-            echo "tso_segs: $KERNEL_MAJOR uses new signature, CP patches already adapted"
-          fi
+            # Check if struct tcp_congestion_ops actually has .tso_segs member
+            # (XanMod patch may have failed to apply the tcp.h hunk)
+            if grep -q 'tso_segs' include/net/tcp.h 2>/dev/null && grep -q '\.tso_segs' include/net/tcp.h 2>/dev/null; then
+              echo "tso_segs: struct tcp_congestion_ops has .tso_segs member, CP patches compatible"
+            else
+              echo "tso_segs: struct tcp_congestion_ops lacks .tso_segs, removing from CP code..."
+              for src in net/ipv4/tcp_bbr1.c net/ipv4/tcp_bbrplus.c; do
+                if [ -f "$src" ]; then
+                  algo=$(basename "$src" .c | sed 's/tcp_//')
+                  func="${algo}_tso_segs"
+                  echo "  Fixing $src: removing .tso_segs assignment..."
+                  sed -i "/\\.tso_segs.*=.*${func},/d" "$src"
+                  sed -i "/^__bpf_kfunc static u32 ${func}/,/^}/d" "$src"
+                  sed -i "/^static u32 ${func}/,/^}/d" "$src"
+                  sed -i "/BTF_ID_FLAGS(func, ${func})/d" "$src"
+                  sed -i "/static u32 ${func}(/d" "$src"
+                fi
+              done
+            fi
 
           # 4. Make tcp_tso_autosize non-static for BBRPlus
           # 6.12/6.18: tcp_tso_autosize 是 static，CP BBRPlus 需要 EXPORT_SYMBOL
