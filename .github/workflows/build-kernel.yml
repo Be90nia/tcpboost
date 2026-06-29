@@ -3,10 +3,20 @@ name: Build TCPBoost Kernel
 on:
   workflow_dispatch:
     inputs:
-      kernel_version:
-        description: '内核版本 (如 6.12.73)'
+      kernel_series:
+        description: '内核系列 (6.12 / 6.18 / 7.0 / 7.1)'
         required: false
-        default: '6.12.90'
+        default: '6.12'
+        type: choice
+        options:
+          - '6.12'
+          - '6.18'
+          - '7.0'
+          - '7.1'
+      kernel_version:
+        description: '指定版本号 (留空=自动获取系列最新版, 如 6.12.94)'
+        required: false
+        default: ''
       force_build:
         description: '强制构建 (跳过版本检查)'
         required: false
@@ -14,8 +24,7 @@ on:
         default: false
 
 env:
-  KERNEL_VERSION: ${{ github.event.inputs.kernel_version || '6.12.73' }}
-  KERNEL_MAJOR: '6.12'
+  KERNEL_SERIES: ${{ github.event.inputs.kernel_series || '6.12' }}
   CCACHE_DIR: /home/runner/.ccache
 
 jobs:
@@ -24,26 +33,46 @@ jobs:
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
       latest_version: ${{ steps.check.outputs.latest_version }}
+      kernel_major: ${{ steps.check.outputs.kernel_major }}
+      kernel_url_prefix: ${{ steps.check.outputs.kernel_url_prefix }}
     steps:
       - name: Check latest kernel version
         id: check
         run: |
+          SERIES="${{ env.KERNEL_SERIES }}"
+          MANUAL_VERSION="${{ github.event.inputs.kernel_version }}"
+
+          # 从 kernel.org 获取指定系列的最新版本
+          # 将 6.12 → 6\.12\.\d+, 6.18 → 6\.18\.\d+, 7.0 → 7\.0\.\d+, 7.1 → 7\.1\.\d+
+          SERIES_REGEX=$(echo "$SERIES" | sed 's/\./\\./g')
           LATEST=$(curl -sf https://www.kernel.org/feeds/kdist.xml | \
-            grep -oP '(?<=<title>stable: )6\.12\.\d+' | head -1)
+            grep -oP "(?<=<title>stable: )${SERIES_REGEX}\.\d+" | head -1)
+
+          # 如果指定了版本号，优先使用
+          if [ -n "$MANUAL_VERSION" ]; then
+            LATEST="$MANUAL_VERSION"
+          fi
+
           if [ -z "$LATEST" ]; then
-            LATEST="${{ env.KERNEL_VERSION }}"
+            echo "ERROR: 无法获取 Linux $SERIES 最新版本号"
+            echo "请手动指定 kernel_version 参数"
+            exit 1
           fi
 
-          # Ensure version >= 6.12.90 (create_bbrplusv3.sh sed patterns
-          # are calibrated for 6.12.90+ BBRv3 source code)
-          MIN_VERSION="6.12.90"
-          if printf '%s\n' "$MIN_VERSION" "$LATEST" | sort -V | head -1 | grep -q "$MIN_VERSION"; then
-            echo "kernel.org returned $LATEST < $MIN_VERSION, using minimum"
-            LATEST="$MIN_VERSION"
-          fi
+          # 从版本号提取 MAJOR (如 6.12.94 → 6.12)
+          KERNEL_MAJOR=$(echo "$LATEST" | grep -oP '^\d+\.\d+')
+          echo "kernel_major=$KERNEL_MAJOR" >> $GITHUB_OUTPUT
 
-          echo "latest_version=$LATEST" >> $GITHUB_OUTPUT
+          # 确定 kernel.org 下载 URL 前缀 (6.x → v6.x, 7.x → v7.x)
+          URL_MAJOR=$(echo "$KERNEL_MAJOR" | cut -d. -f1)
+          KERNEL_URL_PREFIX="v${URL_MAJOR}.x"
+          echo "kernel_url_prefix=$KERNEL_URL_PREFIX" >> $GITHUB_OUTPUT
+
+          echo "内核系列: $SERIES"
           echo "最新版本: $LATEST"
+          echo "MAJOR: $KERNEL_MAJOR"
+          echo "下载前缀: $KERNEL_URL_PREFIX"
+
 
           if [ "${{ github.event.inputs.force_build }}" = "true" ]; then
             echo "should_build=true" >> $GITHUB_OUTPUT
@@ -102,41 +131,65 @@ jobs:
       - name: Download kernel source
         run: |
           VERSION="${{ needs.check-version.outputs.latest_version }}"
+          URL_PREFIX="${{ needs.check-version.outputs.kernel_url_prefix }}"
           echo "下载 Linux ${VERSION} 源码..."
-          curl -fSL "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${VERSION}.tar.xz" -o linux.tar.xz
+          echo "URL前缀: ${URL_PREFIX}"
+          curl -fSL "https://cdn.kernel.org/pub/linux/kernel/${URL_PREFIX}/linux-${VERSION}.tar.xz" -o linux.tar.xz
           tar -xf linux.tar.xz
           mv "linux-${VERSION}" linux-src
 
-      - name: Apply Xanmod BBRv3 patches (quilt)
+      - name: Apply Xanmod BBRv3 patches
         working-directory: linux-src
         run: |
-          mkdir -p patches
-          cd patches
+          KERNEL_MAJOR="${{ needs.check-version.outputs.kernel_major }}"
+          PATCH_DIR="${{ github.workspace }}/patches/${KERNEL_MAJOR}/xanmod-bbrv3"
 
-          echo "# Xanmod BBRv3 - replaces mainline BBRv1 with BBRv3" > series
-          find "${{ github.workspace }}/patches/xanmod-bbrv3" \
-            -name '*.patch' -type f | sort | while read -r f; do
-            base=$(basename "$f")
-            cp -v "$f" .
-            echo "$base" >> series
-          done
+          if [ ! -d "$PATCH_DIR" ]; then
+            echo "ERROR: Xanmod BBRv3 patch dir not found: $PATCH_DIR"
+            echo "Available series:"
+            ls -d ${{ github.workspace }}/patches/*/ 2>/dev/null || echo "  (none)"
+            exit 1
+          fi
 
-          echo ""
-          echo "=== quilt series ==="
-          cat series
-          echo ""
+          PATCH_COUNT=$(find "$PATCH_DIR" -name '*.patch' -type f | wc -l)
+          echo "Found $PATCH_COUNT patches in $PATCH_DIR"
 
-          cd ..
-          quilt push -a
+          # 6.12: 19 quilt补丁 (需要quilt push -a)
+          # 6.18+: 少量单体patch (git apply逐个应用)
+          if [ "$PATCH_COUNT" -ge 10 ]; then
+            # 6.12: 多个 quilt 补丁
+            echo "Applying quilt series ($PATCH_COUNT patches)..."
+            mkdir -p patches
+            cd patches
+            echo "# Xanmod BBRv3 - replaces mainline BBRv1 with BBRv3" > series
+            find "$PATCH_DIR" -name '*.patch' -type f | sort | while read -r f; do
+              base=$(basename "$f")
+              cp -v "$f" .
+              echo "$base" >> series
+            done
+            echo ""
+            echo "=== quilt series ==="
+            cat series
+            cd ..
+            quilt push -a
+          else
+            # 6.18+: 少量单体 patch，逐个 git apply
+            echo "Applying $PATCH_COUNT monolithic patches (git apply)..."
+            for p in $(find "$PATCH_DIR" -name '*.patch' -type f | sort); do
+              pname=$(basename "$p")
+              echo "  Applying: $pname"
+              git apply --3way "$p"
+            done
+          fi
 
           echo ""
           echo "=== Xanmod BBRv3 patches applied ==="
-
       - name: Apply CloudPassenger custom patches (patch -p1)
         working-directory: linux-src
         run: |
+          KERNEL_MAJOR="${{ needs.check-version.outputs.kernel_major }}"
           git clone --depth=1 https://github.com/CloudPassenger/Cloud-Kernel-BBRv3.git /tmp/cp-patches
-          PATCH_DIR="/tmp/cp-patches/kernel_patches/${{ env.KERNEL_MAJOR }}"
+          PATCH_DIR="/tmp/cp-patches/kernel_patches/${KERNEL_MAJOR}"
 
           if [ ! -d "$PATCH_DIR" ]; then
             echo "ERROR: CloudPassenger patch dir not found: $PATCH_DIR"
@@ -169,9 +222,13 @@ jobs:
           echo "--- New files ---"
           ls -la net/ipv4/tcp_bbr1.c net/ipv4/tcp_bbrplus.c net/ipv4/tcp_brutal.c 2>/dev/null || echo "Some files missing"
 
-      - name: Fix patch compatibility (6.12 API + conflict resolution)
+      - name: Fix patch compatibility (API + conflict resolution)
         working-directory: linux-src
         run: |
+          KERNEL_MAJOR="${{ needs.check-version.outputs.kernel_major }}"
+        working-directory: linux-src
+        run: |
+          KERNEL_MAJOR="${{ needs.check-version.outputs.kernel_major }}"
           # 1. ICSK_CA_PRIV_SIZE - must be 152 bytes for BBRv3 struct bbr + A5 startup_start_stamp
           echo "Fixing ICSK_CA_PRIV_SIZE..."
           FILE="include/net/inet_connection_sock.h"
@@ -217,37 +274,34 @@ jobs:
             fi
           done
 
-          # 3. Fix tso_segs callback for 6.12 compat
-          # In 6.12, tso_segs callback signature changed from
-          #   u32 (*)(struct sock *) -> void (*)(struct sock *, u32, u32)
-          # CloudPassenger patches use the old signature, so remove the
-          # assignment and let the kernel use default behavior.
-          for src in net/ipv4/tcp_bbr1.c net/ipv4/tcp_bbrplus.c; do
-            if [ -f "$src" ]; then
-              algo=$(basename "$src" .c | sed 's/tcp_//')
-              func="${algo}_tso_segs"
-              echo "Fixing $src: removing .tso_segs assignment (6.12 signature change)..."
+          # 3. Fix tso_segs callback signature compatibility
+          # 6.12: .min_tso_segs(sk) → removed (CP uses old signature)
+          # 6.18+: .tso_segs(sk, mss_now) → CP BBRPlus already uses new signature
+          # For 6.12 only: remove old .min_tso_segs assignments and function defs
+          if [ "$KERNEL_MAJOR" = "6.12" ]; then
+            echo "Fixing tso_segs for 6.12 (removing old .min_tso_segs)..."
+            for src in net/ipv4/tcp_bbr1.c net/ipv4/tcp_bbrplus.c; do
+              if [ -f "$src" ]; then
+                algo=$(basename "$src" .c | sed 's/tcp_//')
+                func="${algo}_tso_segs"
+                echo "  Fixing $src: removing .tso_segs assignment..."
+                sed -i "/\\.tso_segs.*=.*${func},/d" "$src"
+                sed -i "/^__bpf_kfunc static u32 ${func}/,/^}/d" "$src"
+                sed -i "/^static u32 ${func}/,/^}/d" "$src"
+                sed -i "/BTF_ID_FLAGS(func, ${func})/d" "$src"
+                sed -i "/static u32 ${func}(/d" "$src"
+              fi
+            done
+          else
+            echo "tso_segs: $KERNEL_MAJOR uses new signature, CP patches already adapted"
+          fi
 
-              # Remove .tso_segs = xxx_tso_segs from ops struct
-              sed -i "/\.tso_segs.*=.*${func},/d" "$src"
-
-              # Remove the function definition (multi-line)
-              sed -i "/^__bpf_kfunc static u32 ${func}/,/^}/d" "$src"
-              # Also handle non-BPF variant
-              sed -i "/^static u32 ${func}/,/^}/d" "$src"
-
-              # Remove BTF reference
-              sed -i "/BTF_ID_FLAGS(func, ${func})/d" "$src"
-
-              # Remove forward declaration if any
-              sed -i "/static u32 ${func}(/d" "$src"
+          # 4. Make tcp_tso_autosize non-static for BBRPlus (6.12 only)
+          if [ "$KERNEL_MAJOR" = "6.12" ]; then
+            if grep -q 'static u32 tcp_tso_autosize' net/ipv4/tcp_output.c; then
+              echo "Fixing tcp_tso_autosize: static -> non-static..."
+              sed -i 's/^static u32 tcp_tso_autosize/u32 tcp_tso_autosize/' net/ipv4/tcp_output.c
             fi
-          done
-
-          # 4. Make tcp_tso_autosize non-static for BBRPlus
-          if grep -q 'static u32 tcp_tso_autosize' net/ipv4/tcp_output.c; then
-            echo "Fixing tcp_tso_autosize: static -> non-static..."
-            sed -i 's/^static u32 tcp_tso_autosize/u32 tcp_tso_autosize/' net/ipv4/tcp_output.c
           fi
 
           echo ""

@@ -242,7 +242,7 @@ get_latest_version() {
   done
 
   if [ -z "$version" ]; then
-    version="6.12.73"
+    version="6.12.94"
     warn "无法获取最新版本，使用默认: $version"
   fi
   echo "$version"
@@ -1607,7 +1607,7 @@ show_banner() {
   ╔═══════════════════════════════════════╗
   ║       TCPBoost v1.0.0-dev            ║
   ║   Linux TCP 网络加速一键脚本          ║
-  ║   内核: 6.12 LTS (BBRv3/Plus/Brutal) ║
+  ║   内核: 6.12+ LTS (BBRv3/Plus/Brutal) ║
   ╚═══════════════════════════════════════╝
 BANNER
   echo -e "${NC}"
@@ -1617,7 +1617,7 @@ show_menu() {
   show_banner
   show_algorithm_status
 
-  echo "  1) 安装 TCPBoost 内核 (6.12 LTS)"
+  echo "  1) 安装 TCPBoost 内核"
   echo ""
   echo "  ── 网络优化方案 ──"
   echo "  2) 保守方案  ≤100Mbps 小带宽 VPS"
