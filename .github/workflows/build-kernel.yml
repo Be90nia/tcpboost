@@ -188,12 +188,23 @@ jobs:
         working-directory: linux-src
         run: |
           KERNEL_MAJOR="${{ needs.check-version.outputs.kernel_major }}"
-          git clone --depth=1 https://github.com/CloudPassenger/Cloud-Kernel-BBRv3.git /tmp/cp-patches
-          PATCH_DIR="/tmp/cp-patches/kernel_patches/${KERNEL_MAJOR}"
 
-          if [ ! -d "$PATCH_DIR" ]; then
-            echo "ERROR: CloudPassenger patch dir not found: $PATCH_DIR"
-            exit 1
+          # 优先使用本地仓库中的补丁 (支持非6.12版本的rebase补丁)
+          # 本地不存在时 fallback 到 CloudPassenger 远程仓库
+          LOCAL_PATCH_DIR="${{ github.workspace }}/kernel_patches/${KERNEL_MAJOR}"
+          if [ -d "$LOCAL_PATCH_DIR" ]; then
+            PATCH_DIR="$LOCAL_PATCH_DIR"
+            echo "Using LOCAL patches: $PATCH_DIR"
+          else
+            echo "No local patches for $KERNEL_MAJOR, cloning CloudPassenger repo..."
+            git clone --depth=1 https://github.com/CloudPassenger/Cloud-Kernel-BBRv3.git /tmp/cp-patches
+            PATCH_DIR="/tmp/cp-patches/kernel_patches/${KERNEL_MAJOR}"
+            if [ ! -d "$PATCH_DIR" ]; then
+              echo "ERROR: No patches found for $KERNEL_MAJOR (neither local nor remote)"
+              echo "Available local:"
+              ls -d ${{ github.workspace }}/kernel_patches/*/ 2>/dev/null || echo "  (none)"
+              exit 1
+            fi
           fi
 
           for patch_file in $(find "$PATCH_DIR" -name '*.patch' -type f | sort); do
@@ -226,8 +237,6 @@ jobs:
         working-directory: linux-src
         run: |
           KERNEL_MAJOR="${{ needs.check-version.outputs.kernel_major }}"
-        working-directory: linux-src
-        run: |
           KERNEL_MAJOR="${{ needs.check-version.outputs.kernel_major }}"
           # 1. ICSK_CA_PRIV_SIZE - must be 152 bytes for BBRv3 struct bbr + A5 startup_start_stamp
           echo "Fixing ICSK_CA_PRIV_SIZE..."
@@ -296,12 +305,14 @@ jobs:
             echo "tso_segs: $KERNEL_MAJOR uses new signature, CP patches already adapted"
           fi
 
-          # 4. Make tcp_tso_autosize non-static for BBRPlus (6.12 only)
-          if [ "$KERNEL_MAJOR" = "6.12" ]; then
-            if grep -q 'static u32 tcp_tso_autosize' net/ipv4/tcp_output.c; then
-              echo "Fixing tcp_tso_autosize: static -> non-static..."
-              sed -i 's/^static u32 tcp_tso_autosize/u32 tcp_tso_autosize/' net/ipv4/tcp_output.c
-            fi
+          # 4. Make tcp_tso_autosize non-static for BBRPlus
+          # 6.12/6.18: tcp_tso_autosize 是 static，CP BBRPlus 需要 EXPORT_SYMBOL
+          # 7.0+: 可能已 non-static 或签名变化，按需适配
+          if grep -q 'static u32 tcp_tso_autosize' net/ipv4/tcp_output.c; then
+            echo "Fixing tcp_tso_autosize: static -> non-static..."
+            sed -i 's/^static u32 tcp_tso_autosize/u32 tcp_tso_autosize/' net/ipv4/tcp_output.c
+          else
+            echo "tcp_tso_autosize already non-static or not found, skipping"
           fi
 
           echo ""
