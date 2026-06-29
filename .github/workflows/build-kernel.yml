@@ -289,7 +289,7 @@ jobs:
           # For 6.12 only: remove old .min_tso_segs assignments and function defs
           if [ "$KERNEL_MAJOR" = "6.12" ]; then
             echo "Fixing tso_segs for 6.12 (removing old .min_tso_segs)..."
-            for src in net/ipv4/tcp_bbr1.c net/ipv4/tcp_bbrplus.c; do
+            for src in net/ipv4/tcp_bbr1.c net/ipv4/tcp_bbrplus.c net/ipv4/tcp_bbrplusv3.c; do
               if [ -f "$src" ]; then
                 algo=$(basename "$src" .c | sed 's/tcp_//')
                 func="${algo}_tso_segs"
@@ -308,7 +308,7 @@ jobs:
               echo "tso_segs: struct tcp_congestion_ops has .tso_segs member, CP patches compatible"
             else
               echo "tso_segs: struct tcp_congestion_ops lacks .tso_segs, removing from CP code..."
-              for src in net/ipv4/tcp_bbr1.c net/ipv4/tcp_bbrplus.c; do
+              for src in net/ipv4/tcp_bbr1.c net/ipv4/tcp_bbrplus.c net/ipv4/tcp_bbrplusv3.c; do
                 if [ -f "$src" ]; then
                   algo=$(basename "$src" .c | sed 's/tcp_//')
                   func="${algo}_tso_segs"
