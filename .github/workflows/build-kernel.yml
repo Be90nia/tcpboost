@@ -61,6 +61,7 @@ jobs:
 
           # 从版本号提取 MAJOR (如 6.12.94 → 6.12)
           KERNEL_MAJOR=$(echo "$LATEST" | grep -oP '^\d+\.\d+')
+          echo "latest_version=$LATEST" >> $GITHUB_OUTPUT
           echo "kernel_major=$KERNEL_MAJOR" >> $GITHUB_OUTPUT
 
           # 确定 kernel.org 下载 URL 前缀 (6.x → v6.x, 7.x → v7.x)
@@ -236,7 +237,6 @@ jobs:
       - name: Fix patch compatibility (API + conflict resolution)
         working-directory: linux-src
         run: |
-          KERNEL_MAJOR="${{ needs.check-version.outputs.kernel_major }}"
           KERNEL_MAJOR="${{ needs.check-version.outputs.kernel_major }}"
           # 1. ICSK_CA_PRIV_SIZE - must be 152 bytes for BBRv3 struct bbr + A5 startup_start_stamp
           echo "Fixing ICSK_CA_PRIV_SIZE..."
