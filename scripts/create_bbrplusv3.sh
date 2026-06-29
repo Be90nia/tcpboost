@@ -133,13 +133,14 @@ echo "[5/9] 已优化 PROBE_RTT 参数 (mode=100ms, win=5000ms)"
 # bbr_ecn_thresh: 保持 50%（BBRv3原版值，响应AQM早期拥塞信号）
 # 三轮审计确认：70%架空fq_codel/cake的ECN标记，改回50%
 
-# bbr_full_loss_cnt: 6 → 3（更快响应严重丢包退出 STARTUP）
-sed -i 's/bbr_full_loss_cnt = 6;/bbr_full_loss_cnt = 3;/' "$BBRPLUSV3_SRC"
+# bbr_full_loss_cnt: 6 → 0（tcpboost-A5: 移除 STARTUP loss 退出，仅靠 bw plateau + startup_max_ms 兜底）
+# 理由：跨太平洋 1-3% 背景丢包触发误退出导致吞吐不足；BBRv3 原版 line 2380 支持 0=disabled
+sed -i 's/bbr_full_loss_cnt = 6;/bbr_full_loss_cnt = 0;/' "$BBRPLUSV3_SRC"
 
 # bbr_inflight_headroom: 15% → 12%（适度减少headroom，平衡激进利用和稳定性）
 sed -i 's/bbr_inflight_headroom = BBR_UNIT \* 15 \/ 100;/bbr_inflight_headroom = BBR_UNIT * 12 \/ 100;/' "$BBRPLUSV3_SRC"
 
-echo "[6/9] 已调整 ECN/loss 参数 (ecn=50%, full_loss_cnt=3, headroom=12%)"
+echo "[6/9] 已调整 ECN/loss 参数 (ecn=50%, full_loss_cnt=0/A5禁用, headroom=12%)"
 
 # ============================================
 # 7. 追加 module_param 声明 + 三档 Profile 系统
@@ -159,7 +160,7 @@ cat >> "$BBRPLUSV3_SRC" << 'BBRPLUSV3_PARAMS_EOF'
  *
  * 单独参数也可覆盖 profile 值（BBR_UNIT = 256）:
  *   echo 76 > .../beta          (76/256 = 30%)
- *   echo 13 > .../loss_thresh   (13/256 = 5%)
+ *   echo 7 > .../loss_thresh    (7/256 ≈ 3%, aggressive 默认)
  * ============================================ */
 
 /* Profile 枚举 */
@@ -184,6 +185,8 @@ struct bbrplusv3_profile_params {
 	u32  full_loss_cnt;
 	u32  inflight_headroom;
 	u32  min_rtt_win_sec;
+	u32 startup_max_ms;	/* tcpboost-A5: STARTUP timeout floor */
+	u32 historical_cache_enable;	/* tcpboost-lotspeed-1: cross-conn min_rtt cache */
 };
 
 static const struct bbrplusv3_profile_params
@@ -203,6 +206,8 @@ bbrplusv3_profile_table[] = {
 		.full_loss_cnt		= 6,
 		.inflight_headroom	= BBR_UNIT * 15 / 100,
 		.min_rtt_win_sec	= 10,
+		.startup_max_ms		= 0,	/* tcpboost-A5: conservative keeps loss exit */
+		.historical_cache_enable	= 0,	/* tcpboost-lotspeed-1: conservative off */
 	},
 	[BBRPLUSV3_PROFILE_STANDARD] = {
 		.pacing_gain_up		= BBR_UNIT * 11 / 8,
@@ -219,6 +224,8 @@ bbrplusv3_profile_table[] = {
 		.full_loss_cnt		= 4,
 		.inflight_headroom	= BBR_UNIT * 12 / 100,
 		.min_rtt_win_sec	= 10,
+		.startup_max_ms		= 30000,	/* tcpboost-A5: 30s fallback */
+		.historical_cache_enable	= 0,	/* tcpboost-lotspeed-1: standard off */
 	},
 	[BBRPLUSV3_PROFILE_AGGRESSIVE] = {
 		.pacing_gain_up		= BBR_UNIT * 11 / 8,
@@ -232,9 +239,11 @@ bbrplusv3_profile_table[] = {
 		.probe_rtt_mode_ms	= 100,
 		.probe_rtt_win_ms	= 5000,
 		.ecn_thresh		= BBR_UNIT * 1 / 2,
-		.full_loss_cnt		= 3,
+		.full_loss_cnt		= 0,	/* tcpboost-A5: disabled */
 		.inflight_headroom	= BBR_UNIT * 12 / 100,
 		.min_rtt_win_sec	= 10,
+		.startup_max_ms		= 10000,	/* tcpboost-A5: 10s fallback */
+		.historical_cache_enable	= 1,	/* tcpboost-lotspeed-1: aggressive on */
 	},
 	[BBRPLUSV3_PROFILE_WIFI] = {
 		.pacing_gain_up		= BBR_UNIT * 3 / 2,
@@ -251,6 +260,8 @@ bbrplusv3_profile_table[] = {
 		.full_loss_cnt		= 4,
 		.inflight_headroom	= BBR_UNIT * 10 / 100,
 		.min_rtt_win_sec	= 10,
+		.startup_max_ms		= 30000,	/* tcpboost-A5: 30s fallback */
+		.historical_cache_enable	= 1,	/* tcpboost-lotspeed-1: wifi on */
 	},
 };
 
@@ -289,6 +300,8 @@ static int bbrplusv3_profile_set(const char *val,
 	bbr_full_loss_cnt		= p->full_loss_cnt;
 	bbr_inflight_headroom		= p->inflight_headroom;
 	bbr_min_rtt_win_sec		= p->min_rtt_win_sec;
+	bbrplusv3_startup_max_ms	= p->startup_max_ms;
+	bbrplusv3_historical_cache_enable	= p->historical_cache_enable;
 
 	pr_info("BBRPlusV3: profile switched to %d (%s)\n",
 		bbrplusv3_profile,
@@ -329,6 +342,16 @@ module_param_named(full_loss_cnt, bbr_full_loss_cnt, uint, 0644);
 module_param_named(inflight_headroom, bbr_inflight_headroom, uint, 0644);
 module_param_named(min_rtt_win_sec, bbr_min_rtt_win_sec, uint, 0644);
 MODULE_PARM_DESC(min_rtt_win_sec, "Min RTT filter window in seconds (default=10, BBRv3 original)");
+module_param_named(startup_max_ms, bbrplusv3_startup_max_ms, uint, 0644);
+MODULE_PARM_DESC(startup_max_ms, "STARTUP timeout floor in ms (0=disabled, default=10000)");
+module_param_named(historical_cache_enable, bbrplusv3_historical_cache_enable, uint, 0644);
+MODULE_PARM_DESC(historical_cache_enable, "Cross-connection min_rtt cache (0=off, 1=on, default=0)");
+module_param_named(rtt_hist_ttl_sec, bbrplusv3_rtt_hist_ttl_sec, uint, 0644);
+MODULE_PARM_DESC(rtt_hist_ttl_sec, "RTT cache TTL in seconds (default=300)");
+module_param_named(rtt_hist_min_samples, bbrplusv3_rtt_hist_min_samples, uint, 0644);
+MODULE_PARM_DESC(rtt_hist_min_samples, "Min samples for trust (default=8)");
+module_param_named(rtt_hist_max_entries, bbrplusv3_rtt_hist_max_entries, uint, 0644);
+MODULE_PARM_DESC(rtt_hist_max_entries, "Max RTT cache entries (default=4096)");
 BBRPLUSV3_PARAMS_EOF
 
 echo "[7/9] 已追加 module_param + 四档 Profile 系统"
@@ -368,8 +391,7 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 	 * 扩展覆盖全部 13 个可调参数 */
 	if (unlikely(!atomic_read(&bbrplusv3_params_checked))) {
 		/* PROBE_RTT 参数（防风暴，最危险） */
-		if (READ_ONCE(bbr_probe_rtt_win_ms) > 0 &&
-		    READ_ONCE(bbr_probe_rtt_win_ms) < 1000)
+		if (READ_ONCE(bbr_probe_rtt_win_ms) < 1000)
 			WRITE_ONCE(bbr_probe_rtt_win_ms, 1000);
 		if (READ_ONCE(bbr_probe_rtt_win_ms) > 60000)
 			WRITE_ONCE(bbr_probe_rtt_win_ms, 10000);
@@ -389,10 +411,9 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 		if (READ_ONCE(bbr_full_bw_thresh) < BBR_UNIT ||
 		    READ_ONCE(bbr_full_bw_thresh) > BBR_UNIT * 3 / 2)
 			WRITE_ONCE(bbr_full_bw_thresh, BBR_UNIT * 5 / 4);
-		/* full_loss_cnt: [1, 20] */
-		if (READ_ONCE(bbr_full_loss_cnt) == 0 ||
-		    READ_ONCE(bbr_full_loss_cnt) > 20)
-			WRITE_ONCE(bbr_full_loss_cnt, 3);
+		/* full_loss_cnt: [0, 20], 0=disabled (tcpboost-A5: STARTUP loss exit disabled) */
+		if (READ_ONCE(bbr_full_loss_cnt) > 20)
+			WRITE_ONCE(bbr_full_loss_cnt, 20);
 		/* inflight_headroom: [0%, 50%] */
 		if (READ_ONCE(bbr_inflight_headroom) > BBR_UNIT / 2)
 			WRITE_ONCE(bbr_inflight_headroom, BBR_UNIT * 12 / 100);
@@ -404,6 +425,9 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 		if (READ_ONCE(bbr_min_rtt_win_sec) == 0 ||
 		    READ_ONCE(bbr_min_rtt_win_sec) > 60)
 			WRITE_ONCE(bbr_min_rtt_win_sec, 10);
+		/* startup_max_ms: [0, 60000], 0=disabled (tcpboost-A5) */
+		if (READ_ONCE(bbrplusv3_startup_max_ms) > 60000)
+			WRITE_ONCE(bbrplusv3_startup_max_ms, 10000);
 		/* STARTUP 参数: [1.0, 5.0] */
 		if (READ_ONCE(bbr_startup_pacing_gain) < BBR_UNIT ||
 		    READ_ONCE(bbr_startup_pacing_gain) > BBR_UNIT * 5)
@@ -492,6 +516,246 @@ sed -i '/u32 ecn_inflight_lo = ~0U;/a\
 echo "[7c-bis/9] 已注入 A4: PROBE_RTT 期间冻结 lower bound 更新"
 
 # ============================================
+# 7c-ter. tcpboost-A5: STARTUP loss 退出禁用 + startup_max_ms 兜底
+# 来源: BBRv3e2 (Mahmud et al. ICNC 2026) + Oracle 架构审核 (bg_6d6191f2)
+# 机制: (1) full_loss_cnt=0 禁用 STARTUP loss 退出（步骤6已完成）
+#        (2) struct bbr 加 startup_start_stamp + bbr_check_drain 超时检查
+# 原理: 跨太平洋 1-3% 背景丢包触发 STARTUP loss 误退出 → 吞吐不足
+#        移除后仅靠 bw plateau 退出 + 10s 兜底防永不退出
+# 安全性: inflight_hi 保持 ~0U（代码验证安全，line 1746 显式处理）
+# 效果: STARTUP 持续到真正 bw plateau，消除背景丢包噪声导致的提前退出
+# ============================================
+
+# A5-1: struct bbr 加 startup_start_stamp 字段（在 unused_4 之前注入）
+sed -i '/u8[[:space:]]*unused_4;/i\
+	u32	startup_start_stamp;\t/* tcpboost-A5: STARTUP begin jiffies */' "$BBRPLUSV3_SRC"
+
+# A5-2: bbrplusv3_startup_max_ms 全局变量定义（在 bbr_full_loss_cnt 定义之后注入）
+sed -i '/static u32 bbr_full_loss_cnt/a\
+\
+/* tcpboost-A5: STARTUP timeout floor (ms), 0=disabled */\
+static u32 bbrplusv3_startup_max_ms = 10000;' "$BBRPLUSV3_SRC"
+
+# A5-3: bbr_reset_startup_mode() 记录 STARTUP 开始时间
+sed -i '/bbr->mode = BBR_STARTUP;/a\
+	bbr->startup_start_stamp = tcp_jiffies32;	/* tcpboost-A5 */' "$BBRPLUSV3_SRC"
+
+# A5-4: bbr_check_drain() 入口注入 STARTUP 超时检查
+# 在 STARTUP→DRAIN 转换条件之前注入超时强制退出
+sed -i '/if (bbr->mode == BBR_STARTUP && bbr_full_bw_reached(sk))/i\
+	/* tcpboost-A5: STARTUP timeout floor (default 10s, 0=disabled) */\
+	if (bbr->mode == BBR_STARTUP && READ_ONCE(bbrplusv3_startup_max_ms) &&\
+	    (s32)(tcp_jiffies32 - bbr->startup_start_stamp) >\
+	    msecs_to_jiffies(bbrplusv3_startup_max_ms))\
+		bbr->full_bw_reached = 1;' "$BBRPLUSV3_SRC"
+
+echo "[7c-ter/9] 已注入 A5: STARTUP loss 退出禁用 + startup_max_ms 兜底 (10s default)"
+
+# ============================================
+# 7c-quater. tcpboost-lotspeed-1: 跨连接 min_rtt 历史缓存
+# 来源: RFC 3124 macroflow + qiuxiuya/lotspeed zeta_history_map
+# Oracle 审核: bg_5ccfb6cf (RCU/spinlock/容量/TTL 全部 P0+P1 已修)
+# 机制: per-daddr hashtable 缓存 min_rtt，新连接预填滤波器
+# 原理: 跨太平洋 STARTUP 早期 tcp_min_rtt 含排队延迟，导致 BDP 估计过高
+#        用同 daddr 历史样本预填，更接近真实 RTT
+# 安全性: 默认关闭，TTL 5min，min_samples=8，max_entries=4096，fast-path 跳过同秒
+# 效果: 新连接 STARTUP 用历史 min_rtt，cwnd/pacing 更精准
+# ============================================
+
+# A6-0: 前向声明（解决 bbr_update_min_rtt 在 bbr_init 之前调用的问题）
+# bbr_update_min_rtt 在文件中部 (line ~917)，bbr_init 在文件后部 (line ~2117)
+# A6-1 代码块注入到 bbr_init 之前 → 函数定义在使用之后 → 需要前向声明
+sed -i '/static void bbr_update_min_rtt(struct sock/i\
+/* tcpboost-lotspeed-1: forward declarations (A6-1 code block defined later) */\
+static u32 bbrplusv3_rtt_hist_lookup(__be32 daddr);\
+static void bbrplusv3_rtt_hist_update(__be32 daddr, u32 min_rtt_us);\
+static inline __be32 bbrplusv3_get_daddr(const struct sock *sk);' "$BBRPLUSV3_SRC"
+
+# A6-1: struct + 全局 + helper + lookup + update (注入到 bbr_init 之前)
+# 代码块约 90 行，使用 heredoc 写入临时文件后用 awk 注入（不适合 sed）
+cat > /tmp/lotspeed1_block1.c <<'LOTSPEED1_EOF'
+/* tcpboost-lotspeed-1: cross-connection min_rtt historical cache
+ * Academic basis: RFC 3124 macroflow + qiuxiuya/lotspeed zeta_history_map
+ * Oracle reviewed (bg_5ccfb6cf): RCU read + spinlock write + bounded entries
+ */
+struct bbrplusv3_rtt_hist {
+	struct hlist_node node;
+	__be32 daddr;
+	u32 min_rtt_us;
+	u32 sample_cnt;
+	u64 last_update_jif;
+};
+
+static DEFINE_HASHTABLE(bbrplusv3_rtt_hist_table, 10);  /* 1024 buckets */
+static DEFINE_SPINLOCK(bbrplusv3_rtt_hist_lock);
+static atomic_t bbrplusv3_rtt_hist_cnt = ATOMIC_INIT(0);
+
+static u32 bbrplusv3_historical_cache_enable = 0;  /* default off */
+static u32 bbrplusv3_rtt_hist_ttl_sec = 300;       /* 5 min TTL */
+static u32 bbrplusv3_rtt_hist_min_samples = 8;
+static u32 bbrplusv3_rtt_hist_max_entries = 4096;
+
+/* tcpboost-lotspeed-1: extract IPv4 daddr (IPv6 returns 0, no-op) */
+static inline __be32 bbrplusv3_get_daddr(const struct sock *sk)
+{
+	if (sk->sk_family == AF_INET)
+		return inet_sk(sk)->inet_daddr;
+	return 0;
+}
+
+/* tcpboost-lotspeed-1: RCU read path - lookup historical min_rtt */
+static u32 bbrplusv3_rtt_hist_lookup(__be32 daddr)
+{
+	struct bbrplusv3_rtt_hist *entry;
+	u32 result = 0;
+
+	if (!READ_ONCE(bbrplusv3_historical_cache_enable) || !daddr)
+		return 0;
+
+	rcu_read_lock();
+	hash_for_each_possible_rcu(bbrplusv3_rtt_hist_table, entry, node,
+				   (__force u32)daddr) {
+		if (entry->daddr == daddr &&
+		    READ_ONCE(entry->sample_cnt) >= READ_ONCE(bbrplusv3_rtt_hist_min_samples) &&
+	    (jiffies - smp_load_acquire(&entry->last_update_jif)) / HZ <
+	    READ_ONCE(bbrplusv3_rtt_hist_ttl_sec)) {
+			result = READ_ONCE(entry->min_rtt_us);
+			break;
+		}
+	}
+	rcu_read_unlock();
+	return result;
+}
+
+/* tcpboost-lotspeed-1: spinlock write path - update with fast-path */
+static void bbrplusv3_rtt_hist_update(__be32 daddr, u32 min_rtt_us)
+{
+	struct bbrplusv3_rtt_hist *entry, *found = NULL;
+	u64 now = jiffies;
+	u32 ttl_sec, old_rtt;
+
+	if (!READ_ONCE(bbrplusv3_historical_cache_enable) || !daddr || !min_rtt_us)
+		return;
+
+	/* fast-path: same-second sample skipped (per-ACK hot path) */
+	rcu_read_lock();
+	hash_for_each_possible_rcu(bbrplusv3_rtt_hist_table, entry, node,
+				   (__force u32)daddr) {
+		if (entry->daddr == daddr) {
+			if ((now - smp_load_acquire(&entry->last_update_jif)) / HZ == 0) {
+				rcu_read_unlock();
+				return;
+			}
+			break;
+		}
+	}
+	rcu_read_unlock();
+
+	ttl_sec = READ_ONCE(bbrplusv3_rtt_hist_ttl_sec);
+	spin_lock_bh(&bbrplusv3_rtt_hist_lock);
+	hash_for_each_possible(bbrplusv3_rtt_hist_table, entry, node,
+			       (__force u32)daddr) {
+		if (entry->daddr == daddr) {
+			found = entry;
+			break;
+		}
+	}
+
+	if (found) {
+		/* TTL expired: reset as fresh sample */
+		if ((now - found->last_update_jif) / HZ >= ttl_sec) {
+			WRITE_ONCE(found->min_rtt_us, min_rtt_us);
+			WRITE_ONCE(found->sample_cnt, 1);
+			smp_store_release(&found->last_update_jif, now);
+		} else {
+			old_rtt = READ_ONCE(found->min_rtt_us);
+			WRITE_ONCE(found->min_rtt_us, (old_rtt * 3 + min_rtt_us) / 4);
+			WRITE_ONCE(found->sample_cnt, found->sample_cnt + 1);
+			smp_store_release(&found->last_update_jif, now);
+		}
+	} else {
+		/* capacity check */
+		if ((u32)atomic_read(&bbrplusv3_rtt_hist_cnt) >=
+		    READ_ONCE(bbrplusv3_rtt_hist_max_entries))
+			goto unlock;
+		found = kzalloc(sizeof(*found), GFP_ATOMIC);
+		if (found) {
+			found->daddr = daddr;
+			found->min_rtt_us = min_rtt_us;
+			found->sample_cnt = 1;
+			found->last_update_jif = now;
+			hash_add_rcu(bbrplusv3_rtt_hist_table, &found->node,
+				     (__force u32)daddr);
+			atomic_inc(&bbrplusv3_rtt_hist_cnt);
+		}
+	}
+unlock:
+	spin_unlock_bh(&bbrplusv3_rtt_hist_lock);
+}
+
+LOTSPEED1_EOF
+
+# 注入到 bbr_init 之前（awk splicing，避免 sed 大代码块难题）
+# 注意：BBRv3 源码 bbr_init 带 __bpf_kfunc 前缀，故不用 ^ 锚定
+awk '/static void bbr_init\(struct sock \*sk\)/{
+	while ((getline line < "/tmp/lotspeed1_block1.c") > 0) print line
+	close("/tmp/lotspeed1_block1.c")
+}
+{print}' "$BBRPLUSV3_SRC" > "$BBRPLUSV3_SRC.tmp" && mv "$BBRPLUSV3_SRC.tmp" "$BBRPLUSV3_SRC"
+rm -f /tmp/lotspeed1_block1.c
+
+# A6-2: bbr_init 注入点 1 - 从历史缓存预填 min_rtt（在 tcp_min_rtt 赋值之后）
+sed -i '/bbr->min_rtt_us = tcp_min_rtt(tp);/a\
+\t/* tcpboost-lotspeed-1: pre-seed min_rtt from cross-conn cache */\
+\t{\
+\t\tu32 hist_rtt = bbrplusv3_rtt_hist_lookup(bbrplusv3_get_daddr(sk));\
+\t\tif (hist_rtt > 0 && hist_rtt >= 1000 &&\
+\t\t    (bbr->min_rtt_us == 0 || hist_rtt < bbr->min_rtt_us))\
+\t\t\tbbr->min_rtt_us = hist_rtt;\
+\t}' "$BBRPLUSV3_SRC"
+
+# A6-3: bbr_update_min_rtt 注入点 2 - 回写 min_rtt 到缓存
+# 锚点行 bbr->min_rtt_stamp = bbr->probe_rtt_min_stamp; 的下一行是 \t} (if 块闭合)
+# 用 awk N+a\ 等价逻辑：读到锚点后取下一行，若为闭合大括号则在其后注入
+awk '
+/bbr->min_rtt_stamp = bbr->probe_rtt_min_stamp;/ {
+	print
+	if ((getline next_line) > 0) {
+		print next_line
+		if (next_line ~ /^\t\t?}/) {
+			print ""
+			print "\t/* tcpboost-lotspeed-1: write back to cross-conn cache */"
+			print "\tif (bbr->min_rtt_us != ~0U)"
+			print "\t\tbbrplusv3_rtt_hist_update(bbrplusv3_get_daddr(sk), bbr->min_rtt_us);"
+		}
+	}
+	next
+}
+{print}' "$BBRPLUSV3_SRC" > "$BBRPLUSV3_SRC.tmp" && mv "$BBRPLUSV3_SRC.tmp" "$BBRPLUSV3_SRC"
+
+# A6-4: bbrplusv3_unregister 注入清理代码（在 tcp_unregister_congestion_control 之前）
+# 注意：步骤2已将 &tcp_bbr_cong_ops 重命名为 &tcp_bbrplusv3_cong_ops
+sed -i '/tcp_unregister_congestion_control(&tcp_bbrplusv3_cong_ops);/i\
+\t/* tcpboost-lotspeed-1: clean cross-conn min_rtt hashtable */\
+\t{\
+\t\tstruct bbrplusv3_rtt_hist *entry;\
+\t\tstruct hlist_node *tmp;\
+\t\tint bkt;\
+\t\t\
+\t\tsynchronize_rcu();\
+\t\tspin_lock_bh(&bbrplusv3_rtt_hist_lock);\
+\t\thash_for_each_safe(bbrplusv3_rtt_hist_table, bkt, tmp, entry, node) {\
+\t\t\thash_del_rcu(&entry->node);\
+\t\t\tkfree(entry);\
+\t\t}\
+\t\tatomic_set(&bbrplusv3_rtt_hist_cnt, 0);\
+\t\tspin_unlock_bh(&bbrplusv3_rtt_hist_lock);\
+\t\tsynchronize_rcu();\
+\t}' "$BBRPLUSV3_SRC"
+
+echo "[7c-quater/9] 已注入 lotspeed-1: 跨连接 min_rtt 历史缓存 (4 处注入)"
+
+# ============================================
 # 7d. tcpboost-wia: sed 替换验证
 # 验证所有关键 sed 修改已成功执行，防止静默 fallback 到 vanilla BBRv3
 # ============================================
@@ -516,6 +780,17 @@ verify_pattern 'bbrplusv3_main' "cong_control wrapper"
 verify_pattern '"bbrplusv3"' "module name"
 verify_pattern 'BBR_UNIT * 2885' "startup_pacing_gain=2.885"
 verify_pattern 'tcpboost-A4: PROBE_RTT 冻结 lower bound' "A4 PROBE_RTT phase check"
+verify_pattern 'bbr_full_loss_cnt = 0' "A5 full_loss_cnt=0 (STARTUP loss exit disabled)"
+verify_pattern 'bbrplusv3_startup_max_ms' "A5 startup_max_ms variable"
+verify_pattern 'tcpboost-A5' "A5 STARTUP timeout injection"
+verify_pattern 'bbrplusv3_rtt_hist_table' "lotspeed-1 hashtable"
+verify_pattern 'bbrplusv3_rtt_hist_lookup' "lotspeed-1 lookup function"
+verify_pattern 'bbrplusv3_rtt_hist_update' "lotspeed-1 update function"
+verify_pattern 'bbrplusv3_get_daddr' "lotspeed-1 daddr helper"
+verify_pattern 'tcpboost-lotspeed-1: pre-seed min_rtt' "lotspeed-1 injection point 1"
+verify_pattern 'tcpboost-lotspeed-1: write back' "lotspeed-1 injection point 2"
+verify_pattern 'tcpboost-lotspeed-1: clean cross-conn' "lotspeed-1 module_exit cleanup"
+verify_pattern 'historical_cache_enable' "lotspeed-1 module_param"
 
 if [ "$SED_ERRORS" -gt 0 ]; then
     echo "" >&2
@@ -565,29 +840,43 @@ if ! grep -q "tcp_bbrplusv3" net/ipv4/Makefile 2>/dev/null; then
 fi
 
 # 修改 ICSK_CA_PRIV_SIZE 以容纳 bbrplusv3
-# BBRv3 struct bbr 约 144 bytes，bbrplusv3 同样大小（我们没改 struct）
+# BBRv3 struct bbr 约 148 bytes（tcpboost-A5 加了 startup_start_stamp u32 4 bytes）
 # tcpboost-e6f: 兼容多种 ICSK_CA_PRIV_SIZE 定义格式（数组字面量/define/enum）
+# tcpboost-fix: 修复 BBRv3 patch 括号格式 (144) 不匹配的问题
 PRIV_FILE="include/net/inet_connection_sock.h"
 if [ -f "$PRIV_FILE" ]; then
-  # 方式1: 从 icsk_ca_priv[N / sizeof(u64)] 格式中提取 N（兼容 grep -E）
+  # 方式1: 从 icsk_ca_priv[N / sizeof(u64)] 格式中提取 N（直接数字格式）
   CURRENT_PRIV_SIZE=$(grep -oE 'icsk_ca_priv\[[0-9]+' "$PRIV_FILE" 2>/dev/null | grep -oE '[0-9]+$' | head -1 || echo "")
   
-  # 方式2: 如果方式1失败，尝试从 #define ICSK_CA_PRIV_SIZE 提取
+  # 方式2: 从 #define ICSK_CA_PRIV_SIZE (N) 或 ICSK_CA_PRIV_SIZE N 提取（支持括号格式）
   if [ -z "$CURRENT_PRIV_SIZE" ]; then
-    CURRENT_PRIV_SIZE=$(grep -oE '#define[[:space:]]+ICSK_CA_PRIV_SIZE[[:space:]]+[0-9]+' "$PRIV_FILE" 2>/dev/null | grep -oE '[0-9]+$' | head -1 || echo "")
+    CURRENT_PRIV_SIZE=$(grep -oE '#define[[:space:]]+ICSK_CA_PRIV_SIZE[[:space:]]+\(?[0-9]+' "$PRIV_FILE" 2>/dev/null | grep -oE '[0-9]+$' | head -1 || echo "")
   fi
   
   # 默认值：无法检测时假设安全
   [ -z "$CURRENT_PRIV_SIZE" ] && CURRENT_PRIV_SIZE=0
   
-  NEED=144
+  NEED=152
   if [ "$CURRENT_PRIV_SIZE" -gt 0 ] && [ "$CURRENT_PRIV_SIZE" -lt "$NEED" ]; then
     echo "增大 ICSK_CA_PRIV_SIZE ($CURRENT_PRIV_SIZE → $NEED)..."
-    sed -i "s/icsk_ca_priv\[$CURRENT_PRIV_SIZE \/ sizeof(u64)\]/icsk_ca_priv[$NEED \/ sizeof(u64)]/" "$PRIV_FILE"
-    # 验证修改成功
-    if ! grep -qF "icsk_ca_priv[$NEED / sizeof(u64)]" "$PRIV_FILE"; then
+    
+    # 优先方式A: 替换 #define ICSK_CA_PRIV_SIZE 行（BBRv3 patch 用宏引用 icsk_ca_priv[ICSK_CA_PRIV_SIZE / sizeof(u64)]）
+    if grep -qE "#define[[:space:]]+ICSK_CA_PRIV_SIZE[[:space:]]+\($CURRENT_PRIV_SIZE\)" "$PRIV_FILE"; then
+      sed -i "s/#define[[:space:]]\+ICSK_CA_PRIV_SIZE.*/#define ICSK_CA_PRIV_SIZE ($NEED)/" "$PRIV_FILE"
+    # 方式B: 替换 icsk_ca_priv[N / sizeof(u64)] 直接数字格式
+    elif grep -qE "icsk_ca_priv\[$CURRENT_PRIV_SIZE / sizeof" "$PRIV_FILE"; then
+      sed -i "s/icsk_ca_priv\[$CURRENT_PRIV_SIZE \/ sizeof(u64)\]/icsk_ca_priv[$NEED \/ sizeof(u64)]/" "$PRIV_FILE"
+    else
+      echo "WARNING: ICSK_CA_PRIV_SIZE 格式不兼容，无法自动修改" >&2
+    fi
+    
+    # 验证修改成功（两种格式之一）
+    if grep -qE "#define[[:space:]]+ICSK_CA_PRIV_SIZE[[:space:]]+\($NEED\)" "$PRIV_FILE" || \
+       grep -qF "icsk_ca_priv[$NEED / sizeof(u64)]" "$PRIV_FILE"; then
+      echo "ICSK_CA_PRIV_SIZE 已扩展到 $NEED ✓"
+    else
       echo "WARNING: ICSK_CA_PRIV_SIZE 修改可能未生效（格式不兼容）" >&2
-      echo "  建议：手动检查 $PRIV_FILE 中 icsk_ca_priv 的定义" >&2
+      echo "  建议：手动检查 $PRIV_FILE 中 ICSK_CA_PRIV_SIZE 的定义" >&2
     fi
   elif [ "$CURRENT_PRIV_SIZE" = "0" ]; then
     echo "WARNING: 无法自动检测 ICSK_CA_PRIV_SIZE（可能使用 enum/非标准格式）" >&2
@@ -751,7 +1040,7 @@ echo "--- pacing_gain 数组（aggressive 默认值）---"
 grep -A4 'bbr_pacing_gain\[' "$BBRPLUSV3_SRC" | head -5
 echo ""
 echo "--- 关键参数（aggressive 默认值）---"
-grep -E 'bbr_startup_cwnd_gain =|bbr_drain_gain =|bbr_beta =|bbr_loss_thresh =|bbr_full_bw_thresh =|bbr_probe_rtt_mode_ms =|bbr_probe_rtt_win_ms =|bbr_ecn_thresh =|bbr_full_loss_cnt =|bbr_inflight_headroom =' "$BBRPLUSV3_SRC" | grep -v 'profile_table\|struct\|\.' | head -12
+grep -E 'bbr_startup_cwnd_gain =|bbr_drain_gain =|bbr_beta =|bbr_loss_thresh =|bbr_full_bw_thresh =|bbr_probe_rtt_mode_ms =|bbr_probe_rtt_win_ms =|bbr_ecn_thresh =|bbr_full_loss_cnt =|bbr_inflight_headroom =|bbrplusv3_startup_max_ms =' "$BBRPLUSV3_SRC" | grep -v 'profile_table\|struct\|\.' | head -13
 echo ""
 echo "--- Profile 系统 ---"
 PARAM_COUNT=$(grep -c 'module_param' "$BBRPLUSV3_SRC")
@@ -793,9 +1082,11 @@ echo "  full_bw_thresh:    1.25(320)    1.20(307)  1.25(320)  1.10(281)"
 echo "  probe_rtt_mode_ms: 200          100        100        100"
 echo "  probe_rtt_win_ms:  5000         3000       5000       3000"
 echo "  ecn_thresh:        50% (128)    60% (153)  50% (128)  70% (179)"
-echo "  full_loss_cnt:     6            4          3          4"
+echo "  full_loss_cnt:     6            4          0(A5禁用) 4"
 echo "  inflight_headroom: 15% (38)     12% (30)   12% (30)   10% (25)"
 echo "  min_rtt_win_sec:   10           10         10         10"
+echo "  startup_max_ms:    0(off)       30000      10000      30000     # tcpboost-A5"
+echo "  hist_cache(lotspeed): off(0)    off(0)     on(1)      on(1)     # tcpboost-lotspeed-1"
 echo ""
 echo "TLS 握手优化:"
 echo "  使用 aggressive profile + apply_bbrplusv3_params 覆盖 + TLS sysctl"

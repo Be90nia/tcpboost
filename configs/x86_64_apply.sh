@@ -53,7 +53,7 @@ echo "正在应用 tcpboost 内核编译选项..."
 # ============================================
 # TCP 拥塞控制算法
 # ============================================
-# BBRv3 (Google BBR 最新版, Linux 6.12 内置)
+# BBRv3 (Google BBR 最新版, XanMod 补丁提供)
 ./scripts/config --enable CONFIG_TCP_CONG_BBR
 # BBRv1 (原版 BBR, 4.9+ 内置)
 ./scripts/config --enable CONFIG_TCP_CONG_BBR1
@@ -171,6 +171,25 @@ fi
 # 6. 阻止 build 阶段读证书的杂项
 ./scripts/config --disable CONFIG_SIGNED_PE_FILE_VERIFICATION
 ./scripts/config --disable CONFIG_EFI_SECRET
+
+# ============================================
+# Scheduler / EEVDF 配置 (版本自适应)
+# ============================================
+# CONFIG_SCHED_DEBUG: 调试fs接口 (debugfs/sched_features)
+./scripts/config --enable CONFIG_SCHED_DEBUG
+
+# 7.0+ x86 取消 PREEMPT_NONE/PREEMPT_VOLUNTARY, 默认 PREEMPT_LAZY
+# 6.12/6.18: 保持 PREEMPT_VOLUNTARY (默认)
+KERNEL_MAJOR=$(grep -oP '^VERSION\s*=\s*\K\d+' Makefile 2>/dev/null || echo 6)
+KERNEL_MINOR=$(grep -oP '^PATCHLEVEL\s*=\s*\K\d+' Makefile 2>/dev/null || echo 12)
+if [ "$KERNEL_MAJOR" -ge 7 ]; then
+  echo "Linux $KERNEL_MAJOR.$KERNEL_MINOR: 启用 PREEMPT_LAZY"
+  ./scripts/config --disable CONFIG_PREEMPT_NONE
+  ./scripts/config --disable CONFIG_PREEMPT_VOLUNTARY
+  ./scripts/config --enable CONFIG_PREEMPT_LAZY
+else
+  echo "Linux $KERNEL_MAJOR.$KERNEL_MINOR: 保持 PREEMPT_VOLUNTARY"
+fi
 
 # ============================================
 # 固定配置

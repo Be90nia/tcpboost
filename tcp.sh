@@ -242,7 +242,7 @@ get_latest_version() {
   done
 
   if [ -z "$version" ]; then
-    version="6.12.73"
+    version="6.12.94"
     warn "无法获取最新版本，使用默认: $version"
   fi
   echo "$version"
@@ -499,6 +499,11 @@ write_bbrplusv3_service() {
   local s_probe_rtt_mode_ms=100
   local s_probe_rtt_win_ms=5000
   local s_min_pacing_rate=""
+  # lotspeed-1 参数 (默认空=不写入，保留 profile 默认值)
+  local s_hist_cache=""
+  local s_rtt_ttl=""
+  local s_rtt_min_samples=""
+  local s_rtt_max_entries=""
   local description="TCPBoost BBRPlusV3 Parameters"
 
   # 解析覆盖参数
@@ -509,6 +514,10 @@ write_bbrplusv3_service() {
       probe_rtt_win_ms=*)  s_probe_rtt_win_ms="${override#probe_rtt_win_ms=}" ;;
       probe_rtt_mode_ms=*) s_probe_rtt_mode_ms="${override#probe_rtt_mode_ms=}" ;;
       pacing_gain_down=*)  s_pacing_gain_down="${override#pacing_gain_down=}" ;;
+      historical_cache_enable=*) s_hist_cache="${override#historical_cache_enable=}" ;;
+      rtt_hist_ttl_sec=*)        s_rtt_ttl="${override#rtt_hist_ttl_sec=}" ;;
+      rtt_hist_min_samples=*)    s_rtt_min_samples="${override#rtt_hist_min_samples=}" ;;
+      rtt_hist_max_entries=*)    s_rtt_max_entries="${override#rtt_hist_max_entries=}" ;;
       description=*)       description="${override#description=}" ;;
     esac
   done
@@ -517,12 +526,31 @@ write_bbrplusv3_service() {
   # 设计要点:
   #   - 用 ; 分隔（非 &&），单个参数失败不影响其余参数
   #   - 不写 profile：写 profile=N 会触发内核重置所有参数为 profile 默认值
+  #     但 lotspeed-1 的 historical_cache_enable 依赖 profile_set 回调
+  #     所以显式写入 historical_cache_enable=1 作为 aggressive 基线持久化
   #   - modprobe + 重试：确保 sysfs 参数目录存在
   #   - 不吞错误：失败信息输出到 systemd journal
   local params="loss_thresh=${s_loss_thresh} beta=${s_beta} pacing_gain_down=${s_pacing_gain_down} probe_rtt_mode_ms=${s_probe_rtt_mode_ms} probe_rtt_win_ms=${s_probe_rtt_win_ms}"
+  # lotspeed-1: 默认启用跨连接缓存（aggressive profile）；historical_cache_enable= 参数可覆盖
+  if [ -z "$s_hist_cache" ]; then
+    params="${params} historical_cache_enable=1"
+  fi
   if [ -n "$s_min_pacing_rate" ]; then
     params="${params} min_pacing_rate=${s_min_pacing_rate}"
     description="TCPBoost BBRPlusV3 Parameters (with min_pacing_rate)"
+  fi
+  # lotspeed-1 参数（仅在显式指定时写入，否则保留 profile 默认）
+  if [ -n "$s_hist_cache" ]; then
+    params="${params} historical_cache_enable=${s_hist_cache}"
+  fi
+  if [ -n "$s_rtt_ttl" ]; then
+    params="${params} rtt_hist_ttl_sec=${s_rtt_ttl}"
+  fi
+  if [ -n "$s_rtt_min_samples" ]; then
+    params="${params} rtt_hist_min_samples=${s_rtt_min_samples}"
+  fi
+  if [ -n "$s_rtt_max_entries" ]; then
+    params="${params} rtt_hist_max_entries=${s_rtt_max_entries}"
   fi
 
   # 生成参数写入脚本：retry modprobe → 逐个写入
@@ -560,13 +588,13 @@ EOF
 
 # BBRPlusV3 参数设置（科学上网平衡优化配置）
 # 基于 BBRv3 核心机制 + 跨太平洋链路断流根因分析:
-#   保留: STARTUP 激进探测(startup_pacing_gain=2.885, cwnd_gain=2.5)
-#   保留: PROBE_BW UP 激进(pacing_gain_up=1.5) — 跨太平洋带宽探测优势
-#   保留: min_rtt_win=20s — 长 RTT 链路 min_rtt 估值稳定
-#   调整: loss_thresh=15% — 容忍跨太平洋正常丢包(1-5%)，真实拥塞(>15%)降速
-#   调整: beta=30% — BBRPlus 经典值，丢包后恢复 70%
-#   调整: pacing_gain_down=0.85 — 减少下载速率周期性波动(原 0.75)
-#   调整: probe_rtt 每5s/100ms — 减少游戏延迟峰值频率和深度(原 2.5s/50ms)
+#   保留: STARTUP 激进探测(startup_pacing_gain=2.885, cwnd_gain=2.25)
+#   保留: PROBE_BW UP(pacing_gain_up=1.375) — 跨太平洋带宽探测
+#   保留: probe_rtt_win=5s / min_rtt_win_sec=10s — 长 RTT 链路 min_rtt 估值稳定
+#   profile=2 (aggressive) 设定全部参数默认值
+#   覆盖: loss_thresh=3.125%(8/256) — 优化覆盖aggressive默认(7)，跨太3%背景丢包零误判
+#   beta/pacing_gain_down/probe_rtt_*_ms: 与 aggressive profile 一致，不冗余写入
+#   min_pacing_rate: 由 set_min_pacing_rate 管理，此处读 conf 恢复用户设置
 #   测试基线 (跨太平洋链路, RTT ~161ms): vs cubic 提升 10-100x
 apply_bbrplusv3_params() {
   local param_dir="/sys/module/tcp_bbrplusv3/parameters"
@@ -581,43 +609,42 @@ apply_bbrplusv3_params() {
   # 1. aggressive profile 作为基线（保留 STARTUP/PROBE_BW UP 激进探测优势）
   echo 2 > "$param_dir/profile" || warn "写入 profile 失败"
 
-  # 2. 平衡优化覆盖（在 aggressive 基线上调整稳定性参数）
-  # 注：新 aggressive profile 已包含这些值，覆盖作为双保险
-  # loss_thresh: 3% (8/256) — 匹配新aggressive默认，CF/SSH安全
-  echo 8 > "$param_dir/loss_thresh" || warn "写入 loss_thresh 失败"
-  # beta: 30% (76/256) — 匹配新aggressive默认，BBRPlus 经典值
-  echo 76 > "$param_dir/beta" || warn "写入 beta 失败"
-  # pacing_gain_down: 0.85 (217/256) — 匹配新aggressive默认
-  echo 217 > "$param_dir/pacing_gain_down" || warn "写入 pacing_gain_down 失败"
-  # probe_rtt_mode_ms: 100 — 匹配新aggressive默认
-  echo 100 > "$param_dir/probe_rtt_mode_ms" || warn "写入 probe_rtt_mode_ms 失败"
-  # probe_rtt_win_ms: 5000 — 匹配新aggressive默认
-  echo 5000 > "$param_dir/probe_rtt_win_ms" || warn "写入 probe_rtt_win_ms 失败"
+  # 1b. lotspeed-1: aggressive profile 默认启用跨连接 min_rtt 缓存
+  # 显式写入双保险（profile_set 回调已设，但 write_bbrplusv3_service 不含 profile，
+  # 重启后需此值持久化）
+  if [ -w "$param_dir/historical_cache_enable" ]; then
+    echo 1 > "$param_dir/historical_cache_enable" || warn "写入 historical_cache_enable 失败"
+  fi
 
-  # min_pacing_rate: 默认关闭(0)，用户根据 VPS 带宽设置
-  # 用法: ./tcp.sh set-min-pacing-rate <Mbps>
-  # 1Gbps VPS 推荐: set-min-pacing-rate 500
-  # 跨太平洋高丢包链路推荐: set-min-pacing-rate 100
+  # 2. loss_thresh 覆盖（aggressive profile 默认 7=2.73%，需 8=3.125% 适配跨太 3% 背景丢包）
+  #    beta/pacing_gain_down/probe_rtt_*_ms 与 aggressive profile 默认一致，不冗余写入
+  echo 8 > "$param_dir/loss_thresh" || warn "写入 loss_thresh 失败"
+
+  # min_pacing_rate 及配套参数(probe_rtt_win_ms/probe_rtt_mode_ms/pacing_gain_down)
+  # 由 set_min_pacing_rate 全权管理。读 conf 恢复用户已有设置，不无条件清零
   if [ -w "$param_dir/min_pacing_rate" ]; then
-    echo 0 > "$param_dir/min_pacing_rate" || warn "写入 min_pacing_rate 失败"
+    local saved_mpr=""
+    if [ -f "$CONF_DIR/bbrplusv3.conf" ]; then
+      saved_mpr=$(grep -E '^min_pacing_rate=' "$CONF_DIR/bbrplusv3.conf" 2>/dev/null | cut -d= -f2)
+    fi
+    echo "${saved_mpr:-0}" > "$param_dir/min_pacing_rate" || warn "写入 min_pacing_rate 失败"
   fi
   mkdir -p "$CONF_DIR"
-  cat > "$CONF_DIR/bbrplusv3.conf" <<'EOF'
-# BBRPlusV3 科学上网平衡优化参数
-# 新 aggressive profile 已包含这些值，conf 文件作为持久化备份
+  # 持久化：只更新 aggressive 基线字段，保留 set_min_pacing_rate 写入的自定义参数
+  local conf_file="$CONF_DIR/bbrplusv3.conf"
+  touch "$conf_file"
+  sed -i "/^profile=/d; /^loss_thresh=/d; /^historical_cache_enable=/d" "$conf_file" 2>/dev/null
+  cat >> "$conf_file" <<'EOF'
 profile=2
 loss_thresh=8
-beta=76
-pacing_gain_down=217
-probe_rtt_mode_ms=100
-probe_rtt_win_ms=5000
+historical_cache_enable=1
 EOF
 
   # modules-load.d: 确保模块在 systemd service 之前加载
   # 修复 Boot 竞态：service ExecStart 有 modprobe 兜底，但 modules-load.d 更可靠
   echo "tcp_bbrplusv3" > /etc/modules-load.d/tcpboost-bbrplusv3.conf
 
-  info "BBRPlusV3 参数已设置 (loss=3%, beta=30%, pacing_down=0.85, probe_rtt=5s/100ms)"
+  info "BBRPlusV3 参数已设置 (profile=aggressive, loss=3.125%, lotspeed=on)"
 }
 
 # 设置 min_pacing_rate（保底速率）+ 自动应用全套配套优化
@@ -704,6 +731,152 @@ EOF
   echo ""
   echo -e "  ${GREEN}预期:${NC} 视频流不再需要刷新 | 持续大流量吞吐更稳定"
   echo -e "  ${YELLOW}恢复默认:${NC} ./tcp.sh set-min-pacing-rate 0"
+}
+
+# 设置 lotspeed-1 跨连接 min_rtt 历史缓存
+# 机制: per-daddr hashtable 缓存 min_rtt，新连接 STARTUP 预填滤波器
+# 适用: 跨太平洋高延迟链路，新连接 cold start 时 cwnd/pacing 估计更精准
+#
+# 用法:
+#   ./tcp.sh set-lotspeed                     # 查看当前状态
+#   ./tcp.sh set-lotspeed on                  # 启用（默认 TTL=300s/min=8/max=4096）
+#   ./tcp.sh set-lotspeed on 600 16 8192      # 启用 + 自定义参数
+#   ./tcp.sh set-lotspeed off                 # 关闭
+#
+# 参数范围:
+#   ttl_sec:       60-3600    (1min-1hour，默认 300=5min)
+#   min_samples:   1-100      (默认 8，越大越保守)
+#   max_entries:   256-65536  (默认 4096，内存紧张可减小)
+#
+# 场景推荐:
+#   单 VPS 科学上网:     on 300 8 1024      (目标少，小 hashtable 足够)
+#   多目标/浏览器代理:   on 300 8 8192      (目标多，增大容量)
+#   稳定长连接:          on 600 16 4096     (增大 TTL + 样本数，更保守)
+set_lotspeed() {
+  local action="${1:-status}"
+  local param_dir="/sys/module/tcp_bbrplusv3/parameters"
+
+  if [ ! -d "$param_dir" ]; then
+    modprobe tcp_bbrplusv3 2>/dev/null || true
+  fi
+  if [ ! -d "$param_dir" ]; then
+    warn "tcp_bbrplusv3 模块不可用（内核未含 BBRPlusV3？）"
+    return 1
+  fi
+
+  # 旧内核兼容：lotspeed-1 参数不存在
+  if [ ! -f "$param_dir/historical_cache_enable" ]; then
+    warn "lotspeed-1 参数不可用（需要新版 tcpboost 内核，当前内核版本过低）"
+    echo "  当前内核: $(uname -r)"
+    echo "  需要重新编译包含 lotspeed-1 的 tcpboost 内核"
+    return 1
+  fi
+
+  case "$action" in
+    status|"")
+      local hce ttl ms me
+      hce=$(cat "$param_dir/historical_cache_enable" 2>/dev/null || echo "?")
+      ttl=$(cat "$param_dir/rtt_hist_ttl_sec" 2>/dev/null || echo "?")
+      ms=$(cat "$param_dir/rtt_hist_min_samples" 2>/dev/null || echo "?")
+      me=$(cat "$param_dir/rtt_hist_max_entries" 2>/dev/null || echo "?")
+      echo ""
+      echo "  lotspeed-1 跨连接 min_rtt 历史缓存"
+      echo "  ─────────────────────────────────────"
+      if [ "$hce" = "0" ]; then
+        echo -e "  状态:           ${YELLOW}关闭${NC} (historical_cache_enable=0)"
+      elif [ "$hce" = "1" ]; then
+        echo -e "  状态:           ${GREEN}启用${NC} (historical_cache_enable=1)"
+      else
+        echo -e "  状态:           ${RED}未知${NC} (historical_cache_enable=${hce})"
+      fi
+      echo "  TTL:            ${ttl}s (条目过期时间)"
+      echo "  min_samples:    ${ms} (信任阈值)"
+      echo "  max_entries:    ${me} (hashtable 容量上限)"
+      echo "  ─────────────────────────────────────"
+      echo ""
+      echo "  调优: ./tcp.sh set-lotspeed on [ttl] [min_samples] [max_entries]"
+      ;;
+    on)
+      local ttl="${2:-300}"
+      local min_samples="${3:-8}"
+      local max_entries="${4:-4096}"
+
+      # 参数范围验证
+      if [ "$ttl" -lt 60 ] || [ "$ttl" -gt 3600 ] 2>/dev/null; then
+        error "ttl_sec 范围 60-3600，当前: $ttl"
+        return 1
+      fi
+      if [ "$min_samples" -lt 1 ] || [ "$min_samples" -gt 100 ] 2>/dev/null; then
+        error "min_samples 范围 1-100，当前: $min_samples"
+        return 1
+      fi
+      if [ "$max_entries" -lt 256 ] || [ "$max_entries" -gt 65536 ] 2>/dev/null; then
+        error "max_entries 范围 256-65536，当前: $max_entries"
+        return 1
+      fi
+
+      # 写入 sysfs（即时生效）
+      echo 1 > "$param_dir/historical_cache_enable" || { warn "写入 historical_cache_enable 失败"; return 1; }
+      echo "$ttl" > "$param_dir/rtt_hist_ttl_sec" || warn "写入 rtt_hist_ttl_sec 失败"
+      echo "$min_samples" > "$param_dir/rtt_hist_min_samples" || warn "写入 rtt_hist_min_samples 失败"
+      echo "$max_entries" > "$param_dir/rtt_hist_max_entries" || warn "写入 rtt_hist_max_entries 失败"
+
+      # 持久化到 conf 文件
+      mkdir -p "$CONF_DIR"
+      local conf_file="$CONF_DIR/bbrplusv3.conf"
+      if [ -f "$conf_file" ]; then
+        sed -i "/^historical_cache_enable=/d; /^rtt_hist_ttl_sec=/d; /^rtt_hist_min_samples=/d; /^rtt_hist_max_entries=/d" "$conf_file"
+      else
+        : > "$conf_file"
+      fi
+      cat >> "$conf_file" <<EOF
+historical_cache_enable=1
+rtt_hist_ttl_sec=$ttl
+rtt_hist_min_samples=$min_samples
+rtt_hist_max_entries=$max_entries
+EOF
+
+      # 更新 systemd service（持久化重启后生效）
+      write_bbrplusv3_service \
+        historical_cache_enable=1 \
+        rtt_hist_ttl_sec=$ttl \
+        rtt_hist_min_samples=$min_samples \
+        rtt_hist_max_entries=$max_entries \
+        description="TCPBoost BBRPlusV3 Parameters (with lotspeed-1)"
+
+      echo ""
+      info "lotspeed-1 已启用"
+      echo -e "  ${CYAN}TTL:${NC}            ${ttl}s (条目过期时间)"
+      echo -e "  ${CYAN}min_samples:${NC}    ${min_samples} (信任阈值)"
+      echo -e "  ${CYAN}max_entries:${NC}    ${max_entries} (hashtable 容量)"
+      echo ""
+      echo -e "  ${GREEN}效果:${NC} 新连接 STARTUP 用同 daddr 历史 min_rtt 预填滤波器"
+      echo -e "  ${YELLOW}关闭:${NC} ./tcp.sh set-lotspeed off"
+      ;;
+    off)
+      echo 0 > "$param_dir/historical_cache_enable" || { warn "写入 historical_cache_enable 失败"; return 1; }
+
+      # 清理 conf 文件中的 lotspeed-1 参数
+      if [ -f "$CONF_DIR/bbrplusv3.conf" ]; then
+        sed -i "/^historical_cache_enable=/d; /^rtt_hist_ttl_sec=/d; /^rtt_hist_min_samples=/d; /^rtt_hist_max_entries=/d" "$CONF_DIR/bbrplusv3.conf"
+      fi
+
+      # 恢复 service，显式关闭 lotspeed-1（防止默认 historical_cache_enable=1 覆盖）
+      write_bbrplusv3_service historical_cache_enable=0
+
+      info "lotspeed-1 已关闭（historical_cache_enable=0）"
+      echo "  缓存条目保留至 TTL 过期或模块卸载，不影响已建立连接"
+      ;;
+    *)
+      error "用法: $0 set-lotspeed [on|off|status] [ttl_sec] [min_samples] [max_entries]"
+      echo "  示例:"
+      echo "    ./tcp.sh set-lotspeed                  # 查看状态"
+      echo "    ./tcp.sh set-lotspeed on               # 启用（默认参数）"
+      echo "    ./tcp.sh set-lotspeed on 600 16 8192   # 启用 + 自定义"
+      echo "    ./tcp.sh set-lotspeed off              # 关闭"
+      return 1
+      ;;
+  esac
 }
 
 # 测试 VPS 真实带宽并自动设置 min_pacing_rate
@@ -806,11 +979,6 @@ speedtest_bandwidth() {
     warn "tcp_bbrplusv3 模块不可用，仅显示测试结果"
     echo "  手动设置: ./tcp.sh set-min-pacing-rate ${recommended}"
   fi
-}
-
-# 开机自动应用 bbrplusv3 参数
-setup_bbrplusv3_persistent() {
-  write_bbrplusv3_service
 }
 
 # 备份当前配置
@@ -975,11 +1143,12 @@ net.ipv4.tcp_max_tw_buckets = 10000
 net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_tw_recycle = 0
 
-# === Keepalive（稳定性修正） ===
-# 空闲 30 分钟后开始探测，总超时 30min + 9*60s = 39min（原 15min 过激进）
-net.ipv4.tcp_keepalive_time = 1800
-net.ipv4.tcp_keepalive_intvl = 60
-net.ipv4.tcp_keepalive_probes = 9
+# === Keepalive（NAT 保活修正） ===
+# 60s 开始探测，15s 间隔，4 次失败 = 总超时 60+15*4=120s
+# 远小于 NAT 表过期（5-10min），防止 SSH/代理半开连接（客户端显示连着但操作无响应）
+net.ipv4.tcp_keepalive_time = 60
+net.ipv4.tcp_keepalive_intvl = 15
+net.ipv4.tcp_keepalive_probes = 4
 
 # === Cloudflare TCP collapse（接收侧优化） ===
 net.ipv4.tcp_collapse_max_bytes = $((buf_max / 2))
@@ -1007,7 +1176,7 @@ EOF
 
   # BBRPlusV3 最优参数（科学上网场景测试验证）
   apply_bbrplusv3_params
-  setup_bbrplusv3_persistent
+  write_bbrplusv3_service
 
   # 锐速风格：增大初始拥塞窗口（默认 10 → 32）
   local DEF_ROUTE
@@ -1017,7 +1186,7 @@ EOF
       info "初始拥塞窗口已设为 32 (initcwnd/initrwnd)" || true
   fi
 
-  info "已应用激进方案 (bbrplusv3 15%/30% 平衡优化 + 锐速风格 TCP 栈优化)"
+  info "已应用激进方案 (bbrplusv3 3%/30% 平衡优化 + 锐速风格 TCP 栈优化)"
   echo ""
   echo -e "  ${CYAN}无感切换已启用:${NC}"
   echo "    xray / sing-box / 通用网络 → 自动使用 BBRPlusV3"
@@ -1051,7 +1220,7 @@ apply_profile_tls_optimized() {
   cat > "$SYSCTL_FILE" <<EOF
 # TCPBoost Profile: TLS 握手优化方案
 # 适用: 跨太平洋高延迟(100ms+)高丢包(1-5%)链路, xray/sing-box 代理
-# 核心: aggressive profile(2.885/2.5/1.5/0.75) + loss/beta覆盖 + TLS sysctl
+# 核心: aggressive profile(2.885/2.25/1.375/0.85) + loss/beta覆盖 + TLS sysctl
 # 生成时间: $(date)
 
 # === 拥塞控制 ===
@@ -1098,10 +1267,11 @@ net.ipv4.tcp_max_tw_buckets = 10000
 net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_tw_recycle = 0
 
-# === Keepalive ===
-net.ipv4.tcp_keepalive_time = 1800
-net.ipv4.tcp_keepalive_intvl = 60
-net.ipv4.tcp_keepalive_probes = 9
+# === Keepalive（NAT 保活修正） ===
+# 60s 开始探测，15s 间隔，4 次失败 = 总超时 120s（防半开连接）
+net.ipv4.tcp_keepalive_time = 60
+net.ipv4.tcp_keepalive_intvl = 15
+net.ipv4.tcp_keepalive_probes = 4
 
 # === Cloudflare TCP collapse（接收侧优化） ===
 net.ipv4.tcp_collapse_max_bytes = $((buf_max / 2))
@@ -1131,7 +1301,7 @@ EOF
   # TLS 优化方案不降速: 使用与激进方案完全相同的 CC 参数
   # 区别仅在 sysctl 层面（TLS 握手优化）+ IW10
   apply_bbrplusv3_params
-  setup_bbrplusv3_persistent
+  write_bbrplusv3_service
 
   # IW10: 初始拥塞窗口 10 (RFC 6928, TLS 证书链约 2 MSS, IW10 足够覆盖)
   local DEF_ROUTE
@@ -1143,7 +1313,7 @@ EOF
 
   echo ""
   info "已应用 TLS 握手优化方案"
-  echo -e "  ${CYAN}CC 参数:${NC} aggressive profile + loss=15%/beta=30%（与激进方案一致，不降速）"
+  echo -e "  ${CYAN}CC 参数:${NC} aggressive profile + loss=3%/beta=30%（与激进方案一致，不降速）"
   echo -e "  ${CYAN}TLS sysctl:${NC} synack_retries=2, syn_retries=3, fastopen=3, slow_start_after_idle=0"
   echo -e "  ${CYAN}IW10:${NC} 初始拥塞窗口 10（TLS 证书链全覆盖）"
   echo ""
@@ -1285,7 +1455,7 @@ smart_recommend() {
     modprobe tcp_brutal 2>/dev/null && info "已加载 tcp_brutal（Hysteria2 可用）"
   fi
 
-  echo -e "  ${GREEN}→ 应用 BBRPlusV3 (15%/30%) 平衡优化配置${NC}"
+  echo -e "  ${GREEN}→ 应用 BBRPlusV3 (3%/30%) 平衡优化配置${NC}"
   echo ""
 
   # 直接应用激进方案
@@ -1329,21 +1499,46 @@ show_algorithm_status() {
   if [ "$current_algo" = "bbrplusv3" ]; then
     local param_dir="/sys/module/tcp_bbrplusv3/parameters"
     if [ -d "$param_dir" ]; then
-      local lt beta mpr pgd prt_mode prt_win
+      local lt beta mpr pgd prt_mode prt_win flc smm
       lt=$(cat "$param_dir/loss_thresh" 2>/dev/null || echo "?")
       beta=$(cat "$param_dir/beta" 2>/dev/null || echo "?")
       mpr=$(cat "$param_dir/min_pacing_rate" 2>/dev/null || echo "?")
       pgd=$(cat "$param_dir/pacing_gain_down" 2>/dev/null || echo "?")
       prt_mode=$(cat "$param_dir/probe_rtt_mode_ms" 2>/dev/null || echo "?")
       prt_win=$(cat "$param_dir/probe_rtt_win_ms" 2>/dev/null || echo "?")
-      local lt_pct=$((lt * 100 / 256))
-      local beta_pct=$((beta * 100 / 256))
-      local mpr_mb=$((mpr * 8 / 1000000))
-      local pgd_pct=$((pgd * 100 / 256))
+      flc=$(cat "$param_dir/full_loss_cnt" 2>/dev/null || echo "?")
+      smm=$(cat "$param_dir/startup_max_ms" 2>/dev/null || echo "?")
+      local lt_pct=$(((lt * 100 + 128) / 256))
+      local beta_pct=$(((beta * 100 + 128) / 256))
+      local mpr_mb=$(((mpr * 8 + 500000) / 1000000))
+      local pgd_pct=$(((pgd * 100 + 128) / 256))
       echo "  loss_thresh:    ${lt} (${lt_pct}%)"
       echo "  beta:           ${beta} (${beta_pct}%)"
       echo "  pacing_down:    ${pgd} (${pgd_pct}%)"
       echo "  probe_rtt:      ${prt_win}ms周期/${prt_mode}ms持续"
+      if [ "$flc" = "0" ]; then
+        echo "  full_loss_cnt:  0 (A5: STARTUP loss退出禁用)"
+      else
+        echo "  full_loss_cnt:  ${flc}"
+      fi
+      if [ "$smm" = "?" ] || [ "$smm" = "0" ]; then
+        echo "  startup_max_ms: off"
+      else
+        echo "  startup_max_ms: ${smm}ms (A5 兜底)"
+      fi
+      # lotspeed-1: 跨连接 min_rtt 历史缓存 (tcpboost-lotspeed-1)
+      local hce ttl ms me
+      hce=$(cat "$param_dir/historical_cache_enable" 2>/dev/null || echo "?")
+      if [ "$hce" = "?" ]; then
+        echo "  lotspeed-1:     N/A (旧内核无此参数)"
+      elif [ "$hce" = "0" ]; then
+        echo "  lotspeed-1:     off (historical_cache_enable=0)"
+      else
+        ttl=$(cat "$param_dir/rtt_hist_ttl_sec" 2>/dev/null || echo "?")
+        ms=$(cat "$param_dir/rtt_hist_min_samples" 2>/dev/null || echo "?")
+        me=$(cat "$param_dir/rtt_hist_max_entries" 2>/dev/null || echo "?")
+        echo "  lotspeed-1:     on (TTL=${ttl}s, min_samples=${ms}, max_entries=${me})"
+      fi
       if [ "$mpr" = "?" ] || [ "$mpr" = "0" ]; then
         echo "  min_pacing_rate: off"
       else
@@ -1387,7 +1582,7 @@ switch_algorithm() {
   # 切换到 bbrplusv3 时自动设置最优参数（无感切换）
   if [ "$algo" = "bbrplusv3" ]; then
     apply_bbrplusv3_params
-    setup_bbrplusv3_persistent
+    write_bbrplusv3_service
   fi
 
   # 持久化
@@ -1412,7 +1607,7 @@ show_banner() {
   ╔═══════════════════════════════════════╗
   ║       TCPBoost v1.0.0-dev            ║
   ║   Linux TCP 网络加速一键脚本          ║
-  ║   内核: 6.12 LTS (BBRv3/Plus/Brutal) ║
+  ║   内核: 6.12+ LTS (BBRv3/Plus/Brutal) ║
   ╚═══════════════════════════════════════╝
 BANNER
   echo -e "${NC}"
@@ -1422,7 +1617,7 @@ show_menu() {
   show_banner
   show_algorithm_status
 
-  echo "  1) 安装 TCPBoost 内核 (6.12 LTS)"
+  echo "  1) 安装 TCPBoost 内核"
   echo ""
   echo "  ── 网络优化方案 ──"
   echo "  2) 保守方案  ≤100Mbps 小带宽 VPS"
@@ -1432,7 +1627,7 @@ show_menu() {
   echo "     bbrplusv3 + 激进 sysctl + 锐速风格 TCP 栈"
   echo ""
   echo "  4) 激进方案  科学上网推荐"
-  echo "     bbrplusv3 15%/30% 平衡优化 + 锐速风格 + 可设保底速率"
+  echo "     bbrplusv3 3%/30% 平衡优化 + 锐速风格 + 可设保底速率"
   echo ""
   echo "  5) TLS优化方案  跨太平洋握手稳定性推荐"
   echo "     aggressive profile + TLS sysctl + IW10（不降速）"
@@ -1535,6 +1730,10 @@ main() {
         exit 1
       fi
       set_min_pacing_rate "$2"
+      ;;
+    set-lotspeed)
+      shift
+      set_lotspeed "$@"
       ;;
     speedtest) speedtest_bandwidth ;;
     *)
