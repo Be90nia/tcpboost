@@ -321,6 +321,7 @@ jobs:
                 fi
               done
             fi
+          fi
 
           # 4. Make tcp_tso_autosize non-static for BBRPlus
           # 6.12/6.18: tcp_tso_autosize 是 static，CP BBRPlus 需要 EXPORT_SYMBOL
