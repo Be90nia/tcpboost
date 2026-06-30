@@ -46,7 +46,7 @@ jobs:
           # 将 6.12 → 6\.12\.\d+, 6.18 → 6\.18\.\d+, 7.0 → 7\.0\.\d+, 7.1 → 7\.1\.\d+
           SERIES_REGEX=$(echo "$SERIES" | sed 's/\./\\./g')
           LATEST=$(curl -sf https://www.kernel.org/feeds/kdist.xml | \
-            grep -oP "(?<=<title>stable: )${SERIES_REGEX}\.\d+" | head -1)
+            grep -oP "(?<=<title>(stable|longterm|mainline): )${SERIES_REGEX}\.\d+" | head -1)
 
           # 如果指定了版本号，优先使用
           if [ -n "$MANUAL_VERSION" ]; then
