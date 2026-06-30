@@ -7,15 +7,14 @@ Subject: [PATCH] [PATCH 2/2] Implement BBRplus TCP congestion control
 ---
  net/ipv4/Kconfig       |   14 +-
  net/ipv4/Makefile      |    1 +
- net/ipv4/tcp_bbrplus.c | 1215 ++++++++++++++++++++++++++++++++++++++++
+ net/ipv4/tcp_bbrplus.c | 1207 ++++++++++++++++++++++++++++++++++++++++
  net/ipv4/tcp_output.c  |    1 +
- 4 files changed, 1219 insertions(+), 1 deletion(-)
+ 4 files changed, 1222 insertions(+), 1 deletion(-)
  create mode 100644 net/ipv4/tcp_bbrplus.c
 
-Index: linux-6.12.21/net/ipv4/Kconfig
-===================================================================
---- linux-6.12.21.orig/net/ipv4/Kconfig
-+++ linux-6.12.21/net/ipv4/Kconfig
+diff --git a/net/ipv4/Kconfig b/net/ipv4/Kconfig
+--- a/net/ipv4/Kconfig
++++ b/net/ipv4/Kconfig
 @@ -689,6 +689,15 @@ config TCP_CONG_BBR1
  
  	  BBRv1, for testing.
@@ -51,10 +50,9 @@ Index: linux-6.12.21/net/ipv4/Kconfig
  
  config TCP_SIGPOOL
  	tristate
-Index: linux-6.12.21/net/ipv4/Makefile
-===================================================================
---- linux-6.12.21.orig/net/ipv4/Makefile
-+++ linux-6.12.21/net/ipv4/Makefile
+diff --git a/net/ipv4/Makefile b/net/ipv4/Makefile
+--- a/net/ipv4/Makefile
++++ b/net/ipv4/Makefile
 @@ -46,6 +46,7 @@ obj-$(CONFIG_INET_UDP_DIAG) += udp_diag.
  obj-$(CONFIG_INET_RAW_DIAG) += raw_diag.o
  obj-$(CONFIG_TCP_CONG_BBR) += tcp_bbr.o
@@ -63,10 +61,9 @@ Index: linux-6.12.21/net/ipv4/Makefile
  obj-$(CONFIG_TCP_CONG_BIC) += tcp_bic.o
  obj-$(CONFIG_TCP_CONG_CDG) += tcp_cdg.o
  obj-$(CONFIG_TCP_CONG_CUBIC) += tcp_cubic.o
-Index: linux-6.12.21/net/ipv4/tcp_bbrplus.c
-===================================================================
+diff --git a/net/ipv4/tcp_bbrplus.c b/net/ipv4/tcp_bbrplus.c
 --- /dev/null
-+++ linux-6.12.21/net/ipv4/tcp_bbrplus.c
++++ b/net/ipv4/tcp_bbrplus.c
 @@ -0,0 +1,1207 @@
 +/* Bottleneck Bandwidth and RTT (BBR) congestion control
 + *
@@ -1275,10 +1272,9 @@ Index: linux-6.12.21/net/ipv4/tcp_bbrplus.c
 +MODULE_AUTHOR("Soheil Hassas Yeganeh <soheil@google.com>");
 +MODULE_LICENSE("Dual BSD/GPL");
 +MODULE_DESCRIPTION("TCP BBR Plus, enhanced version of BBR (Bottleneck Bandwidth and RTT)");
-Index: linux-6.12.21/net/ipv4/tcp_output.c
-===================================================================
---- linux-6.12.21.orig/net/ipv4/tcp_output.c
-+++ linux-6.12.21/net/ipv4/tcp_output.c
+diff --git a/net/ipv4/tcp_output.c b/net/ipv4/tcp_output.c
+--- a/net/ipv4/tcp_output.c
++++ b/net/ipv4/tcp_output.c
 @@ -2058,6 +2058,7 @@ u32 tcp_tso_autosize(const struct sock *
  
  	return max_t(u32, bytes / mss_now, min_tso_segs);
