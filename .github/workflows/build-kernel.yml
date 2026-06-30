@@ -181,7 +181,15 @@ jobs:
             for p in $(find "$PATCH_DIR" -name '*.patch' -type f | sort); do
               pname=$(basename "$p")
               echo "  Applying: $pname"
-              git apply --3way "$p" || { echo "ERROR: $pname failed"; exit 1; }
+              if git apply --3way "$p" 2>/dev/null; then
+                echo "  applied via --3way"
+              elif patch -p1 --no-backup-if-mismatch -F3 --dry-run < "$p" >/dev/null 2>&1; then
+                patch -p1 --no-backup-if-mismatch -F3 < "$p"
+                echo "  applied via patch -p1 -F3 (fallback)"
+              else
+                echo "ERROR: $pname failed (--3way and patch -p1 both failed)"
+                exit 1
+              fi
             done
           fi
 
@@ -216,11 +224,14 @@ jobs:
             echo "=== Applying CloudPassenger patch: $patch_name ==="
 
             if [ "$KERNEL_MAJOR" != "6.12" ]; then
-              # 6.18+: git apply (handles new-file hunks in multi-file diffs correctly)
-              if git apply --3way "$patch_file"; then
+              # 6.18+: git apply --3way preferred; fallback patch -p1 -F3 (cross-version base blob mismatch)
+              if git apply --3way "$patch_file" 2>/dev/null; then
                 echo "Patch $patch_name applied successfully (git apply --3way)"
+              elif patch -p1 --no-backup-if-mismatch -F3 --dry-run < "$patch_file" >/dev/null 2>&1; then
+                patch -p1 --no-backup-if-mismatch -F3 < "$patch_file"
+                echo "Patch $patch_name applied successfully (patch -p1 -F3 fallback)"
               else
-                echo "ERROR: Patch $patch_name failed to apply (git apply --3way)"
+                echo "ERROR: Patch $patch_name failed to apply (--3way and patch -p1 both failed)"
                 exit 1
               fi
             elif patch -p1 --no-backup-if-mismatch -F3 --dry-run < "$patch_file" >/dev/null 2>&1; then
