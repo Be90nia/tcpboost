@@ -7,9 +7,9 @@ Subject: [PATCH] [PATCH 2/2] Implement BBRplus TCP congestion control
 ---
  net/ipv4/Kconfig       |   14 +-
  net/ipv4/Makefile      |    1 +
- net/ipv4/tcp_bbrplus.c | 1215 ++++++++++++++++++++++++++++++++++++++++
+ net/ipv4/tcp_bbrplus.c | 1207 ++++++++++++++++++++++++++++++++++++++++
  net/ipv4/tcp_output.c  |    1 +
- 4 files changed, 1230 insertions(+), 1 deletion(-)
+ 4 files changed, 1222 insertions(+), 1 deletion(-)
  create mode 100644 net/ipv4/tcp_bbrplus.c
 
 Index: linux-6.12.21/net/ipv4/Kconfig
@@ -67,7 +67,7 @@ Index: linux-6.12.21/net/ipv4/tcp_bbrplus.c
 ===================================================================
 --- /dev/null
 +++ linux-6.12.21/net/ipv4/tcp_bbrplus.c
-@@ -0,0 +1,1218 @@
+@@ -0,0 +1,1207 @@
 +/* Bottleneck Bandwidth and RTT (BBR) congestion control
 + *
 + * BBR congestion control computes the sending rate based on the delivery
