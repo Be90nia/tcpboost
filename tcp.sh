@@ -1073,6 +1073,12 @@ net.ipv4.tcp_max_tw_buckets = 5000
 
 # === Cloudflare TCP collapse（接收侧优化） ===
 net.ipv4.tcp_collapse_max_bytes = 8388608
+
+# === Socket 低延迟（busy_poll，绕过 EEVDF 软中断延迟） ===
+# 应用层 socket 收发 sysctl 默认值，不显式 setsockopt(SO_BUSY_POLL) 也生效
+# 50us 平衡 CPU 占用与延迟，配合 fq + BBR 降低 PROBE_RTT 阶段抖动
+net.core.busy_poll = 50
+net.core.busy_read = 50
 EOF
 
   sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1
@@ -1152,6 +1158,12 @@ net.ipv4.tcp_keepalive_probes = 4
 
 # === Cloudflare TCP collapse（接收侧优化） ===
 net.ipv4.tcp_collapse_max_bytes = $((buf_max / 2))
+
+# === Socket 低延迟（busy_poll，绕过 EEVDF 软中断延迟） ===
+# 应用层 socket 收发 sysctl 默认值，不显式 setsockopt(SO_BUSY_POLL) 也生效
+# 50us 平衡 CPU 占用与延迟，配合 fq + BBRPlusV3 降低 PROBE_RTT 阶段抖动
+net.core.busy_poll = 50
+net.core.busy_read = 50
 EOF
 
   # limits.conf 调优
@@ -1275,6 +1287,12 @@ net.ipv4.tcp_keepalive_probes = 4
 
 # === Cloudflare TCP collapse（接收侧优化） ===
 net.ipv4.tcp_collapse_max_bytes = $((buf_max / 2))
+
+# === Socket 低延迟（busy_poll，绕过 EEVDF 软中断延迟） ===
+# 应用层 socket 收发 sysctl 默认值，不显式 setsockopt(SO_BUSY_POLL) 也生效
+# 50us 平衡 CPU 占用与延迟，配合 fq + BBRPlusV3 降低 PROBE_RTT 阶段抖动
+net.core.busy_poll = 50
+net.core.busy_read = 50
 EOF
 
   # limits.conf 调优
