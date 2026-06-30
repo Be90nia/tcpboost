@@ -139,7 +139,7 @@ jobs:
           tar -xf linux.tar.xz
           mv "linux-${VERSION}" linux-src
           # Initialize git repo so git apply --3way works (requires git index)
-          cd linux-src && git init && git add -A && git commit -m "base" --quiet
+          cd linux-src && git init && git config user.email "actions@github.com" && git config user.name "github-actions[bot]" && git add -A && git commit -m "base" --quiet
 
       - name: Apply Xanmod BBRv3 patches
         working-directory: linux-src
