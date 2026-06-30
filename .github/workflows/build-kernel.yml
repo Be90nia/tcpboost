@@ -138,6 +138,8 @@ jobs:
           curl -fSL "https://cdn.kernel.org/pub/linux/kernel/${URL_PREFIX}/linux-${VERSION}.tar.xz" -o linux.tar.xz
           tar -xf linux.tar.xz
           mv "linux-${VERSION}" linux-src
+          # Initialize git repo so git apply --3way works (requires git index)
+          cd linux-src && git init && git add -A && git commit -m "base" --quiet
 
       - name: Apply Xanmod BBRv3 patches
         working-directory: linux-src
@@ -179,7 +181,7 @@ jobs:
             for p in $(find "$PATCH_DIR" -name '*.patch' -type f | sort); do
               pname=$(basename "$p")
               echo "  Applying: $pname"
-              git apply --3way "$p"
+              git apply --3way "$p" || { echo "ERROR: $pname failed"; exit 1; }
             done
           fi
 
@@ -215,8 +217,12 @@ jobs:
 
             if [ "$KERNEL_MAJOR" != "6.12" ]; then
               # 6.18+: git apply (handles new-file hunks in multi-file diffs correctly)
-              git apply --3way "$patch_file"
-              echo "Patch $patch_name applied successfully (git apply --3way)"
+              if git apply --3way "$patch_file"; then
+                echo "Patch $patch_name applied successfully (git apply --3way)"
+              else
+                echo "ERROR: Patch $patch_name failed to apply (git apply --3way)"
+                exit 1
+              fi
             elif patch -p1 --no-backup-if-mismatch -F3 --dry-run < "$patch_file" >/dev/null 2>&1; then
               patch -p1 --no-backup-if-mismatch -F3 < "$patch_file"
               echo "Patch $patch_name applied successfully (p1)"
