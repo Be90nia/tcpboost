@@ -284,41 +284,26 @@ jobs:
           done
 
           # 3. Fix tso_segs callback signature compatibility
-          # 6.12: .min_tso_segs(sk) → removed (CP uses old signature)
-          # 6.18+: .tso_segs(sk, mss_now) → CP BBRPlus already uses new signature
-          # For 6.12 only: remove old .min_tso_segs assignments and function defs
+          # 6.18 kernel: tcp_congestion_ops lacks .tso_segs (XanMod tcp.h hunk may not apply)
+          # Source patches already have tso_segs funcs removed; sed removes .tso_segs= and BTF lines
           if [ "$KERNEL_MAJOR" = "6.12" ]; then
-            echo "Fixing tso_segs for 6.12 (removing old .min_tso_segs)..."
+            echo "Fixing tso_segs for 6.12 (removing .tso_segs assignments and BTF)..."
             for src in net/ipv4/tcp_bbr1.c net/ipv4/tcp_bbrplus.c net/ipv4/tcp_bbrplusv3.c; do
               if [ -f "$src" ]; then
-                echo "  Fixing $src: removing .tso_segs assignments and function defs..."
-                # Remove .tso_segs = <any_func>, lines (generic, not algo-specific)
+                echo "  Fixing $src"
                 sed -i '/\.tso_segs[[:space:]]*=/d' "$src"
-                # Remove __bpf_kfunc static u32 <any>_tso_segs function definitions
-                sed -i '/^__bpf_kfunc static u32 .*_tso_segs(/,/^}/d' "$src"
-                # Remove static u32 <any>_tso_segs function definitions
-                sed -i '/^static u32 .*_tso_segs(/,/^}/d' "$src"
-                # Remove BTF_ID_FLAGS(func, <any>_tso_segs)
                 sed -i '/BTF_ID_FLAGS(func, .*_tso_segs)/d' "$src"
               fi
             done
           else
-            # Check if struct tcp_congestion_ops actually has .tso_segs member
-            # (XanMod patch may have failed to apply the tcp.h hunk)
             if grep -q 'tso_segs' include/net/tcp.h 2>/dev/null && grep -q '\.tso_segs' include/net/tcp.h 2>/dev/null; then
               echo "tso_segs: struct tcp_congestion_ops has .tso_segs member, CP patches compatible"
             else
-              echo "tso_segs: struct tcp_congestion_ops lacks .tso_segs, removing from CP code..."
+              echo "tso_segs: struct tcp_congestion_ops lacks .tso_segs, removing assignments and BTF..."
               for src in net/ipv4/tcp_bbr1.c net/ipv4/tcp_bbrplus.c net/ipv4/tcp_bbrplusv3.c; do
                 if [ -f "$src" ]; then
-                  echo "  Fixing $src: removing .tso_segs assignments and function defs..."
-                  # Remove .tso_segs = <any_func>, lines (generic, not algo-specific)
+                  echo "  Fixing $src"
                   sed -i '/\.tso_segs[[:space:]]*=/d' "$src"
-                  # Remove __bpf_kfunc static u32 <any>_tso_segs function definitions
-                  sed -i '/^__bpf_kfunc static u32 .*_tso_segs(/,/^}/d' "$src"
-                  # Remove static u32 <any>_tso_segs function definitions
-                  sed -i '/^static u32 .*_tso_segs(/,/^}/d' "$src"
-                  # Remove BTF_ID_FLAGS(func, <any>_tso_segs)
                   sed -i '/BTF_ID_FLAGS(func, .*_tso_segs)/d' "$src"
                 fi
               done
