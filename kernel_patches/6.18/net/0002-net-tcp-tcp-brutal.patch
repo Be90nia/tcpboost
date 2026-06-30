@@ -4,10 +4,9 @@ Author: CloudPassenger <coliwatoshinzo@gmail.com>
 Origin: https://github.com/apernet/tcp-brutal
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
-Index: linux-6.12.21/net/ipv4/tcp_brutal.c
-===================================================================
+diff --git a/net/ipv4/tcp_brutal.c b/net/ipv4/tcp_brutal.c
 --- /dev/null
-+++ linux-6.12.21/net/ipv4/tcp_brutal.c
++++ b/net/ipv4/tcp_brutal.c
 @@ -0,0 +1,316 @@
 +#include <linux/module.h>
 +#include <linux/version.h>
@@ -325,10 +324,9 @@ Index: linux-6.12.21/net/ipv4/tcp_brutal.c
 +MODULE_LICENSE("GPL");
 +MODULE_DESCRIPTION("TCP Brutal");
 +MODULE_VERSION("1.0.2");
-Index: linux-6.12.21/net/ipv4/Kconfig
-===================================================================
---- linux-6.12.21.orig/net/ipv4/Kconfig
-+++ linux-6.12.21/net/ipv4/Kconfig
+diff --git a/net/ipv4/Kconfig b/net/ipv4/Kconfig
+--- a/net/ipv4/Kconfig
++++ b/net/ipv4/Kconfig
 @@ -698,6 +698,17 @@ config TCP_CONG_BBRPLUS
        Originally introduced by dog250 & cx9208.
        Same as BBR, requires the fq ("Fair Queue") pacing packet scheduler.
@@ -347,10 +345,9 @@ Index: linux-6.12.21/net/ipv4/Kconfig
  choice
  	prompt "Default TCP congestion control"
  	default DEFAULT_CUBIC
-Index: linux-6.12.21/net/ipv4/Makefile
-===================================================================
---- linux-6.12.21.orig/net/ipv4/Makefile
-+++ linux-6.12.21/net/ipv4/Makefile
+diff --git a/net/ipv4/Makefile b/net/ipv4/Makefile
+--- a/net/ipv4/Makefile
++++ b/net/ipv4/Makefile
 @@ -47,6 +47,7 @@ obj-$(CONFIG_INET_RAW_DIAG) += raw_diag.
  obj-$(CONFIG_TCP_CONG_BBR) += tcp_bbr.o
  obj-$(CONFIG_TCP_CONG_BBR1) += tcp_bbr1.o
