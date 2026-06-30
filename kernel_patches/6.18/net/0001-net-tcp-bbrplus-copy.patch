@@ -7,9 +7,9 @@ Subject: [PATCH] [PATCH 2/2] Implement BBRplus TCP congestion control
 ---
  net/ipv4/Kconfig       |   14 +-
  net/ipv4/Makefile      |    1 +
- net/ipv4/tcp_bbrplus.c | 1207 ++++++++++++++++++++++++++++++++++++++++
+ net/ipv4/tcp_bbrplus.c | 1215 ++++++++++++++++++++++++++++++++++++++++
  net/ipv4/tcp_output.c  |    1 +
- 4 files changed, 1222 insertions(+), 1 deletion(-)
+ 4 files changed, 1219 insertions(+), 1 deletion(-)
  create mode 100644 net/ipv4/tcp_bbrplus.c
 
 Index: linux-6.12.21/net/ipv4/Kconfig
@@ -454,6 +454,7 @@ Index: linux-6.12.21/net/ipv4/tcp_bbrplus.c
 +{
 +        return READ_ONCE(sk->sk_pacing_rate) < (bbr_min_tso_rate >> 3) ? 1 : 2;
 +}
++
 +/* Return count of segments we want in the skbs we send, or 0 for default. */
 +static u32 bbr_tso_segs_goal(struct sock *sk)
 +{
