@@ -5,6 +5,8 @@ Origin: https://github.com/apernet/tcp-brutal
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 diff --git a/net/ipv4/tcp_brutal.c b/net/ipv4/tcp_brutal.c
+new file mode 100644
+index 000000000000..000000000000
 --- /dev/null
 +++ b/net/ipv4/tcp_brutal.c
 @@ -0,0 +1,316 @@
