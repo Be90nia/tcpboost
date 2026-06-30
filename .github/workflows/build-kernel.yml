@@ -291,14 +291,15 @@ jobs:
             echo "Fixing tso_segs for 6.12 (removing old .min_tso_segs)..."
             for src in net/ipv4/tcp_bbr1.c net/ipv4/tcp_bbrplus.c net/ipv4/tcp_bbrplusv3.c; do
               if [ -f "$src" ]; then
-                algo=$(basename "$src" .c | sed 's/tcp_//')
-                func="${algo}_tso_segs"
-                echo "  Fixing $src: removing .tso_segs assignment..."
-                sed -i "/\\.tso_segs.*=.*${func},/d" "$src"
-                sed -i "/^__bpf_kfunc static u32 ${func}/,/^}/d" "$src"
-                sed -i "/^static u32 ${func}/,/^}/d" "$src"
-                sed -i "/BTF_ID_FLAGS(func, ${func})/d" "$src"
-                sed -i "/static u32 ${func}(/d" "$src"
+                echo "  Fixing $src: removing .tso_segs assignments and function defs..."
+                # Remove .tso_segs = <any_func>, lines (generic, not algo-specific)
+                sed -i '/\.tso_segs[[:space:]]*=/d' "$src"
+                # Remove __bpf_kfunc static u32 <any>_tso_segs function definitions
+                sed -i '/^__bpf_kfunc static u32 .*_tso_segs(/,/^}/d' "$src"
+                # Remove static u32 <any>_tso_segs function definitions
+                sed -i '/^static u32 .*_tso_segs(/,/^}/d' "$src"
+                # Remove BTF_ID_FLAGS(func, <any>_tso_segs)
+                sed -i '/BTF_ID_FLAGS(func, .*_tso_segs)/d' "$src"
               fi
             done
           else
@@ -310,14 +311,15 @@ jobs:
               echo "tso_segs: struct tcp_congestion_ops lacks .tso_segs, removing from CP code..."
               for src in net/ipv4/tcp_bbr1.c net/ipv4/tcp_bbrplus.c net/ipv4/tcp_bbrplusv3.c; do
                 if [ -f "$src" ]; then
-                  algo=$(basename "$src" .c | sed 's/tcp_//')
-                  func="${algo}_tso_segs"
-                  echo "  Fixing $src: removing .tso_segs assignment..."
-                  sed -i "/\\.tso_segs.*=.*${func},/d" "$src"
-                  sed -i "/^__bpf_kfunc static u32 ${func}/,/^}/d" "$src"
-                  sed -i "/^static u32 ${func}/,/^}/d" "$src"
-                  sed -i "/BTF_ID_FLAGS(func, ${func})/d" "$src"
-                  sed -i "/static u32 ${func}(/d" "$src"
+                  echo "  Fixing $src: removing .tso_segs assignments and function defs..."
+                  # Remove .tso_segs = <any_func>, lines (generic, not algo-specific)
+                  sed -i '/\.tso_segs[[:space:]]*=/d' "$src"
+                  # Remove __bpf_kfunc static u32 <any>_tso_segs function definitions
+                  sed -i '/^__bpf_kfunc static u32 .*_tso_segs(/,/^}/d' "$src"
+                  # Remove static u32 <any>_tso_segs function definitions
+                  sed -i '/^static u32 .*_tso_segs(/,/^}/d' "$src"
+                  # Remove BTF_ID_FLAGS(func, <any>_tso_segs)
+                  sed -i '/BTF_ID_FLAGS(func, .*_tso_segs)/d' "$src"
                 fi
               done
             fi
