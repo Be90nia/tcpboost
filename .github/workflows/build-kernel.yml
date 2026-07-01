@@ -232,7 +232,8 @@ jobs:
                 patch -p1 --no-backup-if-mismatch -F3 < "$patch_file"
                 echo "Patch $patch_name applied successfully (patch -p1 -F3 fallback)"
               else
-                echo "ERROR: Patch $patch_name failed to apply (--3way and patch -p1 both failed)"
+                echo "ERROR: Patch $patch_name failed. patch -p1 dry-run output:"
+                patch -p1 --no-backup-if-mismatch -F3 --dry-run < "$patch_file" 2>&1 | head -50
                 exit 1
               fi
             elif patch -p1 --no-backup-if-mismatch -F3 --dry-run < "$patch_file" >/dev/null 2>&1; then
