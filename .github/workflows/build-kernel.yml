@@ -181,19 +181,14 @@ jobs:
             for p in $(find "$PATCH_DIR" -name '*.patch' -type f | sort); do
               pname=$(basename "$p")
               echo "  Applying: $pname"
-              # Debug: show patch -p1 errors, force-apply, dump rejects
               if git apply --3way "$p" 2>/dev/null; then
                 echo "  applied via --3way"
+              elif patch -p1 --no-backup-if-mismatch -F3 --dry-run < "$p" >/dev/null 2>&1; then
+                patch -p1 --no-backup-if-mismatch -F3 < "$p"
+                echo "  applied via patch -p1 -F3 (fallback)"
               else
-                echo "=== git apply --3way failed, trying patch -p1 -F3 dry-run ==="
-                patch -p1 --no-backup-if-mismatch -F3 --dry-run < "$p" 2>&1 | head -80
-                echo ""
-                echo "=== Forcing patch -p1 -F3 to capture rejects ==="
-                patch -p1 --force --no-backup-if-mismatch -F3 < "$p" 2>&1 || true
-                echo ""
-                echo "=== Rejected hunks ==="
-                find . -name '*.rej' -exec sh -c 'echo "--- {} ---"; cat {}' \; 2>/dev/null
-                echo "ERROR: $pname failed"
+                echo "ERROR: $pname failed. patch -p1 dry-run output:"
+                patch -p1 --no-backup-if-mismatch -F3 --dry-run < "$p" 2>&1 | head -50
                 exit 1
               fi
             done
