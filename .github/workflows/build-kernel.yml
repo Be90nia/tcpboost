@@ -183,12 +183,12 @@ jobs:
               echo "  Applying: $pname"
               if git apply --3way "$p" 2>/dev/null; then
                 echo "  applied via --3way"
-              elif patch -p1 --no-backup-if-mismatch -F3 --dry-run < "$p" >/dev/null 2>&1; then
-                patch -p1 --no-backup-if-mismatch -F3 < "$p"
+              elif patch -p1 --forward --no-backup-if-mismatch -F3 --dry-run < "$p" >/dev/null 2>&1; then
+                patch -p1 --forward --no-backup-if-mismatch -F3 < "$p"
                 echo "  applied via patch -p1 -F3 (fallback)"
               else
                 echo "ERROR: $pname failed. patch -p1 dry-run output:"
-                patch -p1 --no-backup-if-mismatch -F3 --dry-run < "$p" 2>&1 | head -50
+                patch -p1 --forward --no-backup-if-mismatch -F3 --dry-run < "$p" 2>&1 | head -50
                 exit 1
               fi
             done
@@ -228,16 +228,16 @@ jobs:
               # 6.18+: git apply --3way preferred; fallback patch -p1 -F3 (cross-version base blob mismatch)
               if git apply --3way "$patch_file" 2>/dev/null; then
                 echo "Patch $patch_name applied successfully (git apply --3way)"
-              elif patch -p1 --no-backup-if-mismatch -F3 --dry-run < "$patch_file" >/dev/null 2>&1; then
-                patch -p1 --no-backup-if-mismatch -F3 < "$patch_file"
+              elif patch -p1 --forward --no-backup-if-mismatch -F3 --dry-run < "$patch_file" >/dev/null 2>&1; then
+                patch -p1 --forward --no-backup-if-mismatch -F3 < "$patch_file"
                 echo "Patch $patch_name applied successfully (patch -p1 -F3 fallback)"
               else
                 echo "ERROR: Patch $patch_name failed. patch -p1 dry-run output:"
-                patch -p1 --no-backup-if-mismatch -F3 --dry-run < "$patch_file" 2>&1 | head -50
+                patch -p1 --forward --no-backup-if-mismatch -F3 --dry-run < "$patch_file" 2>&1 | head -50
                 exit 1
               fi
-            elif patch -p1 --no-backup-if-mismatch -F3 --dry-run < "$patch_file" >/dev/null 2>&1; then
-              patch -p1 --no-backup-if-mismatch -F3 < "$patch_file"
+            elif patch -p1 --forward --no-backup-if-mismatch -F3 --dry-run < "$patch_file" >/dev/null 2>&1; then
+              patch -p1 --forward --no-backup-if-mismatch -F3 < "$patch_file"
               echo "Patch $patch_name applied successfully (p1)"
             elif patch -p0 --no-backup-if-mismatch -F3 --dry-run < "$patch_file" >/dev/null 2>&1; then
               patch -p0 --no-backup-if-mismatch -F3 < "$patch_file"
