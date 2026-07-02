@@ -919,7 +919,7 @@ index 3df6160f5156..c00e757460f8 100644
  }
  
  /* Save "last known good" cwnd so we can restore it after losses or PROBE_RTT */
-@@ -345,5 +548,22 @@
+@@ -346,5 +548,22 @@
  			bbr_set_pacing_rate(sk, bbr_bw(sk), BBR_UNIT);
  		else if (bbr->mode == BBR_PROBE_RTT)
  			bbr_check_probe_rtt_done(sk);
