@@ -3031,7 +3031,7 @@ index 3df6160f5156..c00e757460f8 100644
  BTF_ID_FLAGS(func, bbr_sndbuf_expand)
 +BTF_ID_FLAGS(func, bbr_skb_marked_lost)
  BTF_ID_FLAGS(func, bbr_undo_cwnd)
- BTF_ID_FLAGS(func, bbr_cwnd_event)
+ BTF_ID_FLAGS(func, bbr_cwnd_event_tx_start)
  BTF_ID_FLAGS(func, bbr_ssthresh)
 -BTF_ID_FLAGS(func, bbr_min_tso_segs)
 +BTF_ID_FLAGS(func, bbr_tso_segs)
