@@ -138,7 +138,7 @@ jobs:
           # Try cdn.kernel.org first, fallback to git clone from stable repo
           curl -fSL "https://cdn.kernel.org/pub/linux/kernel/${URL_PREFIX}/linux-${VERSION}.tar.xz" -o linux.tar.xz || {
             echo "cdn.kernel.org failed, trying git clone..."
-            git clone --depth 1 --branch "v${VERSION}" https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git linux-src
+            git clone --depth 1 --branch "v${VERSION}" https://github.com/gregkh/linux.git linux-src
           }
           if [ ! -d linux-src ] && [ -f linux.tar.xz ]; then
             tar -xf linux.tar.xz
