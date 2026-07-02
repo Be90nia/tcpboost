@@ -919,34 +919,29 @@ index 3df6160f5156..c00e757460f8 100644
  }
  
  /* Save "last known good" cwnd so we can restore it after losses or PROBE_RTT */
-@@ -334,7 +536,9 @@ __bpf_kfunc static void bbr_cwnd_event(struct sock *sk, enum tcp_ca_event event)
- 	struct tcp_sock *tp = tcp_sk(sk);
- 	struct bbr *bbr = inet_csk_ca(sk);
- 
--	if (event == CA_EVENT_TX_START && tp->app_limited) {
-+	if (event == CA_EVENT_TX_START) {
-+		if (!tp->app_limited)
-+			return;
- 		bbr->idle_restart = 1;
- 		bbr->ack_epoch_mstamp = tp->tcp_mstamp;
- 		bbr->ack_epoch_acked = 0;
-@@ -345,6 +549,16 @@ __bpf_kfunc static void bbr_cwnd_event(struct sock *sk, enum tcp_ca_event event)
+@@ -346,5 +548,22 @@ __bpf_kfunc static void bbr_cwnd_event_tx_start(struct sock *sk)
  			bbr_set_pacing_rate(sk, bbr_bw(sk), BBR_UNIT);
  		else if (bbr->mode == BBR_PROBE_RTT)
  			bbr_check_probe_rtt_done(sk);
-+	} else if ((event == CA_EVENT_ECN_IS_CE ||
-+		    event == CA_EVENT_ECN_NO_CE) &&
-+		   bbr_can_use_ecn(sk) &&
-+		   bbr_param(sk, precise_ece_ack)) {
+ 	}
+ }
++
++__bpf_kfunc static void bbr_cwnd_event(struct sock *sk, enum tcp_ca_event event)
++{
++	struct bbr *bbr = inet_csk_ca(sk);
++
++	if ((event == CA_EVENT_ECN_IS_CE ||
++	     event == CA_EVENT_ECN_NO_CE) &&
++	    bbr_can_use_ecn(sk) &&
++	    bbr_param(sk, precise_ece_ack)) {
 +		u32 state = bbr->ce_state;
 +		dctcp_ece_ack_update(sk, event, &bbr->prior_rcv_nxt, &state);
 +		bbr->ce_state = state;
 +	} else if (event == CA_EVENT_TLP_RECOVERY &&
 +		   bbr_param(sk, loss_probe_recovery)) {
 +		bbr_run_loss_probe_recovery(sk);
- 	}
- }
- 
++	}
++}
 @@ -367,10 +581,10 @@ static u32 bbr_bdp(struct sock *sk, u32 bw, int gain)
  	 * default. This should only happen when the connection is not using TCP
  	 * timestamps and has retransmitted all of the SYN/SYNACK/data packets
@@ -1567,7 +1562,7 @@ index 3df6160f5156..c00e757460f8 100644
  		break;
  	case BBR_PROBE_RTT:
  		bbr->pacing_gain = BBR_UNIT;
-@@ -1013,144 +973,1387 @@ static void bbr_update_gains(struct sock *sk)
+@@ -1013,144 +973,1388 @@ static void bbr_update_gains(struct sock *sk)
  	}
  }
  
@@ -3022,7 +3017,8 @@ index 3df6160f5156..c00e757460f8 100644
  	.sndbuf_expand	= bbr_sndbuf_expand,
 +	.skb_marked_lost = bbr_skb_marked_lost,
  	.undo_cwnd	= bbr_undo_cwnd,
- 	.cwnd_event	= bbr_cwnd_event,
+ 	.cwnd_event_tx_start	= bbr_cwnd_event_tx_start,
++	.cwnd_event	= bbr_cwnd_event,
  	.ssthresh	= bbr_ssthresh,
 -	.min_tso_segs	= bbr_min_tso_segs,
 +	.tso_segs	= bbr_tso_segs,
