@@ -919,7 +919,7 @@ index 3df6160f5156..c00e757460f8 100644
  }
  
  /* Save "last known good" cwnd so we can restore it after losses or PROBE_RTT */
-@@ -351,0 +553,17 @@
+@@ -350,0 +552,17 @@
 +
 +__bpf_kfunc static void bbr_cwnd_event(struct sock *sk, enum tcp_ca_event event)
 +{
