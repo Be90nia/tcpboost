@@ -135,7 +135,17 @@ jobs:
           URL_PREFIX="${{ needs.check-version.outputs.kernel_url_prefix }}"
           echo "下载 Linux ${VERSION} 源码..."
           echo "URL前缀: ${URL_PREFIX}"
-          curl -fSL "https://cdn.kernel.org/pub/linux/kernel/${URL_PREFIX}/linux-${VERSION}.tar.xz" -o linux.tar.xz
+          # Try cdn.kernel.org first, fallback to git.kernel.org mirror
+          curl -fSL "https://cdn.kernel.org/pub/linux/kernel/${URL_PREFIX}/linux-${VERSION}.tar.xz" -o linux.tar.xz || \
+          curl -fSL "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/snapshot/linux-${VERSION}.tar.gz" -o linux.tar.gz
+          if [ -f linux.tar.xz ]; then
+            tar -xf linux.tar.xz
+          elif [ -f linux.tar.gz ]; then
+            tar -xzf linux.tar.gz
+          else
+            echo "ERROR: Failed to download kernel source"
+            exit 1
+          fi
           tar -xf linux.tar.xz
           mv "linux-${VERSION}" linux-src
           # Initialize git repo so git apply --3way works (requires git index)
