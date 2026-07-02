@@ -191,6 +191,15 @@ jobs:
               else
                 echo "ERROR: $pname failed. patch -p1 dry-run output:"
                 patch -p1 --forward --no-backup-if-mismatch -F3 --dry-run < "$p" 2>&1 | head -50
+                echo ""
+                echo "--- Debug: tcp_bbr.c around L545-555 ---"
+                if [ -f net/ipv4/tcp_bbr.c ]; then
+                  sed -n '540,560p' net/ipv4/tcp_bbr.c | cat -A
+                fi
+                echo "--- Debug: searching for bbr_set_pacing_rate in tcp_bbr.c ---"
+                if [ -f net/ipv4/tcp_bbr.c ]; then
+                  grep -n 'bbr_set_pacing_rate.*BBR_UNIT' net/ipv4/tcp_bbr.c | head -5
+                fi
                 exit 1
               fi
             done
