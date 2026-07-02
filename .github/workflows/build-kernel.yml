@@ -192,8 +192,8 @@ jobs:
               echo "  Applying: $pname"
               if git apply --3way "$p" 2>/dev/null; then
                 echo "  applied via --3way"
-              elif git apply "$p" 2>/dev/null; then
-                echo "  applied via git apply"
+              elif git apply --recount --whitespace=fix "$p" 2>/dev/null; then
+                echo "  applied via git apply --recount"
               elif patch -p1 --forward --no-backup-if-mismatch -F3 --dry-run < "$p" >/dev/null 2>&1; then
                 patch -p1 --forward --no-backup-if-mismatch -F3 < "$p"
                 echo "  applied via patch -p1 -F3 (fallback)"
