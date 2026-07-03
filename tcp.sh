@@ -248,6 +248,77 @@ get_latest_version() {
   echo "$version"
 }
 
+# 列出 GitHub releases 全部可用内核版本
+# 返回: 每行一个版本号（降序），如 7.1.2 7.0.14 6.18.37 6.12.94
+list_available_kernels() {
+  local api_urls=("https://github.com/${REPO}/releases")
+
+  if [ "$NET_MODE" = "mirror" ]; then
+    for mirror in "${GH_MIRRORS[@]}"; do
+      api_urls+=("${mirror}/https://github.com/${REPO}/releases")
+    done
+  fi
+
+  local body
+  for api_url in "${api_urls[@]}"; do
+    body=$(curl -sf --connect-timeout 10 --max-time 20 -L "$api_url" 2>/dev/null)
+    if [ -n "$body" ]; then
+      break
+    fi
+  done
+
+  if [ -z "$body" ]; then
+    echo ""
+    return
+  fi
+
+  # 从 HTML 提取 tag 名称（v6.12.94-tcpboost → 6.12.94），降序排列
+  echo "$body" | grep -oP 'tag/v\K[0-9]+\.[0-9]+\.[0-9]+' | sort -ruV
+}
+
+# 检测当前运行内核的大版本系列（如 6.12, 7.0, 7.1）
+detect_kernel_series() {
+  local kver
+  kver=$(uname -r 2>/dev/null)
+  # 提取 x.y 部分（如 7.1.2-tcpboost+ → 7.1）
+  echo "$kver" | grep -oP '^\d+\.\d+' || echo ""
+}
+
+# EEVDF 版本自适应优化
+# 根据内核版本系列调整 sysctl，6.12/6.18 与 7.0+ 参数不同
+# 必须在 profile sysctl 写入后调用（追加/覆盖版本特定值）
+apply_eevdf_tuning() {
+  local series
+  series=$(detect_kernel_series)
+
+  if [ -z "$series" ]; then
+    warn "无法检测内核版本系列，跳过 EEVDF 自适应优化"
+    return
+  fi
+
+  case "$series" in
+    6.12|6.18)
+      # EEVDF 早期版本：ksoftirqd 唤醒延迟较高
+      # busy_poll=50（当前默认），netdev_budget_usecs=8000（默认）
+      info "EEVDF 自适应 ($series): 早期 EEVDF，保持默认预算"
+      ;;
+    7.0|7.1)
+      # EEVDF 成熟版本：RSEQ 时间片扩展 + LAZY 抢占 + fq EDT 修复
+      # 提升 busy_poll 到 80us（RSEQ 允许更长 busy poll）
+      # 缩短 netdev_budget_usecs 到 4000（LAZY 模式下中断更频繁）
+      echo "net.core.busy_poll = 80" >> "$SYSCTL_FILE"
+      echo "net.core.busy_read = 80" >> "$SYSCTL_FILE"
+      echo "net.core.netdev_budget_usecs = 4000" >> "$SYSCTL_FILE"
+      sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1
+      info "EEVDF 自适应 ($series): busy_poll=80, budget_usecs=4000"
+      ;;
+    *)
+      # 未知版本，保守处理
+      :
+      ;;
+  esac
+}
+
 # 下载内核包
 download_kernel() {
   local version="$1"
@@ -294,7 +365,6 @@ download_kernel() {
 # 安装内核
 install_kernel() {
   local version
-  version=$(get_latest_version)
 
   detect_os
   check_os_version
@@ -303,6 +373,55 @@ install_kernel() {
   info "架构: ${ARCH}"
   info "包格式: ${PKG_FMT}"
   echo ""
+
+  # 列出可用版本供用户选择
+  info "正在获取可用内核版本..."
+  local available
+  available=$(list_available_kernels)
+
+  if [ -z "$available" ]; then
+    warn "无法获取版本列表，使用默认最新版"
+    version=$(get_latest_version)
+  else
+    local -a versions=($available)
+    local count=${#versions[@]}
+    echo ""
+    echo -e "  ${CYAN}可用 TCPBoost 内核版本:${NC}"
+    echo "  ─────────────────────────────────────"
+    local i=1
+    for v in "${versions[@]}"; do
+      local major=${v%%.*}
+      local rest=${v#*.}
+      local minor=${rest%%.*}
+      local series="${major}.${minor}"
+      local desc
+      case "$series" in
+        6.12) desc="LTS 长期支持版" ;;
+        6.18) desc="EEVDF vprot 优化版" ;;
+        7.0)  desc="RSEQ+LAZY抢占+HRTICK重写" ;;
+        7.1)  desc="运行队列扁平化+fq EDT 修复" ;;
+        *)    desc="" ;;
+      esac
+      printf "  %2d) %-12s %s\n" "$i" "$v" "$desc"
+      i=$((i + 1))
+    done
+    echo "  ─────────────────────────────────────"
+    echo "  0) 自动选择最新版 (${versions[0]})"
+    echo ""
+    read -p "  请选择 [0-${count}]: " choice
+
+    if [ -z "$choice" ] || [ "$choice" = "0" ]; then
+      version=${versions[0]}
+    elif [ "$choice" -ge 1 ] 2>/dev/null && [ "$choice" -le "$count" ]; then
+      version=${versions[$((choice - 1))]}
+    else
+      error "无效选择"
+      exit 1
+    fi
+  fi
+
+  echo ""
+  info "选择内核: ${version}-tcpboost"
 
   download_kernel "$version"
 
@@ -328,6 +447,21 @@ install_kernel() {
 
   echo ""
   info "内核 ${version}-tcpboost 安装完成！"
+
+  # EEVDF 版本提示
+  local major=${version%%.*}
+  local rest=${version#*.}
+  local minor=${rest%%.*}
+  local series="${major}.${minor}"
+  case "$series" in
+    6.12|6.18)
+      info "EEVDF: $series 早期版本，重启后应用优化方案时将使用默认预算参数"
+      ;;
+    7.0|7.1)
+      info "EEVDF: $series 成熟版本，重启后应用优化方案将自动提升 busy_poll=80、缩短 budget_usecs=4000"
+      ;;
+  esac
+
   warn "需要重启服务器才能生效。"
   echo ""
   read -p "是否现在重启？(y/N): " confirm
@@ -1033,6 +1167,10 @@ net.ipv4.tcp_collapse_max_bytes = 2097152
 EOF
 
   sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1
+
+  # EEVDF 版本自适应优化
+  apply_eevdf_tuning
+
   info "已应用保守方案 (≤100Mbps)"
 }
 
@@ -1073,9 +1211,19 @@ net.ipv4.tcp_max_tw_buckets = 5000
 
 # === Cloudflare TCP collapse（接收侧优化） ===
 net.ipv4.tcp_collapse_max_bytes = 8388608
+
+# === Socket 低延迟（busy_poll，绕过 EEVDF 软中断延迟） ===
+# 应用层 socket 收发 sysctl 默认值，不显式 setsockopt(SO_BUSY_POLL) 也生效
+# 50us 平衡 CPU 占用与延迟，配合 fq + BBR 降低 PROBE_RTT 阶段抖动
+net.core.busy_poll = 50
+net.core.busy_read = 50
 EOF
 
   sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1
+
+  # EEVDF 版本自适应优化
+  apply_eevdf_tuning
+
   info "已应用均衡方案 (1Gbps)"
 }
 
@@ -1152,6 +1300,12 @@ net.ipv4.tcp_keepalive_probes = 4
 
 # === Cloudflare TCP collapse（接收侧优化） ===
 net.ipv4.tcp_collapse_max_bytes = $((buf_max / 2))
+
+# === Socket 低延迟（busy_poll，绕过 EEVDF 软中断延迟） ===
+# 应用层 socket 收发 sysctl 默认值，不显式 setsockopt(SO_BUSY_POLL) 也生效
+# 50us 平衡 CPU 占用与延迟，配合 fq + BBRPlusV3 降低 PROBE_RTT 阶段抖动
+net.core.busy_poll = 50
+net.core.busy_read = 50
 EOF
 
   # limits.conf 调优
@@ -1185,6 +1339,9 @@ EOF
     ip route change $DEF_ROUTE initcwnd 32 initrwnd 32 2>/dev/null && \
       info "初始拥塞窗口已设为 32 (initcwnd/initrwnd)" || true
   fi
+
+  # EEVDF 版本自适应优化
+  apply_eevdf_tuning
 
   info "已应用激进方案 (bbrplusv3 3%/30% 平衡优化 + 锐速风格 TCP 栈优化)"
   echo ""
@@ -1275,6 +1432,12 @@ net.ipv4.tcp_keepalive_probes = 4
 
 # === Cloudflare TCP collapse（接收侧优化） ===
 net.ipv4.tcp_collapse_max_bytes = $((buf_max / 2))
+
+# === Socket 低延迟（busy_poll，绕过 EEVDF 软中断延迟） ===
+# 应用层 socket 收发 sysctl 默认值，不显式 setsockopt(SO_BUSY_POLL) 也生效
+# 50us 平衡 CPU 占用与延迟，配合 fq + BBRPlusV3 降低 PROBE_RTT 阶段抖动
+net.core.busy_poll = 50
+net.core.busy_read = 50
 EOF
 
   # limits.conf 调优
@@ -1310,6 +1473,9 @@ EOF
     ip route change $DEF_ROUTE initcwnd 10 initrwnd 10 2>/dev/null && \
       info "初始拥塞窗口已设为 10 (IW10, RFC 6928)" || true
   fi
+
+  # EEVDF 版本自适应优化
+  apply_eevdf_tuning
 
   echo ""
   info "已应用 TLS 握手优化方案"
@@ -1554,6 +1720,20 @@ show_algorithm_status() {
     echo "  内核状态:     ${YELLOW}未安装 TCPBoost 内核${NC}"
   fi
 
+  # EEVDF 版本提示
+  local series
+  series=$(detect_kernel_series)
+  if [ -n "$series" ]; then
+    case "$series" in
+      6.12|6.18)
+        echo "  EEVDF:        $series 早期版 (busy_poll=50, budget_usecs=8000)"
+        ;;
+      7.0|7.1)
+        echo "  EEVDF:        $series 成熟版 (busy_poll=80, budget_usecs=4000)"
+        ;;
+    esac
+  fi
+
   echo "=========================================="
   echo ""
 }
@@ -1604,11 +1784,12 @@ show_banner() {
   clear
   echo -e "${CYAN}"
   cat << 'BANNER'
-  ╔═══════════════════════════════════════╗
-  ║       TCPBoost v1.0.0-dev            ║
-  ║   Linux TCP 网络加速一键脚本          ║
-  ║   内核: 6.12+ LTS (BBRv3/Plus/Brutal) ║
-  ╚═══════════════════════════════════════╝
+  ╔══════════════════════════════════════════╗
+  ║       TCPBoost v1.0.0-dev                ║
+  ║   Linux TCP 网络加速一键脚本              ║
+  ║   内核: 6.12~7.1+ (BBRv3/Plus/Brutal)    ║
+  ║   EEVDF 版本自适应优化                    ║
+  ╚══════════════════════════════════════════╝
 BANNER
   echo -e "${NC}"
 }

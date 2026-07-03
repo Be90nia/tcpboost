@@ -135,9 +135,20 @@ jobs:
           URL_PREFIX="${{ needs.check-version.outputs.kernel_url_prefix }}"
           echo "下载 Linux ${VERSION} 源码..."
           echo "URL前缀: ${URL_PREFIX}"
-          curl -fSL "https://cdn.kernel.org/pub/linux/kernel/${URL_PREFIX}/linux-${VERSION}.tar.xz" -o linux.tar.xz
-          tar -xf linux.tar.xz
-          mv "linux-${VERSION}" linux-src
+          # Try cdn.kernel.org first, fallback to git clone from stable repo
+          curl -fSL "https://cdn.kernel.org/pub/linux/kernel/${URL_PREFIX}/linux-${VERSION}.tar.xz" -o linux.tar.xz || {
+            echo "cdn.kernel.org failed, trying git clone..."
+            git clone --depth 1 --branch "v${VERSION}" https://github.com/gregkh/linux.git linux-src
+          }
+          if [ ! -d linux-src ] && [ -f linux.tar.xz ]; then
+            tar -xf linux.tar.xz
+            mv "linux-${VERSION}" linux-src
+          elif [ ! -d linux-src ]; then
+            echo "ERROR: Failed to download kernel source"
+            exit 1
+          fi
+          # Initialize git repo so git apply --3way works (requires git index)
+          cd linux-src && git init && git config user.email "actions@github.com" && git config user.name "github-actions[bot]" && git add -A && git commit -m "base" --quiet --allow-empty
 
       - name: Apply Xanmod BBRv3 patches
         working-directory: linux-src
@@ -179,22 +190,53 @@ jobs:
             for p in $(find "$PATCH_DIR" -name '*.patch' -type f | sort); do
               pname=$(basename "$p")
               echo "  Applying: $pname"
-              git apply --3way "$p"
+              if git apply --3way "$p" 2>/dev/null; then
+                echo "  applied via --3way"
+              elif git apply --recount --whitespace=fix "$p" 2>/dev/null; then
+                echo "  applied via git apply --recount"
+              elif patch -p1 --forward --no-backup-if-mismatch -F3 --dry-run < "$p" >/dev/null 2>&1; then
+                patch -p1 --forward --no-backup-if-mismatch -F3 < "$p"
+                echo "  applied via patch -p1 -F3 (fallback)"
+              else
+                echo "ERROR: $pname failed. patch -p1 dry-run output:"
+                patch -p1 --forward --no-backup-if-mismatch -F3 --dry-run < "$p" 2>&1 | head -50
+                echo ""
+                echo "--- Debug: tcp_bbr.c around L545-555 ---"
+                if [ -f net/ipv4/tcp_bbr.c ]; then
+                  sed -n '540,560p' net/ipv4/tcp_bbr.c | cat -A
+                fi
+                echo "--- Debug: searching for bbr_set_pacing_rate in tcp_bbr.c ---"
+                if [ -f net/ipv4/tcp_bbr.c ]; then
+                  grep -n 'bbr_set_pacing_rate.*BBR_UNIT' net/ipv4/tcp_bbr.c | head -5
+                fi
+                exit 1
+              fi
             done
           fi
 
           echo ""
           echo "=== Xanmod BBRv3 patches applied ==="
-      - name: Apply CloudPassenger custom patches (patch -p1)
+      - name: Apply CloudPassenger custom patches
         working-directory: linux-src
         run: |
           KERNEL_MAJOR="${{ needs.check-version.outputs.kernel_major }}"
-          git clone --depth=1 https://github.com/CloudPassenger/Cloud-Kernel-BBRv3.git /tmp/cp-patches
-          PATCH_DIR="/tmp/cp-patches/kernel_patches/${KERNEL_MAJOR}"
 
-          if [ ! -d "$PATCH_DIR" ]; then
-            echo "ERROR: CloudPassenger patch dir not found: $PATCH_DIR"
-            exit 1
+          # 优先使用本地仓库中的补丁 (支持非6.12版本的rebase补丁)
+          # 本地不存在时 fallback 到 CloudPassenger 远程仓库
+          LOCAL_PATCH_DIR="${{ github.workspace }}/kernel_patches/${KERNEL_MAJOR}"
+          if [ -d "$LOCAL_PATCH_DIR" ]; then
+            PATCH_DIR="$LOCAL_PATCH_DIR"
+            echo "Using LOCAL patches: $PATCH_DIR"
+          else
+            echo "No local patches for $KERNEL_MAJOR, cloning CloudPassenger repo..."
+            git clone --depth=1 https://github.com/CloudPassenger/Cloud-Kernel-BBRv3.git /tmp/cp-patches
+            PATCH_DIR="/tmp/cp-patches/kernel_patches/${KERNEL_MAJOR}"
+            if [ ! -d "$PATCH_DIR" ]; then
+              echo "ERROR: No patches found for $KERNEL_MAJOR (neither local nor remote)"
+              echo "Available local:"
+              ls -d ${{ github.workspace }}/kernel_patches/*/ 2>/dev/null || echo "  (none)"
+              exit 1
+            fi
           fi
 
           for patch_file in $(find "$PATCH_DIR" -name '*.patch' -type f | sort); do
@@ -202,8 +244,22 @@ jobs:
             echo ""
             echo "=== Applying CloudPassenger patch: $patch_name ==="
 
-            if patch -p1 --no-backup-if-mismatch -F3 --dry-run < "$patch_file" >/dev/null 2>&1; then
-              patch -p1 --no-backup-if-mismatch -F3 < "$patch_file"
+            if [ "$KERNEL_MAJOR" != "6.12" ]; then
+              # 6.18+: git apply --3way preferred; fallback patch -p1 -F3 (cross-version base blob mismatch)
+              if git apply --3way "$patch_file" 2>/dev/null; then
+                echo "Patch $patch_name applied successfully (git apply --3way)"
+              elif git apply "$patch_file" 2>/dev/null; then
+                echo "Patch $patch_name applied successfully (git apply)"
+              elif patch -p1 --forward --no-backup-if-mismatch -F3 --dry-run < "$patch_file" >/dev/null 2>&1; then
+                patch -p1 --forward --no-backup-if-mismatch -F3 < "$patch_file"
+                echo "Patch $patch_name applied successfully (patch -p1 -F3 fallback)"
+              else
+                echo "ERROR: Patch $patch_name failed. patch -p1 dry-run output:"
+                patch -p1 --forward --no-backup-if-mismatch -F3 --dry-run < "$patch_file" 2>&1 | head -50
+                exit 1
+              fi
+            elif patch -p1 --forward --no-backup-if-mismatch -F3 --dry-run < "$patch_file" >/dev/null 2>&1; then
+              patch -p1 --forward --no-backup-if-mismatch -F3 < "$patch_file"
               echo "Patch $patch_name applied successfully (p1)"
             elif patch -p0 --no-backup-if-mismatch -F3 --dry-run < "$patch_file" >/dev/null 2>&1; then
               patch -p0 --no-backup-if-mismatch -F3 < "$patch_file"
@@ -273,33 +329,40 @@ jobs:
           done
 
           # 3. Fix tso_segs callback signature compatibility
-          # 6.12: .min_tso_segs(sk) → removed (CP uses old signature)
-          # 6.18+: .tso_segs(sk, mss_now) → CP BBRPlus already uses new signature
-          # For 6.12 only: remove old .min_tso_segs assignments and function defs
+          # 6.18 kernel: tcp_congestion_ops lacks .tso_segs (XanMod tcp.h hunk may not apply)
+          # Source patches already have tso_segs funcs removed; sed removes .tso_segs= and BTF lines
           if [ "$KERNEL_MAJOR" = "6.12" ]; then
-            echo "Fixing tso_segs for 6.12 (removing old .min_tso_segs)..."
-            for src in net/ipv4/tcp_bbr1.c net/ipv4/tcp_bbrplus.c; do
+            echo "Fixing tso_segs for 6.12 (removing .tso_segs assignments and BTF)..."
+            for src in net/ipv4/tcp_bbr1.c net/ipv4/tcp_bbrplus.c net/ipv4/tcp_bbrplusv3.c; do
               if [ -f "$src" ]; then
-                algo=$(basename "$src" .c | sed 's/tcp_//')
-                func="${algo}_tso_segs"
-                echo "  Fixing $src: removing .tso_segs assignment..."
-                sed -i "/\\.tso_segs.*=.*${func},/d" "$src"
-                sed -i "/^__bpf_kfunc static u32 ${func}/,/^}/d" "$src"
-                sed -i "/^static u32 ${func}/,/^}/d" "$src"
-                sed -i "/BTF_ID_FLAGS(func, ${func})/d" "$src"
-                sed -i "/static u32 ${func}(/d" "$src"
+                echo "  Fixing $src"
+                sed -i '/\.tso_segs[[:space:]]*=/d' "$src"
+                sed -i '/BTF_ID_FLAGS(func, .*_tso_segs)/d' "$src"
               fi
             done
           else
-            echo "tso_segs: $KERNEL_MAJOR uses new signature, CP patches already adapted"
+            if grep -q 'tso_segs' include/net/tcp.h 2>/dev/null && grep -q '\.tso_segs' include/net/tcp.h 2>/dev/null; then
+              echo "tso_segs: struct tcp_congestion_ops has .tso_segs member, CP patches compatible"
+            else
+              echo "tso_segs: struct tcp_congestion_ops lacks .tso_segs, removing assignments and BTF..."
+              for src in net/ipv4/tcp_bbr1.c net/ipv4/tcp_bbrplus.c net/ipv4/tcp_bbrplusv3.c; do
+                if [ -f "$src" ]; then
+                  echo "  Fixing $src"
+                  sed -i '/\.tso_segs[[:space:]]*=/d' "$src"
+                  sed -i '/BTF_ID_FLAGS(func, .*_tso_segs)/d' "$src"
+                fi
+              done
+            fi
           fi
 
-          # 4. Make tcp_tso_autosize non-static for BBRPlus (6.12 only)
-          if [ "$KERNEL_MAJOR" = "6.12" ]; then
-            if grep -q 'static u32 tcp_tso_autosize' net/ipv4/tcp_output.c; then
-              echo "Fixing tcp_tso_autosize: static -> non-static..."
-              sed -i 's/^static u32 tcp_tso_autosize/u32 tcp_tso_autosize/' net/ipv4/tcp_output.c
-            fi
+          # 4. Make tcp_tso_autosize non-static for BBRPlus
+          # 6.12/6.18: tcp_tso_autosize 是 static，CP BBRPlus 需要 EXPORT_SYMBOL
+          # 7.0+: 可能已 non-static 或签名变化，按需适配
+          if grep -q 'static u32 tcp_tso_autosize' net/ipv4/tcp_output.c; then
+            echo "Fixing tcp_tso_autosize: static -> non-static..."
+            sed -i 's/^static u32 tcp_tso_autosize/u32 tcp_tso_autosize/' net/ipv4/tcp_output.c
+          else
+            echo "tcp_tso_autosize already non-static or not found, skipping"
           fi
 
           echo ""

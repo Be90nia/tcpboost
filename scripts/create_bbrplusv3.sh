@@ -805,14 +805,14 @@ fi
 # 8. 修改 Kconfig 和 Makefile
 # ============================================
 
-# 添加 Kconfig 选项（在 net/ipv4/Kconfig 中 TCP_CONG_BBR 后面插入）
+# 添加 Kconfig 选项（在 net/ipv4/Kconfig 中 choice 块前插入）
 KCONFIG_FILE="net/ipv4/Kconfig"
 if [ ! -f "$KCONFIG_FILE" ]; then
   echo "警告: 未找到 $KCONFIG_FILE，跳过 Kconfig 修改"
 else
-if ! grep -q "CONFIG_TCP_CONG_BBRPLUSV3" "$KCONFIG_FILE" 2>/dev/null; then
-  sed -i '/config TCP_CONG_BBR$/,/^[^[:space:]]/{
-    /^[^[:space:]]/a\
+if ! grep -q "TCP_CONG_BBRPLUSV3" "$KCONFIG_FILE" 2>/dev/null; then
+  # 在 choice 块前插入，choice 是所有版本 Kconfig 的固定结构
+  sed -i '/^choice$/i\
 \
 config TCP_CONG_BBRPLUSV3\
 	tristate "BBRPlusV3 (BBRv3 + aggressive probing)"\
@@ -828,7 +828,8 @@ config TCP_CONG_BBRPLUSV3\
 	  Recommended for VPS/proxy scenarios with packet loss 1-5%.\
 	  \
 	  Module will be called tcp_bbrplusv3.
-  }' "$KCONFIG_FILE"
+
+' "$KCONFIG_FILE"
   echo "已添加 Kconfig 选项到 $KCONFIG_FILE"
 fi
 fi
