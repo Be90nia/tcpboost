@@ -10,6 +10,9 @@
 set -e
 export LANG=en_US.UTF-8
 
+# 全局清理：任意退出路径（set -e 触发/Ctrl+C/正常退出）都清理内核下载临时目录
+trap '[ -n "$KERNEL_TMPDIR" ] && rm -rf "$KERNEL_TMPDIR" 2>/dev/null' EXIT
+
 # ===== 全局变量 =====
 VERSION="1.0.0-dev"
 REPO="Be90nia/tcpboost"
@@ -299,6 +302,17 @@ detect_kernel_series() {
   echo "$kver" | grep -oP '^\d+\.\d+' || echo ""
 }
 
+# 替换或追加 sysctl key（避免文件重复 key）
+# profile cat > 时可能已写入某些 key，后续需要 override 时用此函数
+set_sysctl_key() {
+  local key="$1" value="$2" file="$3"
+  if grep -qE "^${key}[[:space:]]*=" "$file" 2>/dev/null; then
+    sed -i "s|^${key}[[:space:]]*=.*|${key} = ${value}|" "$file"
+  else
+    echo "${key} = ${value}" >> "$file"
+  fi
+}
+
 # EEVDF 版本自适应优化
 # 根据内核版本系列调整 sysctl，6.12/6.18 与 7.0+ 参数不同
 # 必须在 profile sysctl 写入后调用（追加/覆盖版本特定值）
@@ -314,9 +328,10 @@ apply_eevdf_tuning() {
   if version_ge "$series" "7.0"; then
     # EEVDF 成熟版本 (>= 7.0)：RSEQ 时间片扩展 + 抢占优化 + fq EDT 修复
     # busy_poll=80（RSEQ 允许更长 busy poll），netdev_budget_usecs=4000（中断更频繁）
-    echo "net.core.busy_poll = 80" >> "$SYSCTL_FILE"
-    echo "net.core.busy_read = 80" >> "$SYSCTL_FILE"
-    echo "net.core.netdev_budget_usecs = 4000" >> "$SYSCTL_FILE"
+    # set_sysctl_key 替换 profile 已写的 busy_poll=50，避免文件重复 key
+    set_sysctl_key "net.core.busy_poll" "80" "$SYSCTL_FILE"
+    set_sysctl_key "net.core.busy_read" "80" "$SYSCTL_FILE"
+    set_sysctl_key "net.core.netdev_budget_usecs" "4000" "$SYSCTL_FILE"
     sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1
     info "EEVDF 自适应 ($series >= 7.0): busy_poll=80, budget_usecs=4000"
   else
@@ -647,6 +662,20 @@ write_bbrplusv3_service() {
   local s_rtt_max_entries=""
   local description="TCPBoost BBRPlusV3 Parameters"
 
+  # 从 conf 恢复用户保存的 min_pacing_rate 套装（防止无参数调用丢失配置）
+  # 仅在未显式传参时生效（后续覆盖参数解析优先于 conf 默认）
+  if [ -f "$CONF_DIR/bbrplusv3.conf" ]; then
+    local conf_mpr
+    conf_mpr=$(grep -E '^min_pacing_rate=' "$CONF_DIR/bbrplusv3.conf" 2>/dev/null | cut -d= -f2)
+    if [ -n "$conf_mpr" ] && [ "$conf_mpr" != "0" ]; then
+      s_min_pacing_rate="$conf_mpr"
+      local _v
+      _v=$(grep -E '^probe_rtt_win_ms=' "$CONF_DIR/bbrplusv3.conf" 2>/dev/null | cut -d= -f2); [ -n "$_v" ] && s_probe_rtt_win_ms="$_v"
+      _v=$(grep -E '^probe_rtt_mode_ms=' "$CONF_DIR/bbrplusv3.conf" 2>/dev/null | cut -d= -f2); [ -n "$_v" ] && s_probe_rtt_mode_ms="$_v"
+      _v=$(grep -E '^pacing_gain_down=' "$CONF_DIR/bbrplusv3.conf" 2>/dev/null | cut -d= -f2); [ -n "$_v" ] && s_pacing_gain_down="$_v"
+    fi
+  fi
+
   # 解析覆盖参数
   local override
   for override in "$@"; do
@@ -874,6 +903,20 @@ EOF
   echo -e "  ${YELLOW}恢复默认:${NC} ./tcp.sh set-min-pacing-rate 0"
 }
 
+# 验证整数输入：必须是数字且在 [min, max] 范围内
+# 用法: _validate_int <name> <value> <min> <max>
+_validate_int() {
+  local name="$1" value="$2" min="$3" max="$4"
+  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+    error "${name} 必须是数字，当前: $value"
+    return 1
+  fi
+  if [ "$value" -lt "$min" ] || [ "$value" -gt "$max" ]; then
+    error "${name} 范围 ${min}-${max}，当前: $value"
+    return 1
+  fi
+}
+
 # 设置 lotspeed-1 跨连接 min_rtt 历史缓存
 # 机制: per-daddr hashtable 缓存 min_rtt，新连接 STARTUP 预填滤波器
 # 适用: 跨太平洋高延迟链路，新连接 cold start 时 cwnd/pacing 估计更精准
@@ -943,18 +986,9 @@ set_lotspeed() {
       local max_entries="${4:-4096}"
 
       # 参数范围验证
-      if [ "$ttl" -lt 60 ] || [ "$ttl" -gt 3600 ] 2>/dev/null; then
-        error "ttl_sec 范围 60-3600，当前: $ttl"
-        return 1
-      fi
-      if [ "$min_samples" -lt 1 ] || [ "$min_samples" -gt 100 ] 2>/dev/null; then
-        error "min_samples 范围 1-100，当前: $min_samples"
-        return 1
-      fi
-      if [ "$max_entries" -lt 256 ] || [ "$max_entries" -gt 65536 ] 2>/dev/null; then
-        error "max_entries 范围 256-65536，当前: $max_entries"
-        return 1
-      fi
+      _validate_int "ttl_sec" "$ttl" 60 3600 || return 1
+      _validate_int "min_samples" "$min_samples" 1 100 || return 1
+      _validate_int "max_entries" "$max_entries" 256 65536 || return 1
 
       # 写入 sysfs（即时生效）
       echo 1 > "$param_dir/historical_cache_enable" || { warn "写入 historical_cache_enable 失败"; return 1; }

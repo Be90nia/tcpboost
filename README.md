@@ -114,7 +114,7 @@ bash <(curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/Be90nia
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `loss_thresh` | 3% (7/256) | 丢包阈值，容忍跨太平洋正常丢包(1-3%)，真实拥塞(>3%)降速 |
+| `loss_thresh` | 3.125% (8/256) | 丢包阈值，容忍跨太平洋正常丢包(1-3%)，真实拥塞(>3%)降速 |
 | `beta` | 30% (76/256) | BBRPlus 经典值，丢包后恢复 70% |
 | `pacing_gain_down` | 0.85 (217/256) | PROBE_BW DOWN 阶段速率，减少下载波动 |
 | `probe_rtt_mode_ms` | 100 | PROBE_RTT 持续时间，延迟峰值深度 |
