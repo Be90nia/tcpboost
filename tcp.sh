@@ -350,7 +350,9 @@ download_kernel() {
 
   case "$PKG_FMT" in
     deb)
-      local files="linux-image-${version}-tcpboost_${version}-1_amd64.deb
+      # 文件名含 + 后缀：KERNELRELEASE 的 + 来自 setlocalversion（git 仓库 + HEAD 不在 tag）
+      # deb 版本号 X.Y.Z-1 干净（KDEB_PKGVERSION 覆盖了 git describe）
+      local files="linux-image-${version}-tcpboost+_${version}-1_amd64.deb
                    linux-libc-dev_${version}-1_amd64.deb"
       for f in $files; do
         dl "$(get_release_url "$version" "$f")" "${KERNEL_TMPDIR}/${f}" || {
@@ -365,8 +367,8 @@ download_kernel() {
       fi
       ;;
     rpm)
-      local files="kernel-${version}_tcpboost-2.x86_64.rpm
-                   kernel-devel-${version}_tcpboost-2.x86_64.rpm"
+      local files="kernel-${version}_tcpboost+-1.x86_64.rpm
+                   kernel-devel-${version}_tcpboost+-1.x86_64.rpm"
       for f in $files; do
         dl "$(get_release_url "$version" "$f")" "${KERNEL_TMPDIR}/${f}" || {
           warn "下载失败: $f（可能不存在，跳过）"
