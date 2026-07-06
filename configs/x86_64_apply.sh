@@ -171,6 +171,8 @@ fi
 # 6. 阻止 build 阶段读证书的杂项
 ./scripts/config --disable CONFIG_SIGNED_PE_FILE_VERIFICATION
 ./scripts/config --disable CONFIG_EFI_SECRET
+# 7. 统一包名格式：禁用 LOCALVERSION_AUTO (6.18+ 默认开启会导致 deb 文件名多出 "+" 和 git hash 后缀，tcp.sh 下载模板对不上会 404)
+./scripts/config --disable CONFIG_LOCALVERSION_AUTO
 
 # ============================================
 # Scheduler / EEVDF 配置 (版本自适应)
