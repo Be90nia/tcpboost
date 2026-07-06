@@ -24,8 +24,7 @@ build/
 *.db
 .beads-credential-key
 
-# Tool artifacts
+# Tool artifacts (AI tool outputs, not project data)
 .codebase-memory/
-kernel_patches/
 graphify-out/
 *.rej
