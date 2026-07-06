@@ -180,15 +180,17 @@ fi
 # CONFIG_SCHED_DEBUG: 调试fs接口 (debugfs/sched_features)
 ./scripts/config --enable CONFIG_SCHED_DEBUG
 
-# 7.0+ x86 取消 PREEMPT_NONE/PREEMPT_VOLUNTARY, 默认 PREEMPT_LAZY
+# 7.0+ x86: PREEMPT_FULL (代理/交互场景延迟优先，完全抢占)
+# 取代之前的 PREEMPT_LAZY (吞吐友好但长尾延迟高)，代理场景延迟敏感
 # 6.12/6.18: 保持 PREEMPT_VOLUNTARY (默认)
 KERNEL_MAJOR=$(grep -oP '^VERSION\s*=\s*\K\d+' Makefile 2>/dev/null || echo 6)
 KERNEL_MINOR=$(grep -oP '^PATCHLEVEL\s*=\s*\K\d+' Makefile 2>/dev/null || echo 12)
 if [ "$KERNEL_MAJOR" -ge 7 ]; then
-  echo "Linux $KERNEL_MAJOR.$KERNEL_MINOR: 启用 PREEMPT_LAZY"
+  echo "Linux $KERNEL_MAJOR.$KERNEL_MINOR: 启用 PREEMPT_FULL (代理延迟优先)"
   ./scripts/config --disable CONFIG_PREEMPT_NONE
   ./scripts/config --disable CONFIG_PREEMPT_VOLUNTARY
-  ./scripts/config --enable CONFIG_PREEMPT_LAZY
+  ./scripts/config --disable CONFIG_PREEMPT_LAZY
+  ./scripts/config --enable CONFIG_PREEMPT_FULL
 else
   echo "Linux $KERNEL_MAJOR.$KERNEL_MINOR: 保持 PREEMPT_VOLUNTARY"
 fi
