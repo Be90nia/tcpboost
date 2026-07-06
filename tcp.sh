@@ -276,10 +276,25 @@ list_available_kernels() {
   echo "$body" | grep -oP 'tag/v\K[0-9]+\.[0-9]+\.[0-9]+' | sort -ruV
 }
 
-# 检测当前运行内核的大版本系列（如 6.12, 7.0, 7.1）
+# 版本比较：判断 $1 >= $2（语义版本，如 7.1 >= 7.0、7.2 >= 7.0）
+# sort -V -C 检查升序：输入 "$2\n$1" 已排序 ⇔ $2 <= $1 ⇔ $1 >= $2
+# 用函数取代 case 枚举，避免每出个新版本都要改代码
+version_ge() {
+  [ "$1" = "$2" ] && return 0
+  printf '%s\n%s\n' "$2" "$1" | sort -V -C 2>/dev/null
+}
+
+# 检测内核大版本系列（如 6.12, 7.0, 7.1）
+# 优先读 install 时持久化的版本号（install 后未重启也能感知新内核），
+# fallback 到 uname -r（当前运行内核）
 detect_kernel_series() {
-  local kver
-  kver=$(uname -r 2>/dev/null)
+  local kver=""
+  if [ -f /etc/tcpboost/installed-version ]; then
+    kver=$(cat /etc/tcpboost/installed-version 2>/dev/null)
+  fi
+  if [ -z "$kver" ]; then
+    kver=$(uname -r 2>/dev/null)
+  fi
   # 提取 x.y 部分（如 7.1.2-tcpboost+ → 7.1）
   echo "$kver" | grep -oP '^\d+\.\d+' || echo ""
 }
@@ -296,27 +311,18 @@ apply_eevdf_tuning() {
     return
   fi
 
-  case "$series" in
-    6.12|6.18)
-      # EEVDF 早期版本：ksoftirqd 唤醒延迟较高
-      # busy_poll=50（当前默认），netdev_budget_usecs=8000（默认）
-      info "EEVDF 自适应 ($series): 早期 EEVDF，保持默认预算"
-      ;;
-    7.0|7.1)
-      # EEVDF 成熟版本：RSEQ 时间片扩展 + LAZY 抢占 + fq EDT 修复
-      # 提升 busy_poll 到 80us（RSEQ 允许更长 busy poll）
-      # 缩短 netdev_budget_usecs 到 4000（LAZY 模式下中断更频繁）
-      echo "net.core.busy_poll = 80" >> "$SYSCTL_FILE"
-      echo "net.core.busy_read = 80" >> "$SYSCTL_FILE"
-      echo "net.core.netdev_budget_usecs = 4000" >> "$SYSCTL_FILE"
-      sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1
-      info "EEVDF 自适应 ($series): busy_poll=80, budget_usecs=4000"
-      ;;
-    *)
-      # 未知版本，保守处理
-      :
-      ;;
-  esac
+  if version_ge "$series" "7.0"; then
+    # EEVDF 成熟版本 (>= 7.0)：RSEQ 时间片扩展 + 抢占优化 + fq EDT 修复
+    # busy_poll=80（RSEQ 允许更长 busy poll），netdev_budget_usecs=4000（中断更频繁）
+    echo "net.core.busy_poll = 80" >> "$SYSCTL_FILE"
+    echo "net.core.busy_read = 80" >> "$SYSCTL_FILE"
+    echo "net.core.netdev_budget_usecs = 4000" >> "$SYSCTL_FILE"
+    sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1
+    info "EEVDF 自适应 ($series >= 7.0): busy_poll=80, budget_usecs=4000"
+  else
+    # EEVDF 早期版本 (< 7.0)：ksoftirqd 唤醒延迟较高，保持默认预算
+    info "EEVDF 自适应 ($series < 7.0): 早期 EEVDF，保持默认预算"
+  fi
 }
 
 # 下载内核包
@@ -400,7 +406,7 @@ install_kernel() {
         6.18) desc="EEVDF vprot 优化版" ;;
         7.0)  desc="RSEQ+LAZY抢占+HRTICK重写" ;;
         7.1)  desc="运行队列扁平化+fq EDT 修复" ;;
-        *)    desc="" ;;
+        *)    desc="Linux $series 新版本" ;;
       esac
       printf "  %2d) %-12s %s\n" "$i" "$v" "$desc"
       i=$((i + 1))
@@ -448,19 +454,20 @@ install_kernel() {
   echo ""
   info "内核 ${version}-tcpboost 安装完成！"
 
-  # EEVDF 版本提示
+  # 持久化已安装版本号（供 detect_kernel_series 在未重启时也能感知新版本）
+  mkdir -p /etc/tcpboost
+  echo "$version" > /etc/tcpboost/installed-version
+
+  # EEVDF 版本提示（version_ge 兼容未来 7.2/7.3/8.0...）
   local major=${version%%.*}
   local rest=${version#*.}
   local minor=${rest%%.*}
   local series="${major}.${minor}"
-  case "$series" in
-    6.12|6.18)
-      info "EEVDF: $series 早期版本，重启后应用优化方案时将使用默认预算参数"
-      ;;
-    7.0|7.1)
-      info "EEVDF: $series 成熟版本，重启后应用优化方案将自动提升 busy_poll=80、缩短 budget_usecs=4000"
-      ;;
-  esac
+  if version_ge "$series" "7.0"; then
+    info "EEVDF: $series 成熟版本，重启后应用优化方案将自动提升 busy_poll=80、缩短 budget_usecs=4000"
+  else
+    info "EEVDF: $series 早期版本，重启后应用优化方案时将使用默认预算参数"
+  fi
 
   warn "需要重启服务器才能生效。"
   echo ""
@@ -1724,14 +1731,11 @@ show_algorithm_status() {
   local series
   series=$(detect_kernel_series)
   if [ -n "$series" ]; then
-    case "$series" in
-      6.12|6.18)
-        echo "  EEVDF:        $series 早期版 (busy_poll=50, budget_usecs=8000)"
-        ;;
-      7.0|7.1)
-        echo "  EEVDF:        $series 成熟版 (busy_poll=80, budget_usecs=4000)"
-        ;;
-    esac
+    if version_ge "$series" "7.0"; then
+      echo "  EEVDF:        $series 成熟版 (busy_poll=80, budget_usecs=4000)"
+    else
+      echo "  EEVDF:        $series 早期版 (busy_poll=50, budget_usecs=8000)"
+    fi
   fi
 
   echo "=========================================="
