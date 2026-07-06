@@ -529,10 +529,19 @@ jobs:
           JOBS=$(nproc)
           echo "并行任务数: $JOBS"
 
+          # 统一文件名（关键修复）：
+          # 1. .scmversion 空文件让 setlocalversion 输出空，消除 KERNELRELEASE 的 + 后缀
+          #    （即使 CONFIG_LOCALVERSION_AUTO=off，git 仓库下 setlocalversion 仍会追加 dirty marker）
+          touch .scmversion
+          # 2. KDEB_PKGVERSION 用纯 kernelversion 覆盖，消除 deb 版本的 -g<hash> 后缀
+          #    （scripts/build-version 独立调 git describe，不受 LOCALVERSION_AUTO 控制）
+          KVER=$(make kernelversion)
+          KDEB_PKGVERSION="${KVER}-1"
+          echo "DEB 包版本: ${KDEB_PKGVERSION} (KERNELRELEASE 应为 ${KVER}-tcpboost)"
           # tee 到日志文件，失败时用于诊断
           # INSTALL_MOD_STRIP=1: strip 模块调试符号，linux-image deb 600-900MB→100-200MB
           DEB_BUILD_PROFILES=pkg.linux-upstream.nokernelheaders \
-          make -j${JOBS} INSTALL_MOD_STRIP=1 bindeb-pkg 2>&1 | tee /tmp/build-deb.log
+          make -j${JOBS} INSTALL_MOD_STRIP=1 KDEB_PKGVERSION=${KDEB_PKGVERSION} bindeb-pkg 2>&1 | tee /tmp/build-deb.log
           BUILD_EXIT=${PIPESTATUS[0]}
 
           ccache -s
