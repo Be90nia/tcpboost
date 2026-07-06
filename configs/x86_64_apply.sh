@@ -83,7 +83,7 @@ fi
 
 # 默认拥塞控制设为 BBRv3
 ./scripts/config --enable CONFIG_DEFAULT_BBR
-./scripts/config --set-val CONFIG_DEFAULT_TCP_CONG "bbr"
+./scripts/config --set-str CONFIG_DEFAULT_TCP_CONG "bbr"
 
 # 禁用默认 Cubic
 ./scripts/config --disable CONFIG_DEFAULT_CUBIC
@@ -95,6 +95,12 @@ fi
 ./scripts/config --enable CONFIG_NET_SCH_FQ
 ./scripts/config --module CONFIG_NET_SCH_FQ_CODEL
 ./scripts/config --module CONFIG_NET_SCH_CAKE
+./scripts/config --enable CONFIG_NET_SCH_HTB
+./scripts/config --enable CONFIG_NET_SCH_TBF
+./scripts/config --enable CONFIG_NET_SCH_PRIO
+./scripts/config --enable CONFIG_NET_SCH_SFQ
+./scripts/config --enable CONFIG_NET_SCH_RED
+./scripts/config --enable CONFIG_NET_SCH_HFSC
 
 # ============================================
 # 网络 Buffer 优化
@@ -175,8 +181,8 @@ fi
 # ============================================
 # Scheduler / EEVDF 配置 (版本自适应)
 # ============================================
-# CONFIG_SCHED_DEBUG: 调试fs接口 (debugfs/sched_features)
-./scripts/config --enable CONFIG_SCHED_DEBUG
+# CONFIG_SCHED_DEBUG: 调试fs接口 (debugfs/sched_features)，生产禁用减小内核体积 (srx)
+./scripts/config --disable CONFIG_SCHED_DEBUG
 
 # 7.0+ x86 取消 PREEMPT_NONE/PREEMPT_VOLUNTARY, 默认 PREEMPT_LAZY
 # 6.12/6.18: 保持 PREEMPT_VOLUNTARY (默认)

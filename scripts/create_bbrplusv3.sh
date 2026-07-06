@@ -250,7 +250,7 @@ bbrplusv3_profile_table[] = {
 		.pacing_gain_down	= BBR_UNIT * 9 / 10,
 		.startup_cwnd_gain	= BBR_UNIT * 9 / 4,
 		.startup_pacing_gain	= BBR_UNIT * 2885 / 1000 + 1,
-		.drain_gain		= BBR_UNIT * 1200 / 2885,
+		.drain_gain		= BBR_UNIT * 1200 / 2885,	/* wifi: 0.416 — intentionally > 1/startup_pacing_gain(0.347), WiFi 场景低 RTT 容忍 DRAIN 不充分 */
 		.beta			= BBR_UNIT * 25 / 100,
 		.loss_thresh		= BBR_UNIT * 5 / 100,
 		.full_bw_thresh		= BBR_UNIT * 11 / 10,
@@ -573,7 +573,10 @@ static inline __be32 bbrplusv3_get_daddr(const struct sock *sk);' "$BBRPLUSV3_SR
 
 # A6-1: struct + 全局 + helper + lookup + update (注入到 bbr_init 之前)
 # 代码块约 90 行，使用 heredoc 写入临时文件后用 awk 注入（不适合 sed）
-cat > /tmp/lotspeed1_block1.c <<'LOTSPEED1_EOF'
+# mktemp 避免 CI 并发冲突 (fr7) + trap EXIT 清理残留 (8me)
+TMP_BLOCK=$(mktemp) || { echo "错误: mktemp 失败" >&2; exit 1; }
+trap 'rm -f "$TMP_BLOCK"' EXIT
+cat > "$TMP_BLOCK" <<'LOTSPEED1_EOF'
 /* tcpboost-lotspeed-1: cross-connection min_rtt historical cache
  * Academic basis: RFC 3124 macroflow + qiuxiuya/lotspeed zeta_history_map
  * Oracle reviewed (bg_5ccfb6cf): RCU read + spinlock write + bounded entries
@@ -697,12 +700,18 @@ LOTSPEED1_EOF
 
 # 注入到 bbr_init 之前（awk splicing，避免 sed 大代码块难题）
 # 注意：BBRv3 源码 bbr_init 带 __bpf_kfunc 前缀，故不用 ^ 锚定
-awk '/static void bbr_init\(struct sock \*sk\)/{
-	while ((getline line < "/tmp/lotspeed1_block1.c") > 0) print line
-	close("/tmp/lotspeed1_block1.c")
+# 注入到 bbr_init 之前（awk splicing，避免 sed 大代码块难题）
+# 注意：BBRv3 源码 bbr_init 带 __bpf_kfunc 前缀，故不用 ^ 锚定
+# awk -v 传变量避免字面量拼接，显式检查失败避免静默 (91q)
+if ! awk -v block_file="$TMP_BLOCK" '/static void bbr_init\(struct sock \*sk\)/{
+	while ((getline line < block_file) > 0) print line
+	close(block_file)
 }
-{print}' "$BBRPLUSV3_SRC" > "$BBRPLUSV3_SRC.tmp" && mv "$BBRPLUSV3_SRC.tmp" "$BBRPLUSV3_SRC"
-rm -f /tmp/lotspeed1_block1.c
+{print}' "$BBRPLUSV3_SRC" > "$BBRPLUSV3_SRC.tmp"; then
+    echo "错误: awk 注入 lotspeed-1 失败" >&2
+    exit 1
+fi
+mv "$BBRPLUSV3_SRC.tmp" "$BBRPLUSV3_SRC"
 
 # A6-2: bbr_init 注入点 1 - 从历史缓存预填 min_rtt（在 tcp_min_rtt 赋值之后）
 sed -i '/bbr->min_rtt_us = tcp_min_rtt(tp);/a\
@@ -794,9 +803,10 @@ verify_pattern 'historical_cache_enable' "lotspeed-1 module_param"
 
 if [ "$SED_ERRORS" -gt 0 ]; then
     echo "" >&2
-    echo "WARNING: $SED_ERRORS 个 sed 验证失败！" >&2
+    echo "ERROR: $SED_ERRORS 个 sed 验证失败！" >&2
     echo "  生成的模块可能行为异常（可能得到 vanilla BBRv3）" >&2
     echo "  建议：检查 BBRv3 源码版本兼容性，或手动调整 sed 模式" >&2
+    exit 1
 else
     echo "  所有关键 sed 修改验证通过"
 fi
@@ -847,11 +857,11 @@ fi
 PRIV_FILE="include/net/inet_connection_sock.h"
 if [ -f "$PRIV_FILE" ]; then
   # 方式1: 从 icsk_ca_priv[N / sizeof(u64)] 格式中提取 N（直接数字格式）
-  CURRENT_PRIV_SIZE=$(grep -oE 'icsk_ca_priv\[[0-9]+' "$PRIV_FILE" 2>/dev/null | grep -oE '[0-9]+$' | head -1 || echo "")
+  CURRENT_PRIV_SIZE=$(grep -oE 'icsk_ca_priv\[[0-9]+' "$PRIV_FILE" 2>/dev/null | grep -oE '[0-9]+$' | sort -n | tail -1 || echo "")
   
   # 方式2: 从 #define ICSK_CA_PRIV_SIZE (N) 或 ICSK_CA_PRIV_SIZE N 提取（支持括号格式）
   if [ -z "$CURRENT_PRIV_SIZE" ]; then
-    CURRENT_PRIV_SIZE=$(grep -oE '#define[[:space:]]+ICSK_CA_PRIV_SIZE[[:space:]]+\(?[0-9]+' "$PRIV_FILE" 2>/dev/null | grep -oE '[0-9]+$' | head -1 || echo "")
+    CURRENT_PRIV_SIZE=$(grep -oE '#define[[:space:]]+ICSK_CA_PRIV_SIZE[[:space:]]+\(?[0-9]+' "$PRIV_FILE" 2>/dev/null | grep -oE '[0-9]+$' | sort -n | tail -1 || echo "")
   fi
   
   # 默认值：无法检测时假设安全

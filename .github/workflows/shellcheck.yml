@@ -1,0 +1,33 @@
+name: ShellCheck
+
+on:
+  push:
+    paths:
+      - '**.sh'
+      - '.github/workflows/shellcheck.yml'
+  pull_request:
+    paths:
+      - '**.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shellcheck-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # ludeeus/action-shellcheck @ 2.0.0 (sha locked for supply-chain safety)
+      - uses: ludeeus/action-shellcheck@00b27aa7cb85167568cb48a3838b75f4265f2bca
+        with:
+          severity: warning
+          ignore_paths: >-
+            kernel_patches
+            patches
+            graphify-out
+            .codebase-memory

@@ -23,9 +23,17 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+
 env:
   KERNEL_SERIES: ${{ github.event.inputs.kernel_series || '6.12' }}
   CCACHE_DIR: /home/runner/.ccache
+
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.inputs.kernel_series || '6.12' }}-${{ github.event.inputs.kernel_version || '' }}
+  cancel-in-progress: false
 
 jobs:
   check-version:
@@ -96,7 +104,7 @@ jobs:
     needs: check-version
     if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 720
+    timeout-minutes: 360
     env:
       KBUILD_BUILD_USER: "tcpboost"
       KBUILD_BUILD_HOST: "github-actions"
@@ -229,7 +237,15 @@ jobs:
             echo "Using LOCAL patches: $PATCH_DIR"
           else
             echo "No local patches for $KERNEL_MAJOR, cloning CloudPassenger repo..."
-            git clone --depth=1 https://github.com/CloudPassenger/Cloud-Kernel-BBRv3.git /tmp/cp-patches
+            # Supply-chain safety: pin to verified CloudPassenger commit
+            # Update manually after testing upstream changes
+            CLOUDPASSENGER_REF="0314d34d05121a4faff856fa9724b995b1dff520"
+            git init /tmp/cp-patches
+            cd /tmp/cp-patches
+            git remote add origin https://github.com/CloudPassenger/Cloud-Kernel-BBRv3.git
+            git fetch --depth=1 origin "$CLOUDPASSENGER_REF"
+            git checkout FETCH_HEAD
+            cd -
             PATCH_DIR="/tmp/cp-patches/kernel_patches/${KERNEL_MAJOR}"
             if [ ! -d "$PATCH_DIR" ]; then
               echo "ERROR: No patches found for $KERNEL_MAJOR (neither local nor remote)"
@@ -266,13 +282,19 @@ jobs:
               echo "Patch $patch_name applied successfully (p0)"
             else
               echo "Patch $patch_name cannot be applied cleanly, forcing partial application..."
-              patch -p1 --force --no-backup-if-mismatch -F3 < "$patch_file" 2>&1 || true
+              patch -p1 --force --no-backup-if-mismatch -F3 < "$patch_file" 2>&1
               echo "Patch $patch_name force-applied (rejected hunks saved as .rej)"
             fi
-
-            find . -name '*.rej' -exec echo "REJECT: {}" \; 2>/dev/null || true
-            find . -name '*.rej' -delete 2>/dev/null || true
           done
+
+          # Fail build if any patch had rejected hunks (prevent green-build-broken-behavior)
+          REJECTS=$(find . -name '*.rej' 2>/dev/null)
+          if [ -n "$REJECTS" ]; then
+            echo "::error::Rejected patch hunks detected:"
+            printf '  REJECT: %s\n' $REJECTS
+            echo "::error::Build aborted — fix patch hunks before release"
+            exit 1
+          fi
 
           echo ""
           echo "=== CloudPassenger patches applied ==="
@@ -286,7 +308,10 @@ jobs:
           # 1. ICSK_CA_PRIV_SIZE - must be 152 bytes for BBRv3 struct bbr + A5 startup_start_stamp
           echo "Fixing ICSK_CA_PRIV_SIZE..."
           FILE="include/net/inet_connection_sock.h"
-          CURRENT=$(grep -oP 'icsk_ca_priv\[\K\d+' "$FILE" 2>/dev/null || echo "0")
+          CURRENT=$(grep -oP 'icsk_ca_priv\[\K\d+' "$FILE" 2>/dev/null) || {
+            echo "::error::Cannot parse ICSK_CA_PRIV_SIZE from $FILE (file missing or pattern not found)"
+            exit 1
+          }
           echo "Current ICSK_CA_PRIV_SIZE: $CURRENT / sizeof(u64)"
           NEED=152
           if [ "$CURRENT" -lt "$NEED" ]; then
@@ -652,13 +677,12 @@ jobs:
 
           | 参数 | BBRv3 | BBRPlusV3 | 说明 |
           |------|-------|-----------|------|
-          | pacing_gain UP | 1.25 | 1.50 | 更激进探测带宽 |
-          | pacing_gain DOWN | 0.91 | 0.75 | 更积极排空队列 |
-          | startup_cwnd_gain | 2.0 | 2.5 | STARTUP 更快填充管道 |
-          | bbr_beta | 30% | 20% | 丢包时减少更少 |
-          | loss_thresh | 2% | 5% | 丢包容忍度提高 |
-          | probe_rtt_mode_ms | 200 | 50 | PROBE_RTT 停留更短 |
-          | ecn_thresh | 50% | 70% | ECN 容忍度提高 |
+          | pacing_gain UP | 1.25 | 1.375 | 更激进探测带宽 |
+          | pacing_gain DOWN | 0.91 | 0.85 | 更积极排空队列 |
+          | startup_cwnd_gain | 2.0 | 2.25 | STARTUP cwnd 增长更快 |
+          | startup_pacing_gain | 2.5 | 2.885 | STARTUP pacing 更激进 |
+          | loss_thresh | 2% | 3% | 丢包容忍度提高 |
+          | probe_rtt_mode_ms | 200 | 100 | PROBE_RTT 停留更短 |
 
           ### 支持系统
 
@@ -683,6 +707,8 @@ jobs:
 
           # 替换版本号占位符
           sed -i "s/基于 Linux 编译/基于 Linux ${VERSION} 编译/" RELEASE_NOTES.md
+          # fork-friendly: 替换硬编码 repo 为实际仓库 (kyb)
+          sed -i "s|Be90nia/tcpboost|${GITHUB_REPOSITORY:-Be90nia/tcpboost}|g" RELEASE_NOTES.md
 
           RELEASE_FILES=$(find artifacts/ -type f | sort)
           if [ -z "$RELEASE_FILES" ]; then

@@ -169,7 +169,7 @@ echo 4096 > /sys/module/tcp_bbrplusv3/parameters/rtt_hist_max_entries  # 最大�
 | 方案 | 适用场景 | CC 算法 | TCP 缓冲 | 特殊优化 |
 |------|---------|---------|---------|---------|
 | 保守 | ≤100Mbps VPS | bbr（Google 原版） | 标准 | — |
-| 均衡 | 1Gbps VPS | bbrplus | 锐速风格 | initcwnd=32 |
+| 均衡 | 1Gbps VPS | bbrplus | 锐速风格 | — |
 | 激进 | 科学上网 | bbrplusv3 3%/30% | 锐速风格 + sysctl 调优 | initcwnd=32 + 可设 min_pacing |
 | **TLS优化** | **跨太平洋握手稳定性** | **bbrplusv3 aggressive** | **BDP 动态** | **TLS sysctl + IW10（不降速）** |
 

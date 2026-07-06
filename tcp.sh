@@ -1717,10 +1717,10 @@ show_algorithm_status() {
       prt_win=$(cat "$param_dir/probe_rtt_win_ms" 2>/dev/null || echo "?")
       flc=$(cat "$param_dir/full_loss_cnt" 2>/dev/null || echo "?")
       smm=$(cat "$param_dir/startup_max_ms" 2>/dev/null || echo "?")
-      local lt_pct=$(((lt * 100 + 128) / 256))
-      local beta_pct=$(((beta * 100 + 128) / 256))
+      local lt_pct=$(awk -v n="$lt" 'BEGIN { printf "%.1f", n * 100 / 256 }')
+      local beta_pct=$(awk -v n="$beta" 'BEGIN { printf "%.1f", n * 100 / 256 }')
       local mpr_mb=$(((mpr * 8 + 500000) / 1000000))
-      local pgd_pct=$(((pgd * 100 + 128) / 256))
+      local pgd_pct=$(awk -v n="$pgd" 'BEGIN { printf "%.1f", n * 100 / 256 }')
       echo "  loss_thresh:    ${lt} (${lt_pct}%)"
       echo "  beta:           ${beta} (${beta_pct}%)"
       echo "  pacing_down:    ${pgd} (${pgd_pct}%)"

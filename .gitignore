@@ -23,3 +23,9 @@ build/
 .dolt/
 *.db
 .beads-credential-key
+
+# Tool artifacts
+.codebase-memory/
+kernel_patches/
+graphify-out/
+*.rej
