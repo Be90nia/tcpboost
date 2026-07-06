@@ -1137,11 +1137,18 @@ speedtest_bandwidth() {
   local recommended
   recommended=$((max_mbps * 70 / 100))
   [ "$recommended" -lt 10 ] && recommended=10
+  # tcpboost-vf6: cap 1000 Mbps 防止 CDN 同城段误检导致 sysfs 设置过高
+  # 测速源是 anycast CDN, 可能路由到 VPS 同机房 edge, 测出 10Gbps+ 同城段带宽
+  # 跨太平洋实际带宽通常 100Mbps-1Gbps, cap 1000Mbps 防止 min_pacing_rate 过高
+  if [ "$recommended" -gt 1000 ]; then
+    warn "实测 ${max_mbps} Mbps 可能反映同城段 CDN 带宽, cap 到 1000 Mbps"
+    recommended=1000
+  fi
 
   echo ""
   info "实测最大带宽: ${max_mbps} Mbps"
   echo -e "  ${CYAN}推荐 min_pacing_rate:${NC} ${recommended} Mbps（实测 × 70%）"
-  echo -e "  ${YELLOW}原理:${NC} min_pacing_rate 不应超过实际带宽，否则过度发送导致丢包"
+  echo -e "  ${YELLOW}原理:${NC} min_pacing_rate 不应超过实际带宽; 实测可能是同城段 CDN 带宽, 跨太平洋场景建议手动设更低值"
   echo ""
 
   # 自动设置

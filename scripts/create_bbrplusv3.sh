@@ -440,6 +440,11 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 		if (READ_ONCE(bbr_drain_gain) < BBR_UNIT / 10 ||
 		    READ_ONCE(bbr_drain_gain) > BBR_UNIT)
 			WRITE_ONCE(bbr_drain_gain, BBR_UNIT * 1000 / 2885);
+		/* tcpboost-53n: pacing_gain_up (PROBE_BW UP) [0, 2.0] — 负值导致 pacing_rate u64 截断为大数 */
+		if (READ_ONCE(bbr_pacing_gain[BBR_BW_PROBE_UP]) < 0 ||
+		    READ_ONCE(bbr_pacing_gain[BBR_BW_PROBE_UP]) > BBR_UNIT * 2)
+			WRITE_ONCE(bbr_pacing_gain[BBR_BW_PROBE_UP],
+				   BBR_UNIT * 11 / 8);
 		atomic_set(&bbrplusv3_params_checked, 1);
 	}
 
@@ -723,6 +728,22 @@ sed -i '/bbr->min_rtt_us = tcp_min_rtt(tp);/a\
 \t\t\tbbr->min_rtt_us = hist_rtt;\
 \t}' "$BBRPLUSV3_SRC"
 
+# A6-2b: tcpboost-2s0 PROBE_RTT 首次触发随机化，防多连接同步进入 PROBE_RTT
+# 锚定 A6-2 注入块的闭合 }（tcpboost-lotspeed-1 注释之后的第一个 \t}）
+# 仅在 A6-2 成功注入后生效（A6-2 失败时 in_block 永远不为 1，安全跳过）
+awk '
+/tcpboost-lotspeed-1: pre-seed min_rtt/ { in_block = 1 }
+in_block && /^\t\}$/ {
+    print
+    print ""
+    print "\t/* tcpboost-2s0: 随机化首次 PROBE_RTT 触发，防多连接同步进入 PROBE_RTT */"
+    print "\tbbr->probe_rtt_min_stamp = tcp_jiffies32 -"
+    print "\t\tmsecs_to_jiffies(get_random_u32() % bbr_param(sk, probe_rtt_win_ms));"
+    in_block = 0
+    next
+}
+{print}' "$BBRPLUSV3_SRC" > "$BBRPLUSV3_SRC.tmp" && mv "$BBRPLUSV3_SRC.tmp" "$BBRPLUSV3_SRC"
+
 # A6-3: bbr_update_min_rtt 注入点 2 - 回写 min_rtt 到缓存
 # 锚点行 bbr->min_rtt_stamp = bbr->probe_rtt_min_stamp; 的下一行是 \t} (if 块闭合)
 # 用 awk N+a\ 等价逻辑：读到锚点后取下一行，若为闭合大括号则在其后注入
@@ -762,7 +783,7 @@ sed -i '/tcp_unregister_congestion_control(&tcp_bbrplusv3_cong_ops);/i\
 \t\tsynchronize_rcu();\
 \t}' "$BBRPLUSV3_SRC"
 
-echo "[7c-quater/9] 已注入 lotspeed-1: 跨连接 min_rtt 历史缓存 (4 处注入)"
+echo "[7c-quater/9] 已注入 lotspeed-1: 跨连接 min_rtt 历史缓存 (4 处注入) + 2s0: PROBE_RTT 首次触发随机化 (1 处注入)"
 
 # ============================================
 # 7d. tcpboost-wia: sed 替换验证
@@ -800,6 +821,7 @@ verify_pattern 'tcpboost-lotspeed-1: pre-seed min_rtt' "lotspeed-1 injection poi
 verify_pattern 'tcpboost-lotspeed-1: write back' "lotspeed-1 injection point 2"
 verify_pattern 'tcpboost-lotspeed-1: clean cross-conn' "lotspeed-1 module_exit cleanup"
 verify_pattern 'historical_cache_enable' "lotspeed-1 module_param"
+verify_pattern 'tcpboost-2s0' "2s0 PROBE_RTT 随机化注入"
 
 if [ "$SED_ERRORS" -gt 0 ]; then
     echo "" >&2
