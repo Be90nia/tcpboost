@@ -184,15 +184,16 @@ fi
 # CONFIG_SCHED_DEBUG: 调试fs接口 (debugfs/sched_features)，生产禁用减小内核体积 (srx)
 ./scripts/config --disable CONFIG_SCHED_DEBUG
 
-# 7.0+ x86 取消 PREEMPT_NONE/PREEMPT_VOLUNTARY, 默认 PREEMPT_LAZY
+# 7.0+ x86 启用 PREEMPT_FULL (代理场景延迟更友好, 代价少量吞吐)
 # 6.12/6.18: 保持 PREEMPT_VOLUNTARY (默认)
 KERNEL_MAJOR=$(grep -oP '^VERSION\s*=\s*\K\d+' Makefile 2>/dev/null || echo 6)
 KERNEL_MINOR=$(grep -oP '^PATCHLEVEL\s*=\s*\K\d+' Makefile 2>/dev/null || echo 12)
 if [ "$KERNEL_MAJOR" -ge 7 ]; then
-  echo "Linux $KERNEL_MAJOR.$KERNEL_MINOR: 启用 PREEMPT_LAZY"
+  echo "Linux $KERNEL_MAJOR.$KERNEL_MINOR: 启用 PREEMPT_FULL"
   ./scripts/config --disable CONFIG_PREEMPT_NONE
   ./scripts/config --disable CONFIG_PREEMPT_VOLUNTARY
-  ./scripts/config --enable CONFIG_PREEMPT_LAZY
+  ./scripts/config --disable CONFIG_PREEMPT_LAZY
+  ./scripts/config --enable CONFIG_PREEMPT
 else
   echo "Linux $KERNEL_MAJOR.$KERNEL_MINOR: 保持 PREEMPT_VOLUNTARY"
 fi
