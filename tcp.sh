@@ -905,6 +905,105 @@ EOF
   echo -e "  ${YELLOW}恢复默认:${NC} ./tcp.sh set-min-pacing-rate 0"
 }
 
+# 设置网卡队列调度算法（qdisc）
+# BBRPlusV3 与 qdisc 解耦（kernel 4.13+ commit 218af599 验证），可在 fq/fq_pie/fq_codel/cake 间切换
+#
+# 用法:
+#   ./tcp.sh set-qdisc                # 查看当前状态 + 可用 qdisc
+#   ./tcp.sh set-qdisc fq             # 大水管/高吞吐场景（项目默认）
+#   ./tcp.sh set-qdisc fq_pie         # 小水管/突发带宽 VPS 推荐（阿里云）
+#   ./tcp.sh set-qdisc fq_codel       # 最稳定的备选（systemd 默认）
+#   ./tcp.sh set-qdisc cake           # 多人共享 VPS（per-host fairness）
+#
+# 选型参考:
+#   fq       - 原生 BBR EDT pacing，高吞吐场景最优；无 AQM，小水管 bufferbloat 不可控
+#   fq_pie   - PIE PI 控制器适应快，无需预知带宽；阿里云突发带宽首选
+#   fq_codel - 最稳定成熟，广泛部署；带宽突变适应略慢于 fq_pie
+#   cake     - unlimited 模式做调度+AQM，per-host 公平；不要设 bandwidth（VPS 突发带宽会误设）
+set_qdisc() {
+  local qd="${1:-}"
+
+  local supported="fq fq_pie fq_codel cake"
+  local current
+  current=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "未知")
+
+  # 无参数：显示当前状态 + 可用列表
+  if [ -z "$qd" ]; then
+    echo ""
+    echo "当前队列调度: ${current}"
+    echo "可选项:      ${supported}"
+    echo ""
+    echo "选型建议:"
+    echo "  fq       - 大水管/高吞吐（项目默认）"
+    echo "  fq_pie   - 小水管/突发带宽 VPS 推荐（阿里云）"
+    echo "  fq_codel - 最稳定的备选"
+    echo "  cake     - 多人共享 VPS（per-host fairness）"
+    echo ""
+    echo "用法: $0 set-qdisc <fq|fq_pie|fq_codel|cake>"
+    return 0
+  fi
+
+  # 参数校验
+  if ! echo "$supported" | grep -qw "$qd"; then
+    error "不支持的 qdisc: $qd（可选: $supported）"
+    return 1
+  fi
+
+  # 模块可用性检查（fq 为内置不需 modprobe；其他需要 sch_<name> 模块）
+  if [ "$qd" != "fq" ]; then
+    local mod="sch_$qd"
+    if ! modprobe -n "$mod" 2>/dev/null; then
+      warn "内核模块 $mod 不可用（需 CONFIG_NET_SCH_$(echo "$qd" | tr a-z A-Z)=m/y）"
+      read -r -p "仍然继续? (y/N): " confirm
+      [ "$confirm" = "y" ] || return 1
+    fi
+    modprobe "$mod" 2>/dev/null || warn "加载 $mod 失败（可能已内置或不可用）"
+  fi
+
+  # 即时生效
+  if ! sysctl -w "net.core.default_qdisc=$qd" >/dev/null 2>&1; then
+    error "设置 default_qdisc 失败"
+    return 1
+  fi
+
+  # 持久化到 SYSCTL_FILE（替换或追加）
+  mkdir -p "$(dirname "$SYSCTL_FILE")"
+  if [ -f "$SYSCTL_FILE" ] && grep -q "^net.core.default_qdisc" "$SYSCTL_FILE"; then
+    sed -i "s|^net.core.default_qdisc.*|net.core.default_qdisc = ${qd}|" "$SYSCTL_FILE"
+  else
+    echo "net.core.default_qdisc = ${qd}" >> "$SYSCTL_FILE"
+  fi
+
+  # 持久化到独立 conf（switch_algorithm 会读这个文件恢复用户选择，见 switch_algorithm）
+  mkdir -p "$CONF_DIR"
+  echo "qdisc=$qd" > "$CONF_DIR/qdisc.conf"
+
+  echo ""
+  info "队列调度已切换: ${current} → ${qd}"
+  case "$qd" in
+    fq)
+      echo -e "  ${CYAN}场景:${NC} 大水管/高吞吐，原生 BBR EDT pacing"
+      echo -e "  ${YELLOW}注意:${NC} 无 AQM，小水管 bufferbloat 不可控"
+      ;;
+    fq_pie)
+      echo -e "  ${CYAN}场景:${NC} 小水管/突发带宽 VPS（阿里云推荐）"
+      echo -e "  ${CYAN}机制:${NC} PIE PI 控制器，瞬态适应快，无需预知带宽"
+      ;;
+    fq_codel)
+      echo -e "  ${CYAN}场景:${NC} 最稳定的备选，systemd 默认"
+      echo -e "  ${CYAN}机制:${NC} CoDel 确定性丢弃，成熟广泛部署"
+      ;;
+    cake)
+      echo -e "  ${CYAN}场景:${NC} 多人共享 VPS（per-host fairness）"
+      echo -e "  ${CYAN}机制:${NC} 需手工配置 'tc qdisc replace dev <iface> root cake unlimited diffserv4'"
+      echo -e "  ${YELLOW}注意:${NC} VPS 突发带宽不要设 bandwidth 参数"
+      ;;
+  esac
+  echo ""
+  echo -e "  ${GREEN}BBRPlusV3 兼容性:${NC} 100%（算法与 qdisc 解耦）"
+  echo -e "  ${YELLOW}恢复默认:${NC} ./tcp.sh set-qdisc fq"
+}
+
 # 验证整数输入：必须是数字且在 [min, max] 范围内
 # 用法: _validate_int <name> <value> <min> <max>
 _validate_int() {
@@ -1801,8 +1900,13 @@ switch_algorithm() {
     return 1
   fi
 
-  # 设置队列调度
-  sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
+  # 设置队列调度（尊重用户 set-qdisc 配置，无配置默认 fq）
+  local qd="fq"
+  if [ -f "$CONF_DIR/qdisc.conf" ]; then
+    qd=$(grep -E '^qdisc=' "$CONF_DIR/qdisc.conf" | cut -d= -f2)
+    [ -z "$qd" ] && qd="fq"
+  fi
+  sysctl -w "net.core.default_qdisc=$qd" >/dev/null 2>&1
   # 设置拥塞控制
   sysctl -w "net.ipv4.tcp_congestion_control=${algo}" >/dev/null 2>&1
 
@@ -1812,16 +1916,18 @@ switch_algorithm() {
     write_bbrplusv3_service
   fi
 
-  # 持久化
+  # 持久化（SYSCTL_FILE 已存在时同步更新 qdisc 与 cong_control；首次创建时写入两行）
   if [ -f "$SYSCTL_FILE" ]; then
-    sed -i "s/net.ipv4.tcp_congestion_control = .*/net.ipv4.tcp_congestion_control = ${algo}/" "$SYSCTL_FILE"
+    sed -i "s|^net.core.default_qdisc.*|net.core.default_qdisc = ${qd}|" "$SYSCTL_FILE"
+    sed -i "s|^net.ipv4.tcp_congestion_control.*|net.ipv4.tcp_congestion_control = ${algo}|" "$SYSCTL_FILE"
   else
-    echo "net.core.default_qdisc = fq" > "$SYSCTL_FILE"
+    mkdir -p "$(dirname "$SYSCTL_FILE")"
+    echo "net.core.default_qdisc = ${qd}" > "$SYSCTL_FILE"
     echo "net.ipv4.tcp_congestion_control = ${algo}" >> "$SYSCTL_FILE"
   fi
 
   info "已切换到: ${algo}"
-  info "队列调度: fq"
+  info "队列调度: ${qd}"
   info "已持久化到 ${SYSCTL_FILE}"
 }
 
@@ -1958,6 +2064,10 @@ main() {
         exit 1
       fi
       set_min_pacing_rate "$2"
+      ;;
+    set-qdisc)
+      shift
+      set_qdisc "${1:-}"
       ;;
     set-lotspeed)
       shift

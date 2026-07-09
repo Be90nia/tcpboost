@@ -91,9 +91,11 @@ fi
 # ============================================
 # 队列调度
 # ============================================
-# fq (BBR/BBRPlus 必须配合 fq 进行 pacing)
+# fq (BBR/BBRPlus 默认搭档；自 kernel 4.13 起 BBR 已支持内置 pacing，可换 fq_pie/fq_codel/cake)
 ./scripts/config --enable CONFIG_NET_SCH_FQ
+# fq_codel / fq_pie / cake: 小水管/突发带宽场景备选（默认未启用，set-qdisc 命令按需切换）
 ./scripts/config --module CONFIG_NET_SCH_FQ_CODEL
+./scripts/config --module CONFIG_NET_SCH_FQ_PIE
 ./scripts/config --module CONFIG_NET_SCH_CAKE
 ./scripts/config --enable CONFIG_NET_SCH_HTB
 ./scripts/config --enable CONFIG_NET_SCH_TBF
