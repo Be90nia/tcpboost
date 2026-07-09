@@ -912,21 +912,28 @@ EOF
 # 用法:
 #   ./tcp.sh set-qdisc                # 查看当前状态 + 可用 qdisc
 #   ./tcp.sh set-qdisc fq             # 大水管/高吞吐场景（项目默认）
-#   ./tcp.sh set-qdisc fq_pie         # 小水管/突发带宽 VPS 推荐（阿里云）
+#   ./tcp.sh set-qdisc fq_pie         # 仅 CUBIC/Reno 场景（BBR 系列不推荐）
 #   ./tcp.sh set-qdisc fq_codel       # 最稳定的备选（systemd 默认）
 #   ./tcp.sh set-qdisc cake           # 多人共享 VPS（per-host fairness）
 #
 # 选型参考:
-#   fq       - 原生 BBR EDT pacing，高吞吐场景最优；无 AQM，小水管 bufferbloat 不可控
-#   fq_pie   - PIE PI 控制器适应快，无需预知带宽；阿里云突发带宽首选
-#   fq_codel - 最稳定成熟，广泛部署；带宽突变适应略慢于 fq_pie
-#   cake     - unlimited 模式做调度+AQM，per-host 公平；不要设 bandwidth（VPS 突发带宽会误设）
+# 选型核心规律：CCA 做了 pacing（BBR 系列）→ fq；CCA 不做 pacing（CUBIC/Reno）→ fq_pie/fq_codel
+#   fq       - BBR 系列原生搭配（EDT 高精度 pacing）；CUBIC/Reno 才会 bufferbloat
+#   fq_pie   - 仅 CUBIC/Reno 场景推荐；BBR 系列下 AQM 会与 CCA pacing 冲突误丢包
+#   fq_codel - 同 fq_pie，CoDel AQM 同样问题
+#   cake     - 多人共享 VPS（per-host fairness）；不要设 bandwidth（VPS 突发带宽会误设）
 set_qdisc() {
   local qd="${1:-}"
 
   local supported="fq fq_pie fq_codel cake"
   local current
-  current=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "未知")
+current=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "未知")
+  local cca
+  cca=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "未知")
+  local cca_pacing=0
+  case "$cca" in
+    bbr|bbrplus|bbrplusv3|bbr2|bbr3) cca_pacing=1 ;;
+  esac
 
   # 无参数：显示当前状态 + 可用列表
   if [ -z "$qd" ]; then
@@ -934,11 +941,20 @@ set_qdisc() {
     echo "当前队列调度: ${current}"
     echo "可选项:      ${supported}"
     echo ""
-    echo "选型建议:"
-    echo "  fq       - 大水管/高吞吐（项目默认）"
-    echo "  fq_pie   - 小水管/突发带宽 VPS 推荐（阿里云）"
-    echo "  fq_codel - 最稳定的备选"
-    echo "  cake     - 多人共享 VPS（per-host fairness）"
+    echo "当前 CCA:      ${cca}$([ "$cca_pacing" = "1" ] && echo " (CCA 层已 pacing)" || echo " (CCA 层无 pacing)")"
+    echo ""
+    echo "选型建议（根据 CCA 自动适配）:"
+    if [ "$cca_pacing" = "1" ]; then
+      echo "  fq       - 推荐★（BBR 系列已 pacing，qdisc 不需要 AQM）"
+      echo "  fq_pie   - ⚠️ 不推荐（AQM 与 BBR pacing 冲突，小流量突发会被误丢包）"
+      echo "  fq_codel - ⚠️ 同上（CoDel AQM 同样问题）"
+      echo "  cake     - 多人共享 VPS（per-host fairness，unlimited 模式）"
+    else
+      echo "  fq       - 大水管/高吞吐（项目默认）"
+      echo "  fq_pie   - 小水管推荐★（CCA 不 pacing，需要 qdisc 层 AQM）"
+      echo "  fq_codel - 备选（最广泛部署）"
+      echo "  cake     - 多人共享 VPS（per-host fairness）"
+    fi
     echo ""
     echo "用法: $0 set-qdisc <fq|fq_pie|fq_codel|cake>"
     return 0
@@ -983,21 +999,41 @@ set_qdisc() {
   info "队列调度已切换: ${current} → ${qd}"
   case "$qd" in
     fq)
-      echo -e "  ${CYAN}场景:${NC} 大水管/高吞吐，原生 BBR EDT pacing"
-      echo -e "  ${YELLOW}注意:${NC} 无 AQM，小水管 bufferbloat 不可控"
+      echo -e "  ${CYAN}场景:${NC} BBR 系列原生搭配（EDT 高精度 pacing）"
+      echo -e "  ${CYAN}机制:${NC} 无 AQM, 突发小包按 EDT 排队不丢包"
+      if [ "$cca_pacing" = "1" ]; then
+        echo -e "  ${GREEN}✓ 推荐:${NC} 当前 CCA=${cca} 已在 CCA 层做 pacing, fq 是最优搭配"
+      else
+        echo -e "  ${YELLOW}注意:${NC} CCA=${cca} 不做 pacing, 小水管可能 bufferbloat"
+      fi
       ;;
     fq_pie)
-      echo -e "  ${CYAN}场景:${NC} 小水管/突发带宽 VPS（阿里云推荐）"
-      echo -e "  ${CYAN}机制:${NC} PIE PI 控制器，瞬态适应快，无需预知带宽"
+      if [ "$cca_pacing" = "1" ]; then
+        echo -e "  ${YELLOW}⚠️ 警告:${NC} 当前 CCA=${cca} 已在 CCA 层做 pacing"
+        echo -e "  ${YELLOW}       fq_pie 的 AQM 会与之冲突, 突发小流量(TLS握手/CF验证)被误丢包"
+        echo -e "  ${GREEN}建议:${NC} 切回 fq（./tcp.sh set-qdisc fq）"
+      else
+        echo -e "  ${CYAN}场景:${NC} 小水管 + CUBIC/Reno（CCA 不 pacing, 需 qdisc 层 AQM）"
+        echo -e "  ${CYAN}机制:${NC} PIE PI 控制器, 瞬态适应快, 无需预知带宽"
+      fi
       ;;
     fq_codel)
-      echo -e "  ${CYAN}场景:${NC} 最稳定的备选，systemd 默认"
-      echo -e "  ${CYAN}机制:${NC} CoDel 确定性丢弃，成熟广泛部署"
+      if [ "$cca_pacing" = "1" ]; then
+        echo -e "  ${YELLOW}⚠️ 警告:${NC} 当前 CCA=${cca} 已在 CCA 层做 pacing"
+        echo -e "  ${YELLOW}       CoDel AQM 同样会与 BBR pacing 冲突"
+        echo -e "  ${GREEN}建议:${NC} 切回 fq（./tcp.sh set-qdisc fq）"
+      else
+        echo -e "  ${CYAN}场景:${NC} CUBIC/Reno 备选（systemd 默认）"
+        echo -e "  ${CYAN}机制:${NC} CoDel 确定性丢弃, 成熟广泛部署"
+      fi
       ;;
     cake)
       echo -e "  ${CYAN}场景:${NC} 多人共享 VPS（per-host fairness）"
-      echo -e "  ${CYAN}机制:${NC} 需手工配置 'tc qdisc replace dev <iface> root cake unlimited diffserv4'"
-      echo -e "  ${YELLOW}注意:${NC} VPS 突发带宽不要设 bandwidth 参数"
+      if [ "$cca_pacing" = "1" ]; then
+        echo -e "  ${YELLOW}注意:${NC} Cobalt AQM 同样会与 BBR pacing 冲突, unlimited 模式流量小时影响较小"
+      else
+        echo -e "  ${YELLOW}注意:${NC} VPS 突发带宽不要设 bandwidth 参数"
+      fi
       ;;
   esac
   echo ""
