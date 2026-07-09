@@ -14,8 +14,10 @@ export LANG=en_US.UTF-8
 trap '[ -n "$KERNEL_TMPDIR" ] && rm -rf "$KERNEL_TMPDIR" 2>/dev/null' EXIT
 
 # ===== 全局变量 =====
+# shellcheck disable=SC2034  # 全局变量预留（未来版本显示用）
 VERSION="1.0.0-dev"
 REPO="Be90nia/tcpboost"
+# shellcheck disable=SC2034  # 内核名标识预留
 KERNEL_NAME="tcpboost"
 CONF_DIR="/etc/tcpboost"
 BACKUP_DIR="/etc/tcpboost/backup"
@@ -33,6 +35,7 @@ GH_MIRRORS=(
 
 # GitHub 直连 URL 模板
 GH_RELEASE_BASE="https://github.com/${REPO}/releases/download"
+# shellcheck disable=SC2034  # raw URL 模板预留（未来 self-update）
 GH_RAW_BASE="https://raw.githubusercontent.com/${REPO}/main"
 
 # 网络环境标记（detect_network 中设置）
@@ -42,6 +45,7 @@ NET_MODE="direct"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+# shellcheck disable=SC2034  # 颜色定义预留（调色板完整）
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
@@ -178,15 +182,11 @@ detect_os() {
     OS_NAME=$(cat /etc/os-release | grep -i "^ID=" | cut -d= -f2 | tr -d '"')
     OS_VERSION=$(cat /etc/debian_version | grep -oE '^[0-9]+' | head -1)
     PKG_FMT="deb"
-    PKG_INSTALL="dpkg -i"
-    PKG_REMOVE="dpkg -r"
   elif [ -f /etc/redhat-release ] || [ -f /etc/rocky-release ] || [ -f /etc/almalinux-release ]; then
     OS_FAMILY="rhel"
     OS_NAME=$(cat /etc/os-release | grep -i "^ID=" | cut -d= -f2 | tr -d '"')
     OS_VERSION=$(cat /etc/os-release | grep -i "^VERSION_ID=" | cut -d= -f2 | tr -d '"' | cut -d. -f1)
     PKG_FMT="rpm"
-    PKG_INSTALL="dnf install -y"
-    PKG_REMOVE="dnf remove -y"
   else
     OS_FAMILY="unknown"
     error "不支持的操作系统"
@@ -406,7 +406,8 @@ install_kernel() {
     warn "无法获取版本列表，使用默认最新版"
     version=$(get_latest_version)
   else
-    local -a versions=($available)
+    local -a versions
+    read -ra versions <<< "$available"
     local count=${#versions[@]}
     echo ""
     echo -e "  ${CYAN}可用 TCPBoost 内核版本:${NC}"
@@ -1823,10 +1824,13 @@ show_algorithm_status() {
       prt_win=$(cat "$param_dir/probe_rtt_win_ms" 2>/dev/null || echo "?")
       flc=$(cat "$param_dir/full_loss_cnt" 2>/dev/null || echo "?")
       smm=$(cat "$param_dir/startup_max_ms" 2>/dev/null || echo "?")
-      local lt_pct=$(awk -v n="$lt" 'BEGIN { printf "%.1f", n * 100 / 256 }')
-      local beta_pct=$(awk -v n="$beta" 'BEGIN { printf "%.1f", n * 100 / 256 }')
+      local lt_pct
+      lt_pct=$(awk -v n="$lt" 'BEGIN { printf "%.1f", n * 100 / 256 }')
+      local beta_pct
+      beta_pct=$(awk -v n="$beta" 'BEGIN { printf "%.1f", n * 100 / 256 }')
       local mpr_mb=$(((mpr * 8 + 500000) / 1000000))
-      local pgd_pct=$(awk -v n="$pgd" 'BEGIN { printf "%.1f", n * 100 / 256 }')
+      local pgd_pct
+      pgd_pct=$(awk -v n="$pgd" 'BEGIN { printf "%.1f", n * 100 / 256 }')
       echo "  loss_thresh:    ${lt} (${lt_pct}%)"
       echo "  beta:           ${beta} (${beta_pct}%)"
       echo "  pacing_down:    ${pgd} (${pgd_pct}%)"
