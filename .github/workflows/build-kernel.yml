@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       kernel_series:
-        description: '内核系列 (6.12 / 6.18 / 7.0 / 7.1)'
+        description: '内核系列 (6.12 / 6.18 / 7.0 / 7.1 / 7.2)'
         required: false
         default: '6.12'
         type: choice
@@ -13,6 +13,7 @@ on:
           - '6.18'
           - '7.0'
           - '7.1'
+          - '7.2'
       kernel_version:
         description: '指定版本号 (留空=自动获取系列最新版, 如 6.12.94)'
         required: false
@@ -639,8 +640,61 @@ jobs:
           path: artifacts/
           retention-days: 1
 
+  qemu-test:
+    needs: build-kernel
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout tcpboost repo
+        uses: actions/checkout@v4
+
+      - name: Install QEMU + virtme-ng + iperf3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 iperf3 kmod curl
+          sudo pip3 install --break-system-packages virtme-ng
+
+      - name: Download kernel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-x86_64
+          path: artifact/
+
+      - name: Install kernel deb and detect KVER
+        run: |
+          set -e
+          DEB="$(ls artifact/*.deb | head -1)"
+          echo "DEB=$DEB"
+          # tcpboost 内核 postinst 可能因 grub 缺失报错, --force-all 容忍
+          sudo dpkg -i --force-all "$DEB" 2>&1 | tail -20 || true
+          PKG="$(dpkg -I "$DEB" | awk '/^ Package: linux-image-/{print $2; exit}')"
+          KVER="${PKG#linux-image-}"
+          echo "KVER=$KVER"
+          [ -n "$KVER" ] || { echo "FATAL: 提取 KVER 失败"; exit 1; }
+          ls -la "/boot/vmlinuz-$KVER" "/lib/modules/$KVER" 2>&1 | head -10
+          test -f "/boot/vmlinuz-$KVER" || { echo "FATAL: vmlinuz 缺失"; exit 1; }
+          test -d "/lib/modules/$KVER" || { echo "FATAL: modules dir 缺失"; exit 1; }
+          echo "KVER=$KVER" >> "$GITHUB_ENV"
+
+      - name: Boot kernel in QEMU and run functional tests
+        run: |
+          chmod +x scripts/qemu_functional_test.sh
+          # vng 默认探测 /dev/kvm; runner 无 KVM, 走 TCG
+          # --memory 2G 避免 OOM; --cpus 2 加速
+          sudo env "PATH=$PATH" vng \
+            --no-kvm --memory 2G --cpus 2 \
+            --run -- /bin/bash "$GITHUB_WORKSPACE/scripts/qemu_functional_test.sh" "$KVER"
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-test-log
+          path: /tmp/qemu-test.log
+          retention-days: 3
+
   create-release:
-    needs: [check-version, build-kernel]
+    needs: [check-version, build-kernel, qemu-test]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
