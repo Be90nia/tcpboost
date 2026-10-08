@@ -95,6 +95,11 @@ iperf3 -s -D -p 5201 >/dev/null 2>&1
 sleep 0.5
 OUT=$(iperf3 -c 127.0.0.1 -p 5201 -t 3 -J 2>/dev/null) || { fail_hard "iperf3 -c 失败"; }
 SENT=$(echo "$OUT" | grep -o '"bits_per_second":[0-9]*' | tail -1 | cut -d: -f2)
+if [ -n "$SENT" ] && [ "$SENT" -gt 0 ] 2>/dev/null; then
+  pass "iperf3 loopback 吞吐 ${SENT} bps"
+else
+  fail_soft "iperf3 bits_per_second 解析失败: ${SENT:-空}"
+fi
 # 流可能在 iperf3 -c 退出后消失, 单独起一个长 server 再 ss
 iperf3 -s -D -p 5202 >/dev/null 2>&1
 sleep 0.3
