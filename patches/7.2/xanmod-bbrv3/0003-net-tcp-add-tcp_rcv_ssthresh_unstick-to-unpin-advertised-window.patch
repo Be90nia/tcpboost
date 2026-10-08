@@ -32,6 +32,8 @@ Signed-off-by: TCPBoost <tcpboost@users.noreply.github.com>
 ---
 diff --git a/include/net/netns/ipv4.h b/include/net/netns/ipv4.h
 index 6e27c56514df..2438c9a2100d 100644
+--- a/include/net/netns/ipv4.h
++++ b/include/net/netns/ipv4.h
 @@ -217,6 +217,10 @@
  	int sysctl_tcp_adv_win_scale; /* obsolete */
  	u8 sysctl_tcp_dsack;
@@ -45,6 +47,8 @@ index 6e27c56514df..2438c9a2100d 100644
  	u8 sysctl_tcp_no_ssthresh_metrics_save;
 diff --git a/net/ipv4/sysctl_net_ipv4.c b/net/ipv4/sysctl_net_ipv4.c
 index ca1180dba1de..f972490cc9a1 100644
+--- a/net/ipv4/sysctl_net_ipv4.c
++++ b/net/ipv4/sysctl_net_ipv4.c
 @@ -1354,6 +1354,13 @@
  		.proc_handler	= proc_dou8vec_minmax,
  	},
@@ -60,11 +64,12 @@ index ca1180dba1de..f972490cc9a1 100644
  		.data		= &init_net.ipv4.sysctl_tcp_rcvbuf_low_rtt,
  		.maxlen		= sizeof(int),
 diff --git a/net/ipv4/tcp_input.c b/net/ipv4/tcp_input.c
-index 0f60a1dbf927..0db14ccb4f3e 100644
-@@ -774,6 +774,17 @@
+--- a/net/ipv4/tcp_input.c
++++ b/net/ipv4/tcp_input.c
+@@ -772,6 +772,16 @@
+ 	tp->snd_cwnd_stamp = tcp_jiffies32;
+ 	tp->rcvq_space.space = min3(tp->rcv_ssthresh, tp->rcv_wnd,
  				    (u32)TCP_INIT_CWND * tp->advmss);
- }
- 
 +	/* tcpboost-unstick-1: start the advertised window at the
 +	 * buffer-derived limit rather than the slow-start heuristic, so an
 +	 * early loss/RTO cannot pin the window (and DRS growth, which needs
@@ -75,14 +80,13 @@ index 0f60a1dbf927..0db14ccb4f3e 100644
 +
 +		tp->rcv_ssthresh = max_t(u32, tp->rcv_ssthresh, lim);
 +	}
-+
+ }
+ 
  /* 4. Recalculate window clamp after socket hit its memory bounds. */
- static void tcp_clamp_window(struct sock *sk)
- {
-@@ -964,6 +975,20 @@
+@@ -963,6 +973,19 @@
+ 	int time, inq, copied;
  
  	trace_tcp_rcv_space_adjust(sk);
- 
 +	/* tcpboost-unstick-1: __tcp_select_window() hard-caps the advertised
 +	 * window at tp->rcv_ssthresh, whose per-skb slow-start heuristic can
 +	 * stall under loss/RTO, permanently pinning the window (and DRS).
@@ -96,7 +100,6 @@ index 0f60a1dbf927..0db14ccb4f3e 100644
 +		if (lim > 0 && tp->rcv_ssthresh < (u32)lim)
 +			tp->rcv_ssthresh = lim;
 +	}
-+
+ 
  	if (unlikely(!tp->rcv_rtt_est.rtt_us))
  		return;
- 
