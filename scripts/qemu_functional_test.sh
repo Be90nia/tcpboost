@@ -120,7 +120,7 @@ measure_rsa() {
   sleep 0.3
   ( iperf3 -c 127.0.0.1 -p "$1" -t 1 >/dev/null 2>&1 ) &
   sleep 0.4
-  ss -tin "sport = :$1" 2>/dev/null | awk '/rcv_ssthresh:/ {print $2; exit}' | tr -d ','
+  ss -tin "sport = :$1" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i ~ /^rcv_ssthresh:/) {sub(/^rcv_ssthresh:/,"",$i); print $i; exit}}'
   pkill -f "iperf3.*-p $1" 2>/dev/null
 }
 sysctl -w net.ipv4.tcp_rcv_ssthresh_unstick=0 >/dev/null 2>&1
@@ -157,6 +157,9 @@ done
   || fail_soft "smart_exit_alpha 默认值非 217"
 
 echo "=== 9. 卸载再加载 ==="
+# bbrplusv3 正被用作当前 CC 时 -r 必失败, 先切走
+sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1
+sleep 0.2
 if modprobe -r tcp_bbrplusv3 2>>"$LOG"; then pass "modprobe -r"
 else fail_hard "modprobe -r 失败"; fi
 modprobe tcp_bbrplusv3 2>/dev/null
