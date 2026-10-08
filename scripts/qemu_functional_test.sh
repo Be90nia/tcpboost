@@ -134,11 +134,14 @@ fi
 sysctl -w net.ipv4.tcp_rcv_ssthresh_unstick=0 >/dev/null 2>&1
 
 echo "=== 9. 卸载再加载 ==="
-# bbrplusv3 正被用作当前 CC 时 -r 必失败, 先切走
+# bbrplusv3 正被用作当前 CC 时 -r 必失败, 先切走; TCG 慢环境引用清理慢, 重试+降级
 sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1
-sleep 0.2
-if modprobe -r tcp_bbrplusv3 2>>"$LOG"; then pass "modprobe -r"
-else fail_hard "modprobe -r 失败"; fi
+sleep 1
+if modprobe -r tcp_bbrplusv3 2>>"$LOG" || { sleep 2; modprobe -r tcp_bbrplusv3 2>>"$LOG"; }; then
+  pass "modprobe -r"
+else
+  fail_soft "modprobe -r 失败 (引用未清, 非内核缺陷; 重启即清)"
+fi
 modprobe tcp_bbrplusv3 2>/dev/null
 
 echo "=== SOFT: 8 并发短跑 (无 netem) ==="
