@@ -705,13 +705,10 @@ jobs:
           chmod +x scripts/qemu_functional_test.sh
           # vng 默认探测 /dev/kvm; runner 无 KVM, 走 TCG
           # --memory 2G 避免 OOM; --cpus 2 加速
-          # vng 在非内核目录会回落宿主内核 -> 构造最小树让它引导 $KVER
-          mkdir -p kbuild/arch/x86/boot
-          cp "/boot/vmlinuz-$KVER" kbuild/arch/x86/boot/bzImage
-          cd kbuild
+          # --run <path> -> virtme --kimg, 显式引导 $KVER (缺省会回落宿主内核)
           sudo env "PATH=$PATH" vng \
             --disable-kvm --memory 2G --cpus 2 \
-            --run -- /bin/bash "$GITHUB_WORKSPACE/scripts/qemu_functional_test.sh" "$KVER"
+            --run "/boot/vmlinuz-$KVER" -- /bin/bash "$GITHUB_WORKSPACE/scripts/qemu_functional_test.sh" "$KVER"
 
       - name: Upload test log
         if: always()
@@ -767,17 +764,14 @@ jobs:
           chmod +x scripts/soak_*.sh
           # 在 QEMU TCG 里启新内核, 跑 5h 长跑 (默认 8 流 + netem 双腿 5%/75ms)
           # vng 共享 host rootfs, 内部命令用 host 二进制, /var/log/tcpboost-soak/ 落到 host
-          # 构造最小内核树, 防 vng 回落宿主内核
+          # --run <path> -> virtme --kimg, 显式引导 $KVER (缺省回落宿主内核)
           sudo mkdir -p /var/log/tcpboost-soak
-          mkdir -p kbuild/arch/x86/boot
-          cp "/boot/vmlinuz-$KVER" kbuild/arch/x86/boot/bzImage
-          cd kbuild
           sudo env "PATH=$PATH" \
             "DURATION=$SOAK_DURATION" "NSTREAMS=$SOAK_STREAMS" \
             "LOSS=$SOAK_LOSS" "DELAY_MS=$SOAK_DELAY" \
             "CC=$SOAK_CC" "SAMPLE_INTERVAL=$SOAK_INTERVAL" \
             vng --disable-kvm --memory 4G --cpus 4 \
-            --run -- /bin/bash "$GITHUB_WORKSPACE/scripts/soak_test_5h.sh"
+            --run "/boot/vmlinuz-$KVER" -- /bin/bash "$GITHUB_WORKSPACE/scripts/soak_test_5h.sh"
 
       - name: Upload soak artifacts
         if: always()
