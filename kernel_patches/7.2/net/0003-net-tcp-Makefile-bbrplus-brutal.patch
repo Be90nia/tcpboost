@@ -1,0 +1,7 @@
+diff --git a/net/ipv4/Makefile b/net/ipv4/Makefile
+--- a/net/ipv4/Makefile
++++ b/net/ipv4/Makefile
+@@ -48,1 +48,3 @@
+ obj-$(CONFIG_TCP_CONG_BBR1) += tcp_bbr1.o
++obj-$(CONFIG_TCP_CONG_BBRPLUS) += tcp_bbrplus.o
++obj-$(CONFIG_TCP_CONG_BRUTAL) += tcp_brutal.o
