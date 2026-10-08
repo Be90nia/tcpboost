@@ -92,7 +92,7 @@
 |---|---|---|---|---|---|
 | **1** | ProbeRTT exit | time-based (mode_ms=100) | **BBR-n+ Smart Exit Algorithm 1** (PMC13108896 2024): 检测 RWND-limited, 提前退出 | ★★★ | `tcpboost-2lv` |
 | **2** | ECN response | boolean (thresh 50%) | **DCTCP alpha 几何平滑** (SIGCOMM 2010) + **AccECN (RFC 9768)** Linux 7.0+ 接入 | ★★★ | `tcpboost-ev6` |
-| **3** | Loss response | post-loss only | **ABC RTT-inflation 提前检测** (NSDI 2020 Bakker et al.) | ★★★ | `tcpboost-utc` |
+| **3** | ~~ABC RTT-inflation 提前检测~~ **已关闭 (引用纠错)** | post-loss only | ~~ABC~~ 真 ABC = Accel-Brake Control (Goyal NSDI 2020) 需路由器显式反馈, 公网不可部署; 需求 reframe 为延迟基家族 (Vegas/Copa/Swift) → `tcpboost-25d` | — | `tcpboost-utc` (closed) |
 | **4** | DRAIN 阶段 + ProbeRTT exit | 固定 gain/时间 | **CoDel sojourn-time 控制器** (RFC 8289) | ★★ | `tcpboost-5cs` |
 | **5** | Pacing gain UP | 固定 1.375 | **Hysteria/Brutal 变差感知**: cwnd = bw×RTT/rttvar | ★★ | `tcpboost-b6t` |
 | **6** | Beta 削减 | 固定 0.3 | **CUBIC fast convergence** (RFC 8312 §4.5): RTO 退出时 0.7×cwnd | ★ | `tcpboost-6u8` |

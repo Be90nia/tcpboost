@@ -138,6 +138,24 @@ else
 fi
 sysctl -w net.ipv4.tcp_rcv_ssthresh_unstick=0 >/dev/null 2>&1
 
+echo "=== 8b. smartexit-1 / codel-1 参数可见性 (batch-1 注入验证) ==="
+P="/sys/module/tcp_bbrplusv3/parameters"
+for name in smart_exit_enable smart_exit_alpha smart_exit_delta_us \
+            codel_enable codel_target_us codel_rounds; do
+  if [ -f "$P/$name" ]; then
+    pass "$name = $(cat "$P/$name" 2>/dev/null)"
+  else
+    fail_soft "$name 不存在 (注入可能未生效)"
+  fi
+done
+# 默认值 sanity: enable=1, alpha=217 (0.85*256), delta=5000, codel_target=5000, rounds=2
+[ "$(cat "$P/smart_exit_enable" 2>/dev/null)" = "1" ] \
+  && pass "smart_exit_enable 默认开启" \
+  || fail_soft "smart_exit_enable 默认值非 1"
+[ "$(cat "$P/smart_exit_alpha" 2>/dev/null)" = "217" ] \
+  && pass "smart_exit_alpha=217 (0.85x256)" \
+  || fail_soft "smart_exit_alpha 默认值非 217"
+
 echo "=== 9. 卸载再加载 ==="
 if modprobe -r tcp_bbrplusv3 2>>"$LOG"; then pass "modprobe -r"
 else fail_hard "modprobe -r 失败"; fi

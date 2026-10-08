@@ -756,3 +756,58 @@ bbr->pacing_gain = bbr_param(sk, pacing_gain_up) +
 ## 9. 更新历史
 
 - 2026-10-08: 初版, 5 个 P2 port 全部深扒到原始 paper + BBRPlusV3 代码集成.
+- 2026-10-08 (2): batch-1 实施 (smartexit-1 + codel-1 已注入 create_bbrplusv3.sh, commit 78293d5); ev6 关闭 (基座已实现).
+
+---
+
+## 10. 引用纠错 + daw 深扒 (2026-10-08 晚, batch-2 准备)
+
+### 10.1 utc 关闭 — 引用纠错
+
+原 backlog 写的 "ABC = Additive Decrease with Backup, Bakker NSDI 2020, RTT-inflation 提前检测" **是虚构引用**。
+
+**真 ABC** = **Accel-Brake Control** (Prateesh Goyal, Anup Agarwal, Ravi Netravali, Mohammad Alizadeh, Hari Balakrishnan. "ABC: A Simple Explicit Congestion Controller for Wireless Networks." NSDI 2020):
+- **机制**: 瓶颈路由器按 dequeue rate 计算加速比 f(t), 复用 ECN 位标记 accel (01)/brake (10); 发端每 ACK cwnd +1/-1 包; MAIMD (加 AI 保公平, Chiu-Jain 收敛)
+- **部署前提**: 路由器必须实现 ABC 标记 (论文实现于 OpenWrt Wi-Fi AP / 蜂窝代理)
+- **对 tcpboost**: 公网跨洋路径**无 ABC 路由器 → 不可部署** → 关闭 (`tcpboost-utc`)
+
+底层需求 (提前于 loss 的温和响应) 仍真实, 正确源家族是**延迟基 CC**, 已立 `tcpboost-25d` (P3):
+- Vegas (Brakmo & Peterson 1995): 绝对阈值, RTT 噪声敏感
+- Copa (Goyal et al. NSDI 2018): standing queue × 可配 δ
+- **Swift RTT-gradient (SIGCOMM 2020): 优先候选**, gradient 对跨洋 RTT 噪声更鲁棒
+
+**前置门** (吸取 pair-wise 教训): 只吃 RTT gradient 不吃 loss/ECN (与 MLFQ 分离); 与 beta 双重削减评审; 与 smartexit-1 的 rtt_diff 测量统一。
+
+### 10.2 daw (Kalman) 深扒 — scalar Kalman + BBRPlusV3 集成设计 of record
+
+**原始来源**: Kalman, R. E. (1960). "A New Approach to Linear Filtering and Prediction Problems." *ASME J. Basic Eng.* 82(1):35-45. 实用教程: Welch & Bishop, "An Introduction to the Kalman Filter" (UNC/TR 95-041). KCC (PLAN.md Phase 3 引用) 许可证 NOASSERTION 不可并入 → **自研 scalar 版** (~30 行)。
+
+**Scalar Kalman (随机游走模型, A=1, H=1)**:
+```
+predict:  x⁻ = x ;  P⁻ = P + Q
+gain:     K  = P⁻ / (P⁻ + R)
+update:   x  = x⁻ + K·(z − x⁻)
+          P  = (1 − K)·P⁻
+```
+- z = 本次 ACK 的测量 (delivery rate 或 rtt 样本)
+- Q = 过程噪声 (模型不确定度), R = 测量噪声 (丢包/乱序/ACK 压缩)
+- **Q/R 比是唯一调参**: 大 → 信任测量快收敛 (跨洋长肥管); 小 → 信任模型抗噪 (4G/WiFi 抖动)
+
+**定点化**: x/P/K 全用 u32, 状态量左移 BBR_SCALE(8) 存小数; Q/R 用 module_param 暴露 (默认 Q=BR_UNIT/16, R=BR_UNIT/4, 即 Q/R=1/4 温和收敛)。
+
+**集成边界 (防正正得负, 关键!)**:
+| BBRv3 既有估计 | 处理 | 理由 |
+|---|---|---|
+| `bbr->bw_latest` (上轮 max) | **Kalman 替换** | 这是 pacing/BDP 基线, 均值估计更稳 |
+| `bbr_max_bw()` max 滤波器 | **保留不动** | max 是带宽探测的**故意**语义 (PROBE_UP 依赖峰值), Kalman 均值会杀死探测 |
+| `bbr->min_rtt_us` min 滤波器 | **保留不动** | min 语义不可用均值替代, ProbeRTT 触发依赖它 |
+| `tp->rcv_rtt_est` (EWMA) | 不动 (TCP 栈共享) | 只在 bbr 层内加 Kalman |
+
+**注入点** (create_bbrplusv3.sh):
+1. struct bbr 加 `u32 kalman_x, kalman_p;` (定点状态)
+2. `bbr_calculate_bw_sample()` 之后插入 `bbrplusv3_kalman_update(sk, ctx)` — 消费 ctx->sample_bw, 输出写 `bbr->bw_latest`
+3. module_param: `kalman_enable(1) / kalman_q(16) / kalman_r(64)`
+
+**消费顺序冲突检查**: `bbr_update_latest_delivery_signals()` 在 `bbr_calculate_bw_sample()` 后用 bw_latest 更新 bw_lo/hi — Kalman 放在 sample 计算后、signals 更新前, 单点替换, 不碰滤波器族。与 codel-1 (消费 rtt) / smartexit-1 (消费 rtt_diff+full_bw) 无共享变量 ✅。与 change-point (6oa) 的集成按 `tcpboost-6oa` design-of-record: change-point 只做触发器并 reset kalman_x/p。
+
+**验收**: 0-loss 单流 baseline (Kalman 均值 ≈ EWMA, 允许 ±2%); 4G 抖动 trace (codel/bbr 抖动方差下降); netem 复现回归。
