@@ -811,3 +811,24 @@ update:   x  = x⁻ + K·(z − x⁻)
 **消费顺序冲突检查**: `bbr_update_latest_delivery_signals()` 在 `bbr_calculate_bw_sample()` 后用 bw_latest 更新 bw_lo/hi — Kalman 放在 sample 计算后、signals 更新前, 单点替换, 不碰滤波器族。与 codel-1 (消费 rtt) / smartexit-1 (消费 rtt_diff+full_bw) 无共享变量 ✅。与 change-point (6oa) 的集成按 `tcpboost-6oa` design-of-record: change-point 只做触发器并 reset kalman_x/p。
 
 **验收**: 0-loss 单流 baseline (Kalman 均值 ≈ EWMA, 允许 ±2%); 4G 抖动 trace (codel/bbr 抖动方差下降); netem 复现回归。
+
+### 10.3 "保留一个" 审计 (2026-10-08 深夜, 用户方法论: 正正得负 → 保留一个 / 负负得正 → 成对保留)
+
+**裁决表**:
+
+| 冲突对 | 保留 (赢家) | 关闭/降级 | 裁决理由 |
+|---|---|---|---|
+| daw Kalman × bgy Bayesian | **daw** | ✂ bgy | 冗余估计器; Gaussian 下等效; 方差敏感由 Q/R 吸收 |
+| qpm PI × 0w6 MLFQ (gain) | **qpm** | ↓ 0w6→P3 (+wdb→P3) | 闭环反馈+RFC 常数 > 离散 level; MLFQ 残值 (保守 level+boost) 改 qpm 可选子模式 |
+| 9tu Work stealing × afi CFS | **9tu** | ✂ afi | WS 是 CFS 超集; 被动排序随 ohk 组合一并实现 |
+| daw × b6t Hysteria variance | **daw** | ✂ b6t | b6t "变差感知" = Kalman R schedule (测量噪声自适应), 思想被完全吸收 |
+| 6oa × daw | **共存** | — | 触发器 vs 估计器角色不同, 集成 design-of-record 已有, 依赖 daw→6oa |
+
+**负负得正成对保留** (不动): ohk (9tu+i6a, HTB ceiling 限死 steal) / b9z (e18+5pe, coarse+fine) / smartexit-1×A5 兜底 (已入码)。
+
+**审计后 backlog**: 26 → 23 open (P2 9 / P3 14)。
+
+**batch 结构更新**:
+- batch-2 = qpm PI + daw Kalman (双双 design-of-record 就绪)
+- batch-3 = 6oa change-point (依赖 daw) + 25d 延迟基 (前置门)
+- batch-4 = 9tu+i6a (ohk 组合) + 32e WFQ + MLFQ 残值评审 (P3)
