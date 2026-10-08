@@ -23,6 +23,30 @@ on:
         required: false
         type: boolean
         default: false
+      soak_duration:
+        description: '5h 长跑时长 (默认 5h, 快速验证可填 5m/30m)'
+        required: false
+        default: '5h'
+      soak_streams:
+        description: '并发流数'
+        required: false
+        default: '8'
+      soak_loss:
+        description: 'netem 丢包率 (5% 加压, 0.5% 模拟报告原条件)'
+        required: false
+        default: '5%'
+      soak_delay_ms:
+        description: 'netem 单向延迟 ms'
+        required: false
+        default: '75'
+      soak_cc:
+        description: '拥塞控制算法 (需 tcpboost 内核包含该 CC)'
+        required: false
+        default: 'bbrplusv3'
+      soak_interval:
+        description: '采样间隔秒 (30s 标准, 60s 减轻开销)'
+        required: false
+        default: '30'
 
 permissions:
   contents: read
@@ -693,8 +717,71 @@ jobs:
           path: /tmp/qemu-test.log
           retention-days: 3
 
+  soak-test:
+    needs: [build-kernel, qemu-test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      SOAK_DURATION: ${{ inputs.soak_duration || '5h' }}
+      SOAK_STREAMS: ${{ inputs.soak_streams || '8' }}
+      SOAK_LOSS: ${{ inputs.soak_loss || '5%' }}
+      SOAK_DELAY: ${{ inputs.soak_delay_ms || '75' }}
+      SOAK_CC: ${{ inputs.soak_cc || 'bbrplusv3' }}
+      SOAK_INTERVAL: ${{ inputs.soak_interval || '30' }}
+    steps:
+      - name: Checkout tcpboost repo
+        uses: actions/checkout@v4
+
+      - name: Install QEMU + virtme-ng + iperf3 + sysstat
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 iperf3 kmod curl bc sysstat
+          sudo pip3 install --break-system-packages virtme-ng
+
+      - name: Download kernel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-x86_64
+          path: artifact/
+
+      - name: Install kernel deb and detect KVER
+        run: |
+          set -e
+          DEB="$(ls artifact/*.deb | head -1)"
+          echo "DEB=$DEB"
+          sudo dpkg -i --force-all "$DEB" 2>&1 | tail -5 || true
+          PKG="$(dpkg -I "$DEB" | awk '/^ Package: linux-image-/{print $2; exit}')"
+          KVER="${PKG#linux-image-}"
+          echo "KVER=$KVER"
+          [ -n "$KVER" ] || { echo "FATAL: 提取 KVER 失败"; exit 1; }
+          test -f "/boot/vmlinuz-$KVER" || { echo "FATAL: vmlinuz 缺失"; exit 1; }
+          test -d "/lib/modules/$KVER" || { echo "FATAL: modules 缺失"; exit 1; }
+          echo "KVER=$KVER" >> "$GITHUB_ENV"
+
+      - name: Run ${{ env.SOAK_DURATION }} soak test in QEMU
+        run: |
+          chmod +x scripts/soak_*.sh
+          # 在 QEMU TCG 里启新内核, 跑 5h 长跑 (默认 8 流 + netem 双腿 5%/75ms)
+          # vng 共享 host rootfs, 内部命令用 host 二进制, /var/log/tcpboost-soak/ 落到 host
+          sudo mkdir -p /var/log/tcpboost-soak
+          sudo env "PATH=$PATH" \
+            "DURATION=$SOAK_DURATION" "NSTREAMS=$SOAK_STREAMS" \
+            "LOSS=$SOAK_LOSS" "DELAY_MS=$SOAK_DELAY" \
+            "CC=$SOAK_CC" "SAMPLE_INTERVAL=$SOAK_INTERVAL" \
+            vng --no-kvm --memory 4G --cpus 4 \
+            --run -- /bin/bash "$GITHUB_WORKSPACE/scripts/soak_test_5h.sh"
+
+      - name: Upload soak artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-test-results
+          path: /var/log/tcpboost-soak/
+          retention-days: 7
+          if-no-files-found: warn
+
   create-release:
-    needs: [check-version, build-kernel, qemu-test]
+    needs: [check-version, build-kernel, qemu-test, soak-test]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
