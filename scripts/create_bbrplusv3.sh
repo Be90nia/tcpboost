@@ -346,6 +346,18 @@ module_param_named(startup_max_ms, bbrplusv3_startup_max_ms, uint, 0644);
 MODULE_PARM_DESC(startup_max_ms, "STARTUP timeout floor in ms (0=disabled, default=10000)");
 module_param_named(historical_cache_enable, bbrplusv3_historical_cache_enable, uint, 0644);
 MODULE_PARM_DESC(historical_cache_enable, "Cross-connection min_rtt cache (0=off, 1=on, default=0)");
+module_param_named(smart_exit_enable, bbrplusv3_smart_exit_enable, uint, 0644);
+MODULE_PARM_DESC(smart_exit_enable, "RWND-aware STARTUP exit, BBR-n+ Alg1 (0=vanilla, 1=on, default=1)");
+module_param_named(smart_exit_alpha, bbrplusv3_smart_exit_alpha, uint, 0644);
+MODULE_PARM_DESC(smart_exit_alpha, "BW drop floor vs full_bw in BBR_SCALE (default=217 ~= 0.85)");
+module_param_named(smart_exit_delta_us, bbrplusv3_smart_exit_delta_us, uint, 0644);
+MODULE_PARM_DESC(smart_exit_delta_us, "RTT inflation threshold in us for STARTUP exit (default=5000)");
+module_param_named(codel_enable, bbrplusv3_codel_enable, uint, 0644);
+MODULE_PARM_DESC(codel_enable, "Sojourn-based DRAIN exit, RFC 8289 (0=off, 1=on, default=1)");
+module_param_named(codel_target_us, bbrplusv3_codel_target_us, uint, 0644);
+MODULE_PARM_DESC(codel_target_us, "Sojourn target in us for DRAIN exit (default=5000, CoDel 5ms)");
+module_param_named(codel_rounds, bbrplusv3_codel_rounds, uint, 0644);
+MODULE_PARM_DESC(codel_rounds, "Consecutive low-sojourn rounds to exit DRAIN (default=2)");
 module_param_named(rtt_hist_ttl_sec, bbrplusv3_rtt_hist_ttl_sec, uint, 0644);
 MODULE_PARM_DESC(rtt_hist_ttl_sec, "RTT cache TTL in seconds (default=300)");
 module_param_named(rtt_hist_min_samples, bbrplusv3_rtt_hist_min_samples, uint, 0644);
@@ -786,6 +798,114 @@ sed -i '/tcp_unregister_congestion_control(&tcp_bbrplusv3_cong_ops);/i\
 echo "[7c-quater/9] 已注入 lotspeed-1: 跨连接 min_rtt 历史缓存 (4 处注入) + 2s0: PROBE_RTT 首次触发随机化 (1 处注入)"
 
 # ============================================
+# 7c-quinquies. tcpboost-smartexit-1: RWND-aware STARTUP exit
+# 来源: BBR-n+ Algorithm 1 (Ahsan & Hussain 2026, PLOS One 21(4):e0330972,
+#       doi:10.1371/journal.pone.0330972)
+# 机制: vanilla 在 bw plateau (sample_bw < 1.25×full_bw 持续 3 round) 即退出
+#       STARTUP；RWND 受限流同样 plateau 但队列未增长 (无 RTT inflation)，
+#       属于"假 plateau"。改为要求 bw 跌破 alpha×full_bw 且 rtt_diff > delta
+#       才计入 plateau 轮次，否则视为仍在增长/RWND 受限，继续探测。
+# 边界: 误判风险由 startup_max_ms (tcpboost-A5) 兜底，不会永不退出。
+# 参数: smart_exit_enable(默认1) / smart_exit_alpha(默认217≈0.85)
+#       / smart_exit_delta_us(默认5000)
+# ============================================
+
+# SE-1: 全局变量定义（紧跟 A5 的 startup_max_ms 之后）
+sed -i '/static u32 bbrplusv3_startup_max_ms = 10000;/a\
+\
+/* tcpboost-smartexit-1: RWND-aware STARTUP exit (BBR-n+ Algorithm 1) */\
+static u32 bbrplusv3_smart_exit_enable = 1;\t/* 0=vanilla plateau exit */\
+static u32 bbrplusv3_smart_exit_alpha = BBR_UNIT * 85 / 100;\t/* bw drop floor */\
+static u32 bbrplusv3_smart_exit_delta_us = 5000;\t/* RTT inflation threshold */' "$BBRPLUSV3_SRC"
+
+# SE-2: bbr_check_full_bw_reached() 注入双条件 gate
+# 锚点唯一: 函数体内 vanilla 路径首行
+sed -i '/thresh = bbr_param(sk, full_bw_thresh);/i\
+	/* tcpboost-smartexit-1: RWND-aware STARTUP exit (BBR-n+ Alg 1).\
+	 * Vanilla exits on bw plateau alone; an RWND-limited flow plateaus\
+	 * WITHOUT queue growth (no RTT inflation). Require bw below\
+	 * alpha*full_bw AND rtt inflation > delta to count a plateau\
+	 * round; otherwise keep probing. Backstop: startup_max_ms (A5). */\
+	if (READ_ONCE(bbrplusv3_smart_exit_enable)) {\
+		u32 se_bw_floor = (u64)bbr->full_bw *\
+				  READ_ONCE(bbrplusv3_smart_exit_alpha) >>\
+				  BBR_SCALE;\
+		u32 se_rtt_diff = 0;\
+\
+		if (rs->rtt_us >= 0 && bbr->min_rtt_us != ~0U &&\
+		    after(rs->rtt_us, bbr->min_rtt_us))\
+			se_rtt_diff = rs->rtt_us - bbr->min_rtt_us;\
+\
+		if (ctx->sample_bw < se_bw_floor &&\
+		    se_rtt_diff > READ_ONCE(bbrplusv3_smart_exit_delta_us)) {\
+			/* true congestion plateau: count toward exit */\
+			if (!bbr->round_start)\
+				return;\
+			++bbr->full_bw_cnt;\
+			bbr->full_bw_now =\
+				bbr->full_bw_cnt >= bbr_full_bw_cnt;\
+			bbr->full_bw_reached |= bbr->full_bw_now;\
+		} else {\
+			/* growing or RWND-limited plateau: keep probing */\
+			bbr_reset_full_bw(sk);\
+			if (ctx->sample_bw > bbr->full_bw)\
+				bbr->full_bw = ctx->sample_bw;\
+		}\
+		return;\
+	}\
+' "$BBRPLUSV3_SRC"
+
+echo "[7c-quinquies/9] 已注入 smartexit-1: RWND-aware STARTUP exit (2 处注入)"
+
+# ============================================
+# 7c-sextus. tcpboost-codel-1: sojourn-based DRAIN exit
+# 来源: RFC 8289 CoDel (Nichols et al. 2012) 控制思想移植到发端 DRAIN 相位
+# 机制: vanilla DRAIN 出口 = inflight <= BDP 估计 (模型驱动, 浅缓冲下 BDP
+#       高估 → 过度排空)。追加测量驱动出口: sojourn = rtt - min_rtt <
+#       target(5ms) 持续 rounds(2) 个 round → 队列确实已排空, 提前结束
+#       DRAIN, 减少过度排空的吞吐损失。
+# 安全性: 只提前结束 DRAIN (原条件仍保留, OR 关系), 不影响 STARTUP/PROBE_BW;
+#       rs->rtt_us<0 / min_rtt 未初始化时条件不成立, 走 vanilla。
+# 参数: codel_enable(默认1) / codel_target_us(默认5000) / codel_rounds(默认2)
+# ============================================
+
+# CS-1: struct bbr 加 per-flow 连续 sojourn 达标 round 计数
+sed -i '/u32[[:space:]]*startup_start_stamp;/a\
+	u8	codel_drain_rounds;\t/* tcpboost-codel-1: consecutive low-sojourn rounds */' "$BBRPLUSV3_SRC"
+
+# CS-2: 全局变量定义（紧跟 smartexit 的三个 static 之后）
+sed -i '/static u32 bbrplusv3_smart_exit_delta_us = 5000;/a\
+\
+/* tcpboost-codel-1: sojourn-based DRAIN exit (RFC 8289 spirit) */\
+static u32 bbrplusv3_codel_enable = 1;\t/* 0=vanilla BDP-only drain exit */\
+static u32 bbrplusv3_codel_target_us = 5000;\t/* sojourn target (CoDel 5ms) */\
+static u32 bbrplusv3_codel_rounds = 2;\t/* consecutive rounds below target */' "$BBRPLUSV3_SRC"
+
+# CS-3: bbr_check_drain() 注入 sojourn 早退分支（在 A5 超时块之后）
+# 复用 A5 锚点: sed i 依次插入, 本块落在 A5 块之后、原 if 之前
+sed -i '/if (bbr->mode == BBR_STARTUP \&\& bbr_full_bw_reached(sk))/i\
+	/* tcpboost-codel-1: measurement-driven DRAIN exit */\
+	if (bbr->mode == BBR_DRAIN \&\& READ_ONCE(bbrplusv3_codel_enable) \&\&\
+	    bbr->min_rtt_us != ~0U \&\& rs->rtt_us >= 0 \&\&\
+	    after(rs->rtt_us, bbr->min_rtt_us) \&\&\
+	    rs->rtt_us - bbr->min_rtt_us <\
+	    READ_ONCE(bbrplusv3_codel_target_us)) {\
+		if (bbr->round_start)\
+			bbr->codel_drain_rounds++;\
+		if (bbr->codel_drain_rounds >=\
+		    READ_ONCE(bbrplusv3_codel_rounds)) {\
+			bbr->codel_drain_rounds = 0;\
+			bbr->mode = BBR_PROBE_BW;\
+			bbr_start_bw_probe_down(sk);\
+			return;\
+		}\
+	} else if (bbr->mode == BBR_DRAIN) {\
+		bbr->codel_drain_rounds = 0;\
+	}' "$BBRPLUSV3_SRC"
+
+echo "[7c-sextus/9] 已注入 codel-1: sojourn-based DRAIN exit (3 处注入)"
+
+# ============================================
 # 7d. tcpboost-wia: sed 替换验证
 # 验证所有关键 sed 修改已成功执行，防止静默 fallback 到 vanilla BBRv3
 # ============================================
@@ -822,6 +942,10 @@ verify_pattern 'tcpboost-lotspeed-1: write back' "lotspeed-1 injection point 2"
 verify_pattern 'tcpboost-lotspeed-1: clean cross-conn' "lotspeed-1 module_exit cleanup"
 verify_pattern 'historical_cache_enable' "lotspeed-1 module_param"
 verify_pattern 'tcpboost-2s0' "2s0 PROBE_RTT 随机化注入"
+verify_pattern 'tcpboost-smartexit-1' "smartexit-1 RWND-aware STARTUP exit"
+verify_pattern 'bbrplusv3_smart_exit_enable' "smartexit-1 module_param"
+verify_pattern 'tcpboost-codel-1' "codel-1 sojourn-based DRAIN exit"
+verify_pattern 'bbrplusv3_codel_enable' "codel-1 module_param"
 
 if [ "$SED_ERRORS" -gt 0 ]; then
     echo "" >&2
