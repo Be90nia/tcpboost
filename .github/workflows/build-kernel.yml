@@ -718,6 +718,32 @@ jobs:
           path: /tmp/qemu-test.log
           retention-days: 3
 
+      - name: A/B bench matrix (E0 on baseline; E1-E4 on variant)
+        if: always()
+        run: |
+          chmod +x scripts/ab_bench.sh
+          # baseline 分支 (无 smartexit 参数) 跑 E0; variant 分支跑 E1-E4 (sysfs 切换, 单内核)
+          if [ -f /sys/module/tcp_bbrplusv3/parameters/smart_exit_enable ]; then
+            VARIANTS="E1 E2 E3 E4"
+          else
+            VARIANTS="E0"
+          fi
+          echo "BENCH_VARIANTS=$VARIANTS"
+          for v in $VARIANTS; do
+            sudo env "PATH=$PATH" vng \
+              --disable-kvm --memory 2G --cpus 2 \
+              --run "/boot/vmlinuz-$KVER" -- /bin/bash "$GITHUB_WORKSPACE/scripts/ab_bench.sh" "$v" \
+              || echo "  [warn] $v bench 失败 (日志仍上传)"
+          done
+
+      - name: Upload A/B bench logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ab-bench-logs
+          path: /tmp/ab_bench_*.txt
+          retention-days: 7
+
   soak-test:
     needs: [build-kernel, qemu-test]
     runs-on: ubuntu-24.04
