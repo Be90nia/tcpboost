@@ -706,8 +706,11 @@ jobs:
           # vng 默认探测 /dev/kvm; runner 无 KVM, 走 TCG
           # --memory 2G 避免 OOM; --cpus 2 加速
           # --run <path> -> virtme --kimg, 显式引导 $KVER (缺省会回落宿主内核)
+          # --rwdir 把 host 目录挂进 guest 同路径, 让 ab_bench 数据落 host (vng tmpfs 退出即丢)
+          sudo mkdir -p /var/log/tcpboost-soak
           sudo env "PATH=$PATH" vng \
             --disable-kvm --memory 2G --cpus 2 \
+            --rwdir /var/log/tcpboost-soak \
             --run "/boot/vmlinuz-$KVER" -- /bin/bash "$GITHUB_WORKSPACE/scripts/qemu_functional_test.sh" "$KVER"
 
       - name: Upload test log
@@ -792,6 +795,7 @@ jobs:
           # vng 共享 host rootfs, 内部命令用 host 二进制, /var/log/tcpboost-soak/ 落到 host
           # --run <path> -> virtme --kimg, 显式引导 $KVER (缺省回落宿主内核)
           # --rwdir 把 host 目录挂进 guest 同一路径, 避免 vng tmpfs 退出即丢
+          # 开 unstick (L1 修: 防 rcv_ssthresh 钉 64K 饿死) — vng 内核里必须开着测
           sudo mkdir -p /var/log/tcpboost-soak
           sudo env "PATH=$PATH" \
             "DURATION=$SOAK_DURATION" "NSTREAMS=$SOAK_STREAMS" \
@@ -799,7 +803,8 @@ jobs:
             "CC=$SOAK_CC" "SAMPLE_INTERVAL=$SOAK_INTERVAL" \
             vng --disable-kvm --memory 4G --cpus 4 \
             --rwdir /var/log/tcpboost-soak \
-            --run "/boot/vmlinuz-$KVER" -- /bin/bash "$GITHUB_WORKSPACE/scripts/soak_test_5h.sh"
+            --run "/boot/vmlinuz-$KVER" -- /bin/bash -c \
+            "sysctl -w net.ipv4.tcp_rcv_ssthresh_unstick=1 && sysctl net.ipv4.tcp_rcv_ssthresh_unstick && /bin/bash $GITHUB_WORKSPACE/scripts/soak_test_5h.sh"
 
       - name: Upload soak artifacts
         if: always()
