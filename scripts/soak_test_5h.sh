@@ -157,7 +157,7 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   ss_orphan=$(awk '/^TCP:/ {print $9}' /proc/net/sockstat 2>/dev/null)
 
   # conntrack
-  ct_used=$(wc -l < /proc/net/nf_conntrack 2>/dev/null || echo 0)
+  [[ -r /proc/net/nf_conntrack ]] && ct_used=$(wc -l < /proc/net/nf_conntrack) || ct_used=0
 
   # PSI
   psicpu=$(psi cpu)
