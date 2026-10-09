@@ -791,12 +791,14 @@ jobs:
           # 在 QEMU TCG 里启新内核, 跑 5h 长跑 (默认 8 流 + netem 双腿 5%/75ms)
           # vng 共享 host rootfs, 内部命令用 host 二进制, /var/log/tcpboost-soak/ 落到 host
           # --run <path> -> virtme --kimg, 显式引导 $KVER (缺省回落宿主内核)
+          # --rwdir 把 host 目录挂进 guest 同一路径, 避免 vng tmpfs 退出即丢
           sudo mkdir -p /var/log/tcpboost-soak
           sudo env "PATH=$PATH" \
             "DURATION=$SOAK_DURATION" "NSTREAMS=$SOAK_STREAMS" \
             "LOSS=$SOAK_LOSS" "DELAY_MS=$SOAK_DELAY" \
             "CC=$SOAK_CC" "SAMPLE_INTERVAL=$SOAK_INTERVAL" \
             vng --disable-kvm --memory 4G --cpus 4 \
+            --rwdir /var/log/tcpboost-soak \
             --run "/boot/vmlinuz-$KVER" -- /bin/bash "$GITHUB_WORKSPACE/scripts/soak_test_5h.sh"
 
       - name: Upload soak artifacts
