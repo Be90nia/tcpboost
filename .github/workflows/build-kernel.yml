@@ -330,12 +330,12 @@ jobs:
         working-directory: linux-src
         run: |
           KERNEL_MAJOR="${{ needs.check-version.outputs.kernel_major }}"
-          # 1. ICSK_CA_PRIV_SIZE - 上游 7.2 默认 104 字节 (u64 数组 icsk_ca_priv[104/sizeof(u64)]),
-          #    + 12 (batch-2: kalman_x u64 + pi_int_err:14 + pi_gain_delta:7) + 12 padding/对齐余量
-          # 强制写入 NEED, 不解析 CURRENT (旧 grep 抓不到真实值, sed no-op)
+          # 1. ICSK_CA_PRIV_SIZE - 手算: v7.2 base struct bbr = 160B (BBRv3 字段 + A5 + codel u8 + plb 12 + 对齐);
+          #    + 16 (batch-2: s32:21 位域 4B + u64 kalman_x 8B + plb 重新对齐 +4B)
+          #    = 176B; 留 16B 余量 → 192. 真值看 build 是否还报 BUILD_BUG_ON
           echo "Fixing ICSK_CA_PRIV_SIZE..."
           FILE="include/net/inet_connection_sock.h"
-          NEED=128
+          NEED=192
           # 数组元素是 u64 (不是 u32! 改 u32 会 type 错误); 无条件替换括号内
           sed -i -E "s|(icsk_ca_priv)\[[^]]*\]|\1[(${NEED} \/ sizeof(u64))]|" "$FILE"
           echo "ICSK_CA_PRIV_SIZE array forced to [${NEED} / sizeof(u64)] (= ${NEED} bytes)"
