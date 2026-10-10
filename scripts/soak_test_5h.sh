@@ -92,6 +92,7 @@ CSV="$OUT/timeseries.csv"
 echo "epoch,wall,total_mbps,min_mbps,p50_mbps,max_mbps,active_streams,tcp_estab,tcp_timewait,tcp_inuse,sockstat_orphan,conntrack_used,psicpu_some,psimem_some,psiio_some,load1,load5,load15,cpu_pct,mem_used_pct,unstick" > "$CSV"
 SAMPLES="$OUT/samples.jsonl"
 echo '{"epoch":0}' > "$SAMPLES"
+echo '{"epoch":0}' > "$OUT/memory.jsonl"
 
 # 把秒数转 epoch + 总时长终止点
 DURATION_SEC=$(echo "$DURATION" | awk '{
@@ -135,6 +136,28 @@ cpu_pct() {
   fi
 }
 
+# 内存细采: slab/内核栈/碎片化/compact/iperf3 RSS — 5min 粒度落 memory.jsonl
+# 碎片化观测点: buddyinfo order-0/4/9 空闲页 (order-9 ≈ 2MB 巨页, 持续下降=碎片化)
+# 泄漏观测点: SUnreclaim(不可回收slab)/KernelStack/Vmalloc 持续单调涨=泄漏
+mem_snapshot() {
+  local pid="$1"
+  local mi slab unreclaim kstack vmalloc tcpmem
+  mi=$(cat /proc/meminfo)
+  slab=$(awk '/^Slab:/ {print $2}' <<<"$mi")
+  unreclaim=$(awk '/^SUnreclaim:/ {print $2}' <<<"$mi")
+  kstack=$(awk '/^KernelStack:/ {print $2}' <<<"$mi")
+  vmalloc=$(awk '/^VmallocUsed:/ {print $2}' <<<"$mi")
+  tcpmem=$(awk '/^TCP:/{print $2}' /proc/sockstat 2>/dev/null)
+  # buddyinfo: node0 各 order free 页数; 取 order0/4/9 (第4/9/15列, buddyinfo 从第4列起是 order0)
+  read -r b0 b4 b9 <<< "$(awk 'NR==2{print $4, $8, $13}' /proc/buddyinfo 2>/dev/null)"
+  # compact/alloc 压力事件
+  read -r cstall cfail csucc allocstall <<< "$(awk '/compact_stall/{s=$2}/compact_fail/{f=$2}/compact_success/{c=$2}/allocstall/{a+=$2}END{print s+0,f+0,c+0,a+0}' /proc/vmstat)"
+  # iperf3 进程 RSS (kB)
+  local rss=0
+  [ -n "$pid" ] && [ -r "/proc/$pid/status" ] && rss=$(awk '/^VmRSS:/{print $2}' "/proc/$pid/status")
+  echo "{\"epoch\":$(date +%s),\"slab_kb\":$slab,\"sunreclaim_kb\":$unreclaim,\"kstack_kb\":$kstack,\"vmalloc_kb\":$vmalloc,\"tcp_mem_pages\":${tcpmem:-0},\"buddy_o0\":${b0:-0},\"buddy_o4\":${b4:-0},\"buddy_o9\":${b9:-0},\"compact_stall\":$cstall,\"compact_fail\":$cfail,\"compact_success\":$csucc,\"allocstall\":$allocstall,\"iperf3_rss_kb\":$rss}"
+}
+
 UNSTICK=$(sysctl -n net.ipv4.tcp_rcv_ssthresh_unstick 2>/dev/null || echo 0)
 
 last_snap=0
@@ -174,6 +197,9 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   # 5min 一次完整快照
   if [ $((now - last_snap)) -ge "$SNAPSHOT_INTERVAL" ] || [ "$last_snap" = "0" ]; then
     last_snap=$now
+    # 内存/碎片化细采 (memory.jsonl, 5min 粒度)
+    iperf3_pid=$(pgrep -f 'iperf3 -s' | head -1)
+    mem_snapshot "$iperf3_pid" >> "$OUT/memory.jsonl"
     # 落 JSONL (详细)
     snap_json=$(cat <<EOF
 {"epoch":$now,"wall":"$wall","active":$active,"total_mbps":$total_mbps,"min_mbps":$min_mbps,"max_mbps":$max_mbps,"p50_mbps":$p50_mbps,"tcp_estab":${ss_estab:-0},"tcp_tw":${ss_tw:-0},"tcp_inuse":${ss_inuse:-0},"orphan":${ss_orphan:-0},"conntrack":$ct_used,"psicpu":$psicpu,"psimem":$psimem,"psiio":$psiio,"load1":$load1,"cpu_pct":$cpu,"mem_pct":$mem,"unstick":$UNSTICK,"tcp_rcv_ssthresh_unstick":$UNSTICK}
