@@ -93,26 +93,29 @@ sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
 tc qdisc replace dev lo root fq 2>/dev/null
 
 # batch-2 运行时切分矩阵 (模块参数 0644): hang 时 30s 快速失败并指出凶手
-# PD=/sys/module/tcp_bbrplusv3/parameters
 PD=/sys/module/tcp_bbrplusv3/parameters
-bisect7() {  # $1=kalman $2=pi $3=标签
-  [ -w "$PD/kalman_enable" ] && echo "$1" > "$PD/kalman_enable"
-  [ -w "$PD/pi_enable" ] && echo "$2" > "$PD/pi_enable"
-  iperf3 -s -D -p 5231 >/dev/null 2>&1
-  sleep 0.3
-  if timeout 30 iperf3 -c 127.0.0.1 -p 5231 -t 3 -J > /tmp/bisect7.json 2>/dev/null; then
-    B=$(grep -o '"bits_per_second":[0-9]*' /tmp/bisect7.json | tail -1 | cut -d: -f2)
-    pass "[${3}] kalman=$1 pi=$2: iperf3 OK (${B:-?} bps)"
-  else
-    fail_hard "[${3}] kalman=$1 pi=$2: iperf3 hang/失败 (30s 超时)"
-  fi
-  pkill -f 'iperf3.*-p 5231' 2>/dev/null
-  sleep 0.2
-}
-bisect7 0 0 "双关(基线)"
-bisect7 1 0 "仅kalman"
-bisect7 0 1 "仅PI"
-bisect7 1 1 "双开(正式)"
+if [ -w "$PD/kalman_enable" ] && [ -w "$PD/pi_enable" ]; then
+  bisect7() {
+    [ -w "$PD/kalman_enable" ] && echo "$1" > "$PD/kalman_enable"
+    [ -w "$PD/pi_enable" ] && echo "$2" > "$PD/pi_enable"
+    iperf3 -s -D -p 5231 >/dev/null 2>&1
+    sleep 0.3
+    if timeout 30 iperf3 -c 127.0.0.1 -p 5231 -t 3 -J > /tmp/bisect7.json 2>/dev/null; then
+      B=$(grep -o '"bits_per_second":[0-9]*' /tmp/bisect7.json | tail -1 | cut -d: -f2)
+      pass "[${3}] kalman=$1 pi=$2: iperf3 OK (${B:-?} bps)"
+    else
+      fail_hard "[${3}] kalman=$1 pi=$2: iperf3 hang/失败 (30s 超时)"
+    fi
+    pkill -f 'iperf3.*-p 5231' 2>/dev/null
+    sleep 0.2
+  }
+  bisect7 0 0 "双关(基线)"
+  bisect7 1 0 "仅kalman"
+  bisect7 0 1 "仅PI"
+  bisect7 1 1 "双开(正式)"
+else
+  echo "  (batch-2 参数缺失, 跳过切分矩阵)"
+fi
 # 流可能在 iperf3 -c 退出后消失, 单独起一个长 server 再 ss
 iperf3 -s -D -p 5202 >/dev/null 2>&1
 sleep 0.3

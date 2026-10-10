@@ -1024,13 +1024,6 @@ MODULE_PARM_DESC(pi_setpoint_pct, "PI setpoint as % of max bw (default=95)");' "
 echo "[7c-septimus/9] 已注入 batch-2: kalman-1 (5 处) + pi-1 (4 处)"
 
 # ============================================
-# 7c-probe. 一次性 sizeof 测量 (读数后删除本段!)
-# CI 三次死于 BUILD_BUG_ON sizeof(struct bbr)>ICSK_CA_PRIV_SIZE, 盲猜浪费
-# 3 个 CI 周期 — 本探针替换断言为 pr_info, qemu 启动日志读真实数值
-# ============================================
-sed -i 's|BUILD_BUG_ON(sizeof(struct bbr) > ICSK_CA_PRIV_SIZE);|pr_info("tcpboost-probe: bbr_with_batch2=%zu ICSK_CA_PRIV_SIZE=%zu plb=%zu\\n", sizeof(struct bbr), (size_t)ICSK_CA_PRIV_SIZE, sizeof(struct tcp_plb_state));|' "$BBRPLUSV3_SRC"
-
-# ============================================
 # 7d. tcpboost-wia: sed 替换验证
 # 验证所有关键 sed 修改已成功执行，防止静默 fallback 到 vanilla BBRv3
 # ============================================

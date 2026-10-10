@@ -330,7 +330,7 @@ jobs:
         working-directory: linux-src
         run: |
           KERNEL_MAJOR="${{ needs.check-version.outputs.kernel_major }}"
-          # 1. ICSK_CA_PRIV_SIZE - must be 152 bytes for BBRv3 struct bbr + A5 startup_start_stamp
+          # 1. ICSK_CA_PRIV_SIZE - 152 (BBRv3+A5) + 12 (batch-2: kalman_x u64 + pi_int_err:14 + pi_gain_delta:7)
           echo "Fixing ICSK_CA_PRIV_SIZE..."
           FILE="include/net/inet_connection_sock.h"
           CURRENT=$(grep -oP 'icsk_ca_priv\[\K\d+' "$FILE" 2>/dev/null || echo "0")
@@ -338,7 +338,7 @@ jobs:
             echo "::warning::Cannot parse ICSK_CA_PRIV_SIZE from $FILE (format may differ, skipping resize)"
           fi
           echo "Current ICSK_CA_PRIV_SIZE: $CURRENT / sizeof(u64)"
-          NEED=152
+          NEED=164
           if [ "$CURRENT" -lt "$NEED" ]; then
             echo "Increasing ICSK_CA_PRIV_SIZE ($CURRENT -> $NEED)..."
             sed -i "s/icsk_ca_priv\[$CURRENT \/ sizeof(u64)\]/icsk_ca_priv[$NEED \/ sizeof(u64)]/" "$FILE"
