@@ -914,93 +914,104 @@ echo "[7c-sextus/9] 已注入 codel-1: sojourn-based DRAIN exit (3 处注入)"
 # 参数: kalman_enable(1) / kalman_q(16≈0.0625) / kalman_r(64≈0.25)
 # ============================================
 
-# K-1: struct bbr 加定点状态 (u64 16.16; u32 会在 >134Mbps 时 <<8 溢出)
+# K-1: struct bbr 加状态 (12B 预算: ICSK_CA_PRIV_SIZE 余量极小, 24B 已翻车一次)
+# kalman_p 全局化 (稳态 K_ss 闭式解), 每流只存 x + PI 位域
 sed -i '/u8	codel_drain_rounds;/a\
-	u64	kalman_x;	/* tcpboost-kalman-1: bw estimate, 16.16 */\
-	u64	kalman_p;	/* tcpboost-kalman-1: estimate covariance, 16.16 */\
-	s32	pi_integrated_err;	/* tcpboost-pi-1: accumulated err (%) */\
-	u32	pi_last_update;	/* tcpboost-pi-1: last update (ms) */' "$BBRPLUSV3_SRC"
+	s32	pi_int_err:14, pi_gain_delta:7;	/* tcpboost-pi-1: +-8191 / +-63 */\
+	u64	kalman_x;	/* tcpboost-kalman-1: bw estimate 16.16 bytes/s */' "$BBRPLUSV3_SRC"
 
 # K-2: 静态变量 + 滤波器函数 (紧跟 codel statics 之后, 先于所有消费者)
+# 稳态 Kalman: K_ss 从 Q/R 闭式解一次算出 (P² + PQ − QR = 0 → P*,
+# K = (P*+Q)/(P*+Q+R)), 全局共享零每流成本; 每流状态仅 kalman_x
 sed -i '/static u32 bbrplusv3_codel_rounds = 2;/a\
 \
-/* tcpboost-kalman-1: scalar Kalman filter, random-walk model (A=1,H=1) */\
+/* tcpboost-kalman-1: scalar Kalman (steady-state gain), random-walk (A=1,H=1) */\
 static u32 bbrplusv3_kalman_enable = 1;	/* 0=raw sample, 1=smoothed */\
-static u32 bbrplusv3_kalman_q = 16;	/* process noise (0.0625 in 16.16) */\
-static u32 bbrplusv3_kalman_r = 64;	/* measurement noise (0.25) */\
+static u32 bbrplusv3_kalman_q = 16;	/* process noise, 16.16 (default=4096) */\
+static u32 bbrplusv3_kalman_r = 64;	/* measurement noise, 16.16 (default=16384) */\
 static u32 bbr_max_bw(const struct sock *sk);	/* fwd decl: defined later in file */\
+\
+static u32 bbrplusv3_kalman_k16(void)\
+{\
+	u64 q = (u64)READ_ONCE(bbrplusv3_kalman_q) << 8;\
+	u64 r = (u64)READ_ONCE(bbrplusv3_kalman_r) << 8;\
+	u64 p = (int_sqrt(q * q + 4 * q * r) - q) / 2;\
+\
+	return (u32)div64_u64((p + q) << 16, p + q + r);\
+}\
 \
 static void bbrplusv3_kalman_update(struct bbr *bbr, u32 sample)\
 {\
+	static u32 k16_cache;\
 	u64 z = (u64)sample << 16;\
-	u64 q = (u64)READ_ONCE(bbrplusv3_kalman_q) << 12;\
-	u64 r = (u64)READ_ONCE(bbrplusv3_kalman_r) << 12;\
-	u64 p, k;\
-	s64 diff, corr;\
+	u32 k16;\
+	s64 diff;\
 \
-	if (unlikely(!bbr->kalman_p && !bbr->kalman_x)) {\
+	if (unlikely(!k16_cache))\
+		k16_cache = bbrplusv3_kalman_k16() ?: 1;\
+	k16 = k16_cache;\
+	if (unlikely(!bbr->kalman_x)) {\
 		bbr->kalman_x = z;\
-		bbr->kalman_p = r;\
 		return;\
 	}\
-	p = bbr->kalman_p + q;\
-	k = div64_u64(p << 16, p + r);\
 	diff = (s64)z - (s64)bbr->kalman_x;\
-	corr = ((s64)k * diff) >> 16;\
-	bbr->kalman_x = (u64)((s64)bbr->kalman_x + corr);\
-	bbr->kalman_p = p - ((k * p) >> 16);\
+	bbr->kalman_x = (u64)((s64)bbr->kalman_x +\
+			(((s64)k16 * (diff >> 4)) >> 12));\
 }\
 \
-/* tcpboost-pi-1: PI feedback adjust of PROBE_BW pacing gain (RFC 8034 spirit) */\
+/* tcpboost-pi-1: PI feedback on PROBE_BW pacing gain (RFC 8034 spirit).\
+ * bbr_update_gains() 重置 cycle gain 每 ACK, 故 delta 每 ACK 重放,\
+ * err/integral 每 round 更新 (ICSK_CA_PRIV_SIZE 不容纳时间戳). */\
 static u32 bbrplusv3_pi_enable = 1;\
-static u32 bbrplusv3_pi_kp = 250;	/* P: 0.25s gain scale (BBR_UNIT/1000 units) */\
-static u32 bbrplusv3_pi_ki = 8;		/* I: 2.5/312.5s scale */\
+static u32 bbrplusv3_pi_kp = 250;	/* P: 0.25 gain scale */\
+static u32 bbrplusv3_pi_ki = 8;		/* I: 2.5/312.5 scale */\
 static u32 bbrplusv3_pi_setpoint_pct = 95;	/* target = 95% of btl max bw */\
-static u32 bbrplusv3_pi_update_interval = 16;	/* ms between updates */\
 \
 static void bbrplusv3_pi_adjust(struct sock *sk, struct bbr *bbr)\
 {\
-	u32 now = jiffies_to_msecs(jiffies);\
-	u32 measured = (u32)(bbr->kalman_x >> 16);\
-	u32 setpoint = (u32)div64_u64((u64)bbr_max_bw(sk) *\
-		       READ_ONCE(bbrplusv3_pi_setpoint_pct), 100);\
+	u32 measured, setpoint;\
 	s32 err, delta;\
 \
-	if (bbr->pi_last_update &&\
-	    !time_after(now, bbr->pi_last_update +\
-			READ_ONCE(bbrplusv3_pi_update_interval)))\
-		return;\
-	bbr->pi_last_update = now;\
-	if (!setpoint || !measured)\
-		return;\
-	err = (s32)(((s64)setpoint - measured) * 100 / setpoint);\
-	delta = (s32)(((s64)READ_ONCE(bbrplusv3_pi_kp) * err +\
-		       (s64)READ_ONCE(bbrplusv3_pi_ki) * bbr->pi_integrated_err) / 1000);\
-	delta = clamp(delta, -25, 25);	/* +-10% of BBR_UNIT */\
-	bbr->pi_integrated_err += err;\
-	bbr->pi_integrated_err = clamp(bbr->pi_integrated_err, -3125, 3125);\
-	bbr->pacing_gain = clamp((int)bbr->pacing_gain + delta,\
-				 BBR_UNIT * 3 / 4, BBR_UNIT * 5 / 4);\
+	if (!READ_ONCE(bbrplusv3_pi_enable)) {\
+		bbr->pi_gain_delta = 0;\
+	} else if (bbr->round_start) {\
+		measured = (u32)(bbr->kalman_x >> 16);\
+		setpoint = (u32)div64_u64((u64)bbr_max_bw(sk) *\
+			   READ_ONCE(bbrplusv3_pi_setpoint_pct), 100);\
+		if (setpoint && measured) {\
+			err = (s32)(((s64)setpoint - measured) * 100 / setpoint);\
+			bbr->pi_int_err =\
+				clamp(bbr->pi_int_err + err, -3125, 3125);\
+			delta = (s32)(((s64)READ_ONCE(bbrplusv3_pi_kp) * err +\
+				(s64)READ_ONCE(bbrplusv3_pi_ki) *\
+				bbr->pi_int_err) / 1000);\
+			bbr->pi_gain_delta = clamp(delta, -25, 25);\
+		} else {\
+			bbr->pi_gain_delta = 0;\
+		}\
+	}\
+	bbr->pacing_gain = clamp(\
+		(int)bbr_pacing_gain[bbr->cycle_idx] + bbr->pi_gain_delta,\
+		BBR_UNIT * 3 / 4, BBR_UNIT * 5 / 4);\
 }' "$BBRPLUSV3_SRC"
 
 # K-3: 调用点 — bbr_main 里 sample 计算后、signals 消费后覆写 bw_latest
-sed -i 's|^\tbbr_update_latest_delivery_signals(sk, rs, \&ctx);$|\tbbr_update_latest_delivery_signals(sk, rs, \&ctx);\n\t/* tcpboost-kalman-1: smoothed mean replaces raw max in bw_latest (pacing/BDP baseline only; max filter intact for PROBE_UP) */\n\tif (READ_ONCE(bbrplusv3_kalman_enable)) {\n\t\tbbrplusv3_kalman_update(bbr, ctx.sample_bw);\n\t\tbbr->bw_latest = (u32)(bbr->kalman_x >> 16);\n\t}|' "$BBRPLUSV3_SRC"
+sed -i 's|^\tbbr_update_latest_delivery_signals(sk, rs, \&ctx);$|\tbbr_update_latest_delivery_signals(sk, rs, \&ctx);\n\t/* tcpboost-kalman-1: smoothed mean replaces raw max in bw_latest (pacing/BDP baseline only; max filter intact for PROBE_UP) */\n\tif (READ_ONCE(bbrplusv3_kalman_enable)) {\n\t\tbbrplusv3_kalman_update(bbr, ctx.sample_bw);\n\t\tbbr->bw_latest = (u32)min_t(u64, bbr->kalman_x >> 16, U32_MAX);\n\t}|' "$BBRPLUSV3_SRC"
 
-# K-4: PI 钩子 — PROBE_BW 分支设完 cycle gain 后做 PI 微调
-# (case 体是 2-tab 缩进, 锚点不限定 tab 数, 用 & 保留原行)
-sed -i 's|bbr->pacing_gain = bbr_pacing_gain\[bbr->cycle_idx\];|&\n\t\t/* tcpboost-pi-1: PI fine-adjust around cycle gain (throttled 16ms) */\n\t\tif (READ_ONCE(bbrplusv3_pi_enable))\n\t\t\tbbrplusv3_pi_adjust(sk, bbr);|' "$BBRPLUSV3_SRC"
+# K-4: PI 钩子 — 整行替换: cycle gain 由 pi_adjust 内部重放 (delta 每 ACK 生效)
+sed -i 's|bbr->pacing_gain = bbr_pacing_gain\[bbr->cycle_idx\];|bbrplusv3_pi_adjust(sk, bbr);	/* tcpboost-pi-1: cycle gain + PI delta */|' "$BBRPLUSV3_SRC"
 
 # K-5: bbr_init 复位滤波器/控制器状态
-sed -i 's|^\tbbr->bw_latest = 0;$|\tbbr->bw_latest = 0;\n\tbbr->kalman_x = 0;\n\tbbr->kalman_p = 0;\n\tbbr->pi_integrated_err = 0;\n\tbbr->pi_last_update = 0;|' "$BBRPLUSV3_SRC"
+sed -i 's|^\tbbr->bw_latest = 0;$|\tbbr->bw_latest = 0;\n\tbbr->kalman_x = 0;\n\tbbr->pi_int_err = 0;\n\tbbr->pi_gain_delta = 0;|' "$BBRPLUSV3_SRC"
 
 # K-6: module_param 声明 (params heredoc 末尾)
 sed -i '/^module_param_named(rtt_hist_max_entries, bbrplusv3_rtt_hist_max_entries, uint, 0644);$/a\
 module_param_named(kalman_enable, bbrplusv3_kalman_enable, uint, 0644);\
 MODULE_PARM_DESC(kalman_enable, "Scalar Kalman smoothing of bw_latest (0=raw, 1=on, default=1)");\
 module_param_named(kalman_q, bbrplusv3_kalman_q, uint, 0644);\
-MODULE_PARM_DESC(kalman_q, "Kalman process noise Q, 16.16 (default=16 ~0.0625)");\
+MODULE_PARM_DESC(kalman_q, "Kalman process noise Q (default=16 = 0.0625)");\
 module_param_named(kalman_r, bbrplusv3_kalman_r, uint, 0644);\
-MODULE_PARM_DESC(kalman_r, "Kalman measurement noise R, 16.16 (default=64 ~0.25)");\
+MODULE_PARM_DESC(kalman_r, "Kalman measurement noise R (default=64 = 0.25)");\
 module_param_named(pi_enable, bbrplusv3_pi_enable, uint, 0644);\
 MODULE_PARM_DESC(pi_enable, "PI pacing-gain feedback in PROBE_BW (0=off, 1=on, default=1)");\
 module_param_named(pi_kp, bbrplusv3_pi_kp, uint, 0644);\
@@ -1008,9 +1019,7 @@ MODULE_PARM_DESC(pi_kp, "PI proportional gain (default=250)");\
 module_param_named(pi_ki, bbrplusv3_pi_ki, uint, 0644);\
 MODULE_PARM_DESC(pi_ki, "PI integral gain (default=8)");\
 module_param_named(pi_setpoint_pct, bbrplusv3_pi_setpoint_pct, uint, 0644);\
-MODULE_PARM_DESC(pi_setpoint_pct, "PI setpoint as % of max bw (default=95)");\
-module_param_named(pi_update_interval, bbrplusv3_pi_update_interval, uint, 0644);\
-MODULE_PARM_DESC(pi_update_interval, "PI update throttle ms (default=16)");' "$BBRPLUSV3_SRC"
+MODULE_PARM_DESC(pi_setpoint_pct, "PI setpoint as % of max bw (default=95)");' "$BBRPLUSV3_SRC"
 
 echo "[7c-septimus/9] 已注入 batch-2: kalman-1 (5 处) + pi-1 (4 处)"
 
