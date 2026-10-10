@@ -1024,6 +1024,103 @@ MODULE_PARM_DESC(pi_setpoint_pct, "PI setpoint as % of max bw (default=95)");' "
 echo "[7c-septimus/9] 已注入 batch-2: kalman-1 (5 处) + pi-1 (4 处)"
 
 # ============================================
+# 7c2-mercury. tcpboost-cp-1: Bayesian change-point 触发器
+# 来源: Adams & MacKay 2007 (BOCPD), O(1) 近似 (MAP-run 后验, 不维护全分布)
+# design-of-record (bd 6oa, 2026-10-08):
+#   change-point 是触发器, Kalman 是估计器 — 不另立 bw state
+#   P(ended)>0.7 ≈ 双证据 AND:
+#     A) 预测惊异 |z-x| > 3σ 连续 2 轮 (run 长度后验坍缩的等价信号)
+#     B) min_rtt 相对上次 reset 位移 > 10% (路径切换签名)
+#   触发动作: kalman_x := 当前样本 (x_hat=新 run 首样本);
+#     Q 放大窗口 cp_boost_rtts 轮后回落 — P 已全局化 (batch-2 K_ss,
+#     不可每流放大), 以 per-flow 增益选择 k16/k16_boost 等效实现
+# ============================================
+
+# CP-1: struct bbr 加状态 (8B 含对齐; batch-2 后 ~168B, ICSK 256 余量充足)
+sed -i '/kalman_x;.*bw estimate 16\.16/a\
+	u32	cp_min_rtt_prev;	/* tcpboost-cp-1: min_rtt at last reset */\
+	u8	cp_surp, cp_rounds;	/* surprise streak / Q-boost rounds left */' "$BBRPLUSV3_SRC"
+
+# CP-2: 触发器 + 增益函数 (插在 kalman_update 定义之前)
+sed -i '/^static void bbrplusv3_kalman_update(struct bbr \*bbr, u32 sample)$/i\
+\
+/* tcpboost-cp-1: change-point 触发器状态 + 加速增益 */\
+static u32 bbrplusv3_cp_enable = 1;	/* 0=off, 1=on */\
+static u32 bbrplusv3_cp_q_boost = 256;	/* Q during boost, 16.16/256 (默认 16x 基准) */\
+static u32 bbrplusv3_cp_boost_rtts = 10;	/* Q-boost 窗口, 轮 */\
+static u32 k16_boost_cache;	/* 加速增益, 闭式解缓存一次 */\
+\
+static u32 bbrplusv3_kalman_k16_boost(void)\
+{\
+	u64 q = (u64)READ_ONCE(bbrplusv3_cp_q_boost) << 8;\
+	u64 r = (u64)READ_ONCE(bbrplusv3_kalman_r) << 8;\
+	u64 p = (int_sqrt(q * q + 4 * q * r) - q) / 2;\
+\
+	return (u32)div64_u64((p + q) << 16, p + q + r);\
+}\
+\
+/* tcpboost-cp-1: fire = 2 轮 3σ 预测惊异 AND min_rtt 位移 >10%\
+ * -> x_hat := 样本, Q-boost 窗口开启 (误触发需双证据同时成立)\
+ */\
+static void bbrplusv3_cp_check(struct bbr *bbr, u32 sample)\
+{\
+	static u32 sigma16;	/* sqrt(P_ss + R), 16.16, 缓存一次 */\
+	u32 m, p0, d;\
+	u64 z = (u64)sample << 16;\
+	s64 diff = (s64)z - (s64)bbr->kalman_x;\
+\
+	if (unlikely(!READ_ONCE(bbrplusv3_cp_enable)))\
+		return;\
+	if (unlikely(!sigma16)) {\
+		u64 q = (u64)READ_ONCE(bbrplusv3_kalman_q) << 8;\
+		u64 r = (u64)READ_ONCE(bbrplusv3_kalman_r) << 8;\
+		u64 p = (int_sqrt(q * q + 4 * q * r) - q) / 2;\
+\
+		sigma16 = max_t(u64, int_sqrt(p + r), 1);\
+	}\
+	if (unlikely(diff < 0))\
+		diff = -diff;\
+	if (unlikely((u64)diff > 3 * (u64)sigma16)) {\
+		if (bbr->cp_surp < 2)\
+			bbr->cp_surp++;\
+	} else {\
+		bbr->cp_surp = 0;\
+	}\
+	if (bbr->cp_surp < 2)\
+		return;\
+	m = bbr->min_rtt_us;\
+	p0 = bbr->cp_min_rtt_prev;\
+	d = m > p0 ? m - p0 : p0 - m;\
+	if (!m || !p0 || d * 10 <= p0)\
+		return;\
+	/* run ended: 估计器重置进新 run */\
+	bbr->kalman_x = z;\
+	bbr->cp_rounds = min_t(u32, READ_ONCE(bbrplusv3_cp_boost_rtts), 255);\
+	bbr->cp_min_rtt_prev = m;\
+	bbr->cp_surp = 0;\
+}' "$BBRPLUSV3_SRC"
+
+# CP-3: kalman_update 增益选择 — Q-boost 窗口内用 k16_boost (每 ACK 递减)
+sed -i 's|^\tk16 = k16_cache;$|\tif (bbr->cp_rounds) {\n\t\tif (unlikely(!k16_boost_cache))\n\t\t\tk16_boost_cache = bbrplusv3_kalman_k16_boost() ?: 1;\n\t\tk16 = k16_boost_cache;\n\t\tbbr->cp_rounds--;\n\t} else {\n\t\tk16 = k16_cache;\n\t}|' "$BBRPLUSV3_SRC"
+
+# CP-4: 调用点 — kalman 平滑后、bw_latest 消费前检查触发 (触发则 x 已换新)
+sed -i 's|^\t\tbbr->bw_latest = (u32)min_t(u64, bbr->kalman_x >> 16, U32_MAX);$|\t\tbbrplusv3_cp_check(bbr, ctx.sample_bw);	/* tcpboost-cp-1: maybe reset+boost */\n\t\tbbr->bw_latest = (u32)min_t(u64, bbr->kalman_x >> 16, U32_MAX);|' "$BBRPLUSV3_SRC"
+
+# CP-5: bbr_init 复位触发器状态
+sed -i 's|^\tbbr->kalman_x = 0;$|\tbbr->kalman_x = 0;\n\tbbr->cp_min_rtt_prev = 0;\n\tbbr->cp_surp = 0;\n\tbbr->cp_rounds = 0;|' "$BBRPLUSV3_SRC"
+
+# CP-6: module_param 声明 (跟在 kalman_r 之后)
+sed -i '/^module_param_named(kalman_r, bbrplusv3_kalman_r, uint, 0644);$/a\
+module_param_named(cp_enable, bbrplusv3_cp_enable, uint, 0644);\
+MODULE_PARM_DESC(cp_enable, "Bayesian change-point trigger (0=off, 1=on, default=1)");\
+module_param_named(cp_q_boost, bbrplusv3_cp_q_boost, uint, 0644);\
+MODULE_PARM_DESC(cp_q_boost, "Change-point boosted Kalman Q, 16.16/256 (default=256)");\
+module_param_named(cp_boost_rtts, bbrplusv3_cp_boost_rtts, uint, 0644);\
+MODULE_PARM_DESC(cp_boost_rtts, "Change-point Q-boost window in rounds (default=10)");' "$BBRPLUSV3_SRC"
+
+echo "[7c2-mercury/9] 已注入 batch-3: cp-1 (6 处)"
+
+# ============================================
 # 7d. tcpboost-wia: sed 替换验证
 # 验证所有关键 sed 修改已成功执行，防止静默 fallback 到 vanilla BBRv3
 # ============================================
@@ -1067,6 +1164,10 @@ verify_pattern 'bbrplusv3_codel_enable' "codel-1 module_param"
 verify_pattern 'tcpboost-kalman-1' "kalman-1 scalar Kalman bw estimate"
 verify_pattern 'bbrplusv3_kalman_enable' "kalman-1 module_param"
 verify_pattern 'bbrplusv3_kalman_update' "kalman-1 filter function"
+verify_pattern 'tcpboost-cp-1' "cp-1 change-point trigger"
+verify_pattern 'bbrplusv3_cp_enable' "cp-1 module_param"
+verify_pattern 'bbrplusv3_cp_check' "cp-1 check function"
+verify_pattern 'bbrplusv3_kalman_k16_boost' "cp-1 boosted gain"
 verify_pattern 'tcpboost-pi-1' "pi-1 PI pacing-gain feedback"
 verify_pattern 'bbrplusv3_pi_enable' "pi-1 module_param"
 verify_pattern 'bbrplusv3_pi_adjust' "pi-1 controller function"
@@ -1137,7 +1238,7 @@ if [ -f "$PRIV_FILE" ]; then
   # 默认值：无法检测时假设安全
   [ -z "$CURRENT_PRIV_SIZE" ] && CURRENT_PRIV_SIZE=0
   
-  # 152 = base (BBRv3+A5+codel+unused_4+plb); batch-2 (pi 位域 + kalman_x u64) 需 ~168
+  # batch-2 (pi 位域 + kalman_x u64) + batch-3 (cp u32+u8x2) 后 ~176B
   # 256 留足余量 (XanMod 7.2 原始 144, 此段是最终生效的修正 — workflow 层修改会被本步重置)
   NEED=256
   if [ "$CURRENT_PRIV_SIZE" -gt 0 ] && [ "$CURRENT_PRIV_SIZE" -lt "$NEED" ]; then
