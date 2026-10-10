@@ -928,6 +928,7 @@ sed -i '/static u32 bbrplusv3_codel_rounds = 2;/a\
 static u32 bbrplusv3_kalman_enable = 1;	/* 0=raw sample, 1=smoothed */\
 static u32 bbrplusv3_kalman_q = 16;	/* process noise (0.0625 in 16.16) */\
 static u32 bbrplusv3_kalman_r = 64;	/* measurement noise (0.25) */\
+static u32 bbr_max_bw(const struct sock *sk);	/* fwd decl: defined later in file */\
 \
 static void bbrplusv3_kalman_update(struct bbr *bbr, u32 sample)\
 {\
@@ -986,7 +987,8 @@ static void bbrplusv3_pi_adjust(struct sock *sk, struct bbr *bbr)\
 sed -i 's|^\tbbr_update_latest_delivery_signals(sk, rs, \&ctx);$|\tbbr_update_latest_delivery_signals(sk, rs, \&ctx);\n\t/* tcpboost-kalman-1: smoothed mean replaces raw max in bw_latest (pacing/BDP baseline only; max filter intact for PROBE_UP) */\n\tif (READ_ONCE(bbrplusv3_kalman_enable)) {\n\t\tbbrplusv3_kalman_update(bbr, ctx.sample_bw);\n\t\tbbr->bw_latest = (u32)(bbr->kalman_x >> 16);\n\t}|' "$BBRPLUSV3_SRC"
 
 # K-4: PI 钩子 — PROBE_BW 分支设完 cycle gain 后做 PI 微调
-sed -i 's|^\tbbr->pacing_gain = bbr_pacing_gain\[bbr->cycle_idx\];$|\tbbr->pacing_gain = bbr_pacing_gain[bbr->cycle_idx];\n\t/* tcpboost-pi-1: PI fine-adjust around cycle gain (throttled 16ms) */\n\tif (READ_ONCE(bbrplusv3_pi_enable))\n\t\tbbrplusv3_pi_adjust(sk, bbr);|' "$BBRPLUSV3_SRC"
+# (case 体是 2-tab 缩进, 锚点不限定 tab 数, 用 & 保留原行)
+sed -i 's|bbr->pacing_gain = bbr_pacing_gain\[bbr->cycle_idx\];|&\n\t\t/* tcpboost-pi-1: PI fine-adjust around cycle gain (throttled 16ms) */\n\t\tif (READ_ONCE(bbrplusv3_pi_enable))\n\t\t\tbbrplusv3_pi_adjust(sk, bbr);|' "$BBRPLUSV3_SRC"
 
 # K-5: bbr_init 复位滤波器/控制器状态
 sed -i 's|^\tbbr->bw_latest = 0;$|\tbbr->bw_latest = 0;\n\tbbr->kalman_x = 0;\n\tbbr->kalman_p = 0;\n\tbbr->pi_integrated_err = 0;\n\tbbr->pi_last_update = 0;|' "$BBRPLUSV3_SRC"
