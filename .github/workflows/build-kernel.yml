@@ -330,14 +330,15 @@ jobs:
         working-directory: linux-src
         run: |
           KERNEL_MAJOR="${{ needs.check-version.outputs.kernel_major }}"
-          # 1. ICSK_CA_PRIV_SIZE - 152 (BBRv3+A5) + 12 (batch-2: kalman_x u64 + pi_int_err:14 + pi_gain_delta:7)
-          # 强制写入 NEED, 不解析 CURRENT (上游 7.2 实际格式 grep 抓不到, 旧逻辑 no-op)
+          # 1. ICSK_CA_PRIV_SIZE - 上游 7.2 默认 104 字节 (u64 数组 icsk_ca_priv[104/sizeof(u64)]),
+          #    + 12 (batch-2: kalman_x u64 + pi_int_err:14 + pi_gain_delta:7) + 12 padding/对齐余量
+          # 强制写入 NEED, 不解析 CURRENT (旧 grep 抓不到真实值, sed no-op)
           echo "Fixing ICSK_CA_PRIV_SIZE..."
           FILE="include/net/inet_connection_sock.h"
-          NEED=164
-          # 无条件替换数组声明, 匹配括号内任意内容
-          sed -i -E "s|(icsk_ca_priv)\[[^]]*\]|\1[(${NEED} \/ sizeof(u32))]|" "$FILE"
-          echo "ICSK_CA_PRIV_SIZE array forced to [${NEED} / sizeof(u32)]"
+          NEED=128
+          # 数组元素是 u64 (不是 u32! 改 u32 会 type 错误); 无条件替换括号内
+          sed -i -E "s|(icsk_ca_priv)\[[^]]*\]|\1[(${NEED} \/ sizeof(u64))]|" "$FILE"
+          echo "ICSK_CA_PRIV_SIZE array forced to [${NEED} / sizeof(u64)] (= ${NEED} bytes)"
           # 验证落盘
           grep -n 'icsk_ca_priv' "$FILE" || echo "WARN: 找不到 icsk_ca_priv 声明"
 
