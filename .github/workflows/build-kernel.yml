@@ -331,18 +331,15 @@ jobs:
         run: |
           KERNEL_MAJOR="${{ needs.check-version.outputs.kernel_major }}"
           # 1. ICSK_CA_PRIV_SIZE - 152 (BBRv3+A5) + 12 (batch-2: kalman_x u64 + pi_int_err:14 + pi_gain_delta:7)
+          # 强制写入 NEED, 不解析 CURRENT (上游 7.2 实际格式 grep 抓不到, 旧逻辑 no-op)
           echo "Fixing ICSK_CA_PRIV_SIZE..."
           FILE="include/net/inet_connection_sock.h"
-          CURRENT=$(grep -oP 'icsk_ca_priv\[\K\d+' "$FILE" 2>/dev/null || echo "0")
-          if [ "$CURRENT" = "0" ]; then
-            echo "::warning::Cannot parse ICSK_CA_PRIV_SIZE from $FILE (format may differ, skipping resize)"
-          fi
-          echo "Current ICSK_CA_PRIV_SIZE: $CURRENT / sizeof(u64)"
           NEED=164
-          if [ "$CURRENT" -lt "$NEED" ]; then
-            echo "Increasing ICSK_CA_PRIV_SIZE ($CURRENT -> $NEED)..."
-            sed -i "s/icsk_ca_priv\[$CURRENT \/ sizeof(u64)\]/icsk_ca_priv[$NEED \/ sizeof(u64)]/" "$FILE"
-          fi
+          # 无条件替换数组声明, 匹配括号内任意内容
+          sed -i -E "s|(icsk_ca_priv)\[[^]]*\]|\1[(${NEED} \/ sizeof(u32))]|" "$FILE"
+          echo "ICSK_CA_PRIV_SIZE array forced to [${NEED} / sizeof(u32)]"
+          # 验证落盘
+          grep -n 'icsk_ca_priv' "$FILE" || echo "WARN: 找不到 icsk_ca_priv 声明"
 
           # 2. Ensure CloudPassenger algorithms are registered in Makefile
           echo ""
