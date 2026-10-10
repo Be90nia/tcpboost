@@ -1024,6 +1024,23 @@ MODULE_PARM_DESC(pi_setpoint_pct, "PI setpoint as % of max bw (default=95)");' "
 echo "[7c-septimus/9] 已注入 batch-2: kalman-1 (5 处) + pi-1 (4 处)"
 
 # ============================================
+# 7c-size-probe. 一次性 sizeof(struct bbr) 探针 (读数后删除本段!)
+# 原理: switch(0) 上 case 重复 → gcc 报 "duplicate case value 'XXX'"
+# 其中 XXX 是 sizeof(struct bbr) 的实际值 — 编译必失败但打印真值
+# ============================================
+cat >> "$BBRPLUSV3_SRC" << 'BBRPLUSV3_PROBE_EOF'
+
+/* tcpboost-size-probe: duplicate-case 强制打印 sizeof(struct bbr) (TEMP) */
+void bbrplusv3_size_probe(void)
+{
+	switch (sizeof(struct bbr)) {
+	case sizeof(struct bbr): break;
+	case sizeof(struct bbr): break;
+	}
+}
+BBRPLUSV3_PROBE_EOF
+
+# ============================================
 # 7d. tcpboost-wia: sed 替换验证
 # 验证所有关键 sed 修改已成功执行，防止静默 fallback 到 vanilla BBRv3
 # ============================================
