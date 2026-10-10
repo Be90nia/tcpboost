@@ -1030,14 +1030,14 @@ echo "[7c-septimus/9] 已注入 batch-2: kalman-1 (5 处) + pi-1 (4 处)"
 # ============================================
 cat >> "$BBRPLUSV3_SRC" << 'BBRPLUSV3_PROBE_EOF'
 
-/* tcpboost-size-probe: duplicate-case 强制打印 sizeof(struct bbr) (TEMP) */
-void bbrplusv3_size_probe(void)
+/* tcpboost-size-probe: KERN_EMERG 打印 sizeof (TEMP, 读数后删) */
+static int __init bbrplusv3_size_probe_init(void)
 {
-	switch (sizeof(struct bbr)) {
-	case sizeof(struct bbr): break;
-	case sizeof(struct bbr): break;
-	}
+	printk(KERN_EMERG "TCPSIZEPROBE bbr=%zu icsk_priv=%zu\n",
+	       sizeof(struct bbr), (size_t)ICSK_CA_PRIV_SIZE);
+	return 0;
 }
+late_initcall(bbrplusv3_size_probe_init);
 BBRPLUSV3_PROBE_EOF
 
 # ============================================

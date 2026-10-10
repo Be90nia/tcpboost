@@ -335,7 +335,7 @@ jobs:
           #    = 176B; 留 16B 余量 → 192. 真值看 build 是否还报 BUILD_BUG_ON
           echo "Fixing ICSK_CA_PRIV_SIZE..."
           FILE="include/net/inet_connection_sock.h"
-          NEED=192
+          NEED=256
           # 数组元素是 u64 (不是 u32! 改 u32 会 type 错误); 无条件替换括号内
           sed -i -E "s|(icsk_ca_priv)\[[^]]*\]|\1[(${NEED} \/ sizeof(u64))]|" "$FILE"
           echo "ICSK_CA_PRIV_SIZE array forced to [${NEED} / sizeof(u64)] (= ${NEED} bytes)"
