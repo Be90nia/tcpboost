@@ -330,17 +330,9 @@ jobs:
         working-directory: linux-src
         run: |
           KERNEL_MAJOR="${{ needs.check-version.outputs.kernel_major }}"
-          # 1. ICSK_CA_PRIV_SIZE - 手算: v7.2 base struct bbr = 160B (BBRv3 字段 + A5 + codel u8 + plb 12 + 对齐);
-          #    + 16 (batch-2: s32:21 位域 4B + u64 kalman_x 8B + plb 重新对齐 +4B)
-          #    = 176B; 留 16B 余量 → 192. 真值看 build 是否还报 BUILD_BUG_ON
-          echo "Fixing ICSK_CA_PRIV_SIZE..."
-          FILE="include/net/inet_connection_sock.h"
-          NEED=256
-          # 数组元素是 u64 (不是 u32! 改 u32 会 type 错误); 无条件替换括号内
-          sed -i -E "s|(icsk_ca_priv)\[[^]]*\]|\1[(${NEED} \/ sizeof(u64))]|" "$FILE"
-          echo "ICSK_CA_PRIV_SIZE array forced to [${NEED} / sizeof(u64)] (= ${NEED} bytes)"
-          # 验证落盘
-          grep -n 'icsk_ca_priv' "$FILE" || echo "WARN: 找不到 icsk_ca_priv 声明"
+          # ICSK_CA_PRIV_SIZE 由 create_bbrplusv3.sh 内部段统一处理 (NEED=256).
+          # 注意: 本步如果改 icsk_ca_priv, 会被 Create 步骤的源重置冲掉 — 别在这里改!
+          echo "Skip ICSK here (authoritative fix lives in create_bbrplusv3.sh)"
 
           # 2. Ensure CloudPassenger algorithms are registered in Makefile
           echo ""

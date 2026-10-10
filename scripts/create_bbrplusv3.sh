@@ -1154,7 +1154,9 @@ if [ -f "$PRIV_FILE" ]; then
   # 默认值：无法检测时假设安全
   [ -z "$CURRENT_PRIV_SIZE" ] && CURRENT_PRIV_SIZE=0
   
-  NEED=152
+  # 152 = base (BBRv3+A5+codel+unused_4+plb); batch-2 (pi 位域 + kalman_x u64) 需 ~168
+  # 256 留足余量 (XanMod 7.2 原始 144, 此段是最终生效的修正 — workflow 层修改会被本步重置)
+  NEED=256
   if [ "$CURRENT_PRIV_SIZE" -gt 0 ] && [ "$CURRENT_PRIV_SIZE" -lt "$NEED" ]; then
     echo "增大 ICSK_CA_PRIV_SIZE ($CURRENT_PRIV_SIZE → $NEED)..."
     
