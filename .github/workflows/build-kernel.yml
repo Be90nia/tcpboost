@@ -876,7 +876,9 @@ jobs:
           # fork-friendly: 替换硬编码 repo 为实际仓库 (kyb)
           sed -i "s|Be90nia/tcpboost|${GITHUB_REPOSITORY:-Be90nia/tcpboost}|g" RELEASE_NOTES.md
 
-          RELEASE_FILES=$(find artifacts/ -type f | sort)
+          # -size +0c: 空文件 (如无回归时的 regression.md) 会被 GitHub API 以
+          # Bad Content-Length 拒收, 导致整个 release 失败 (run 38116281681 实锤)
+          RELEASE_FILES=$(find artifacts/ -type f -size +0c | sort)
           if [ -z "$RELEASE_FILES" ]; then
             echo "未找到任何产物文件！"
             exit 1
