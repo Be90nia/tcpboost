@@ -1045,7 +1045,8 @@ sed -i '/kalman_x;.*bw estimate 16\.16/a\
 sed -i '/^static void bbrplusv3_kalman_update(struct bbr \*bbr, u32 sample)$/i\
 \
 /* tcpboost-cp-1: change-point 触发器状态 + 加速增益 */\
-static u32 bbrplusv3_cp_enable = 1;	/* 0=off, 1=on */\
+static u32 bbrplusv3_cp_enable = 0;	/* 0=off (默认, soak 实测 8 流争抢下双证据误触发
+					 * 致 min 流 -63% 自锁, run 38096269627), 1=on */\
 static u32 bbrplusv3_cp_q_boost = 256;	/* Q during boost, 16.16/256 (默认 16x 基准) */\
 static u32 bbrplusv3_cp_boost_rtts = 10;	/* Q-boost 窗口, 轮 */\
 static u32 k16_boost_cache;	/* 加速增益, 闭式解缓存一次 */\
@@ -1112,7 +1113,7 @@ sed -i 's|^\tbbr->kalman_x = 0;$|\tbbr->kalman_x = 0;\n\tbbr->cp_min_rtt_prev = 
 # CP-6: module_param 声明 (跟在 kalman_r 之后)
 sed -i '/^module_param_named(kalman_r, bbrplusv3_kalman_r, uint, 0644);$/a\
 module_param_named(cp_enable, bbrplusv3_cp_enable, uint, 0644);\
-MODULE_PARM_DESC(cp_enable, "Bayesian change-point trigger (0=off, 1=on, default=1)");\
+MODULE_PARM_DESC(cp_enable, "Bayesian change-point trigger (0=off default, 1=on)");\
 module_param_named(cp_q_boost, bbrplusv3_cp_q_boost, uint, 0644);\
 MODULE_PARM_DESC(cp_q_boost, "Change-point boosted Kalman Q, 16.16/256 (default=256)");\
 module_param_named(cp_boost_rtts, bbrplusv3_cp_boost_rtts, uint, 0644);\
