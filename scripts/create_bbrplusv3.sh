@@ -346,6 +346,18 @@ module_param_named(startup_max_ms, bbrplusv3_startup_max_ms, uint, 0644);
 MODULE_PARM_DESC(startup_max_ms, "STARTUP timeout floor in ms (0=disabled, default=10000)");
 module_param_named(historical_cache_enable, bbrplusv3_historical_cache_enable, uint, 0644);
 MODULE_PARM_DESC(historical_cache_enable, "Cross-connection min_rtt cache (0=off, 1=on, default=0)");
+module_param_named(smart_exit_enable, bbrplusv3_smart_exit_enable, uint, 0644);
+MODULE_PARM_DESC(smart_exit_enable, "RWND-aware STARTUP exit, BBR-n+ Alg1 (0=vanilla, 1=on, default=1)");
+module_param_named(smart_exit_alpha, bbrplusv3_smart_exit_alpha, uint, 0644);
+MODULE_PARM_DESC(smart_exit_alpha, "BW drop floor vs full_bw in BBR_SCALE (default=217 ~= 0.85)");
+module_param_named(smart_exit_delta_us, bbrplusv3_smart_exit_delta_us, uint, 0644);
+MODULE_PARM_DESC(smart_exit_delta_us, "RTT inflation threshold in us for STARTUP exit (default=5000)");
+module_param_named(codel_enable, bbrplusv3_codel_enable, uint, 0644);
+MODULE_PARM_DESC(codel_enable, "Sojourn-based DRAIN exit, RFC 8289 (0=off, 1=on, default=1)");
+module_param_named(codel_target_us, bbrplusv3_codel_target_us, uint, 0644);
+MODULE_PARM_DESC(codel_target_us, "Sojourn target in us for DRAIN exit (default=5000, CoDel 5ms)");
+module_param_named(codel_rounds, bbrplusv3_codel_rounds, uint, 0644);
+MODULE_PARM_DESC(codel_rounds, "Consecutive low-sojourn rounds to exit DRAIN (default=2)");
 module_param_named(rtt_hist_ttl_sec, bbrplusv3_rtt_hist_ttl_sec, uint, 0644);
 MODULE_PARM_DESC(rtt_hist_ttl_sec, "RTT cache TTL in seconds (default=300)");
 module_param_named(rtt_hist_min_samples, bbrplusv3_rtt_hist_min_samples, uint, 0644);
@@ -786,6 +798,329 @@ sed -i '/tcp_unregister_congestion_control(&tcp_bbrplusv3_cong_ops);/i\
 echo "[7c-quater/9] 已注入 lotspeed-1: 跨连接 min_rtt 历史缓存 (4 处注入) + 2s0: PROBE_RTT 首次触发随机化 (1 处注入)"
 
 # ============================================
+# 7c-quinquies. tcpboost-smartexit-1: RWND-aware STARTUP exit
+# 来源: BBR-n+ Algorithm 1 (Ahsan & Hussain 2026, PLOS One 21(4):e0330972,
+#       doi:10.1371/journal.pone.0330972)
+# 机制: vanilla 在 bw plateau (sample_bw < 1.25×full_bw 持续 3 round) 即退出
+#       STARTUP；RWND 受限流同样 plateau 但队列未增长 (无 RTT inflation)，
+#       属于"假 plateau"。改为要求 bw 跌破 alpha×full_bw 且 rtt_diff > delta
+#       才计入 plateau 轮次，否则视为仍在增长/RWND 受限，继续探测。
+# 边界: 误判风险由 startup_max_ms (tcpboost-A5) 兜底，不会永不退出。
+# 参数: smart_exit_enable(默认1) / smart_exit_alpha(默认217≈0.85)
+#       / smart_exit_delta_us(默认5000)
+# ============================================
+
+# SE-1: 全局变量定义（紧跟 A5 的 startup_max_ms 之后）
+sed -i '/static u32 bbrplusv3_startup_max_ms = 10000;/a\
+\
+/* tcpboost-smartexit-1: RWND-aware STARTUP exit (BBR-n+ Algorithm 1) */\
+static u32 bbrplusv3_smart_exit_enable = 1;\t/* 0=vanilla plateau exit */\
+static u32 bbrplusv3_smart_exit_alpha = BBR_UNIT * 85 / 100;\t/* bw drop floor */\
+static u32 bbrplusv3_smart_exit_delta_us = 5000;\t/* RTT inflation threshold */' "$BBRPLUSV3_SRC"
+
+# SE-2: bbr_check_full_bw_reached() 注入双条件 gate
+# 锚点唯一: 函数体内 vanilla 路径首行
+sed -i '/thresh = bbr_param(sk, full_bw_thresh);/i\
+	/* tcpboost-smartexit-1: RWND-aware STARTUP exit (BBR-n+ Alg 1).\
+	 * Vanilla exits on bw plateau alone; an RWND-limited flow plateaus\
+	 * WITHOUT queue growth (no RTT inflation). Require bw below\
+	 * alpha*full_bw AND rtt inflation > delta to count a plateau\
+	 * round; otherwise keep probing. Backstop: startup_max_ms (A5). */\
+	if (READ_ONCE(bbrplusv3_smart_exit_enable)) {\
+		u32 se_bw_floor = (u64)bbr->full_bw *\
+				  READ_ONCE(bbrplusv3_smart_exit_alpha) >>\
+				  BBR_SCALE;\
+		u32 se_rtt_diff = 0;\
+\
+		if (rs->rtt_us >= 0 && bbr->min_rtt_us != ~0U &&\
+		    after(rs->rtt_us, bbr->min_rtt_us))\
+			se_rtt_diff = rs->rtt_us - bbr->min_rtt_us;\
+\
+		if (ctx->sample_bw < se_bw_floor &&\
+		    se_rtt_diff > READ_ONCE(bbrplusv3_smart_exit_delta_us)) {\
+			/* true congestion plateau: count toward exit */\
+			if (!bbr->round_start)\
+				return;\
+			++bbr->full_bw_cnt;\
+			bbr->full_bw_now =\
+				bbr->full_bw_cnt >= bbr_full_bw_cnt;\
+			bbr->full_bw_reached |= bbr->full_bw_now;\
+		} else {\
+			/* growing or RWND-limited plateau: keep probing */\
+			bbr_reset_full_bw(sk);\
+			if (ctx->sample_bw > bbr->full_bw)\
+				bbr->full_bw = ctx->sample_bw;\
+		}\
+		return;\
+	}\
+' "$BBRPLUSV3_SRC"
+
+echo "[7c-quinquies/9] 已注入 smartexit-1: RWND-aware STARTUP exit (2 处注入)"
+
+# ============================================
+# 7c-sextus. tcpboost-codel-1: sojourn-based DRAIN exit
+# 来源: RFC 8289 CoDel (Nichols et al. 2012) 控制思想移植到发端 DRAIN 相位
+# 机制: vanilla DRAIN 出口 = inflight <= BDP 估计 (模型驱动, 浅缓冲下 BDP
+#       高估 → 过度排空)。追加测量驱动出口: sojourn = rtt - min_rtt <
+#       target(5ms) 持续 rounds(2) 个 round → 队列确实已排空, 提前结束
+#       DRAIN, 减少过度排空的吞吐损失。
+# 安全性: 只提前结束 DRAIN (原条件仍保留, OR 关系), 不影响 STARTUP/PROBE_BW;
+#       rs->rtt_us<0 / min_rtt 未初始化时条件不成立, 走 vanilla。
+# 参数: codel_enable(默认1) / codel_target_us(默认5000) / codel_rounds(默认2)
+# ============================================
+
+# CS-1: struct bbr 加 per-flow 连续 sojourn 达标 round 计数
+sed -i '/u32[[:space:]]*startup_start_stamp;/a\
+	u8	codel_drain_rounds;\t/* tcpboost-codel-1: consecutive low-sojourn rounds */' "$BBRPLUSV3_SRC"
+
+# CS-2: 全局变量定义（紧跟 smartexit 的三个 static 之后）
+sed -i '/static u32 bbrplusv3_smart_exit_delta_us = 5000;/a\
+\
+/* tcpboost-codel-1: sojourn-based DRAIN exit (RFC 8289 spirit) */\
+static u32 bbrplusv3_codel_enable = 1;\t/* 0=vanilla BDP-only drain exit */\
+static u32 bbrplusv3_codel_target_us = 5000;\t/* sojourn target (CoDel 5ms) */\
+static u32 bbrplusv3_codel_rounds = 2;\t/* consecutive rounds below target */' "$BBRPLUSV3_SRC"
+
+# CS-3: bbr_check_drain() 注入 sojourn 早退分支（在 A5 超时块之后）
+# 复用 A5 锚点: sed i 依次插入, 本块落在 A5 块之后、原 if 之前
+sed -i '/if (bbr->mode == BBR_STARTUP \&\& bbr_full_bw_reached(sk))/i\
+	/* tcpboost-codel-1: measurement-driven DRAIN exit */\
+	if (bbr->mode == BBR_DRAIN \&\& READ_ONCE(bbrplusv3_codel_enable) \&\&\
+	    bbr->min_rtt_us != ~0U \&\& rs->rtt_us >= 0 \&\&\
+	    after(rs->rtt_us, bbr->min_rtt_us) \&\&\
+	    rs->rtt_us - bbr->min_rtt_us <\
+	    READ_ONCE(bbrplusv3_codel_target_us)) {\
+		if (bbr->round_start)\
+			bbr->codel_drain_rounds++;\
+		if (bbr->codel_drain_rounds >=\
+		    READ_ONCE(bbrplusv3_codel_rounds)) {\
+			bbr->codel_drain_rounds = 0;\
+			bbr->mode = BBR_PROBE_BW;\
+			bbr_start_bw_probe_down(sk);\
+			return;\
+		}\
+	} else if (bbr->mode == BBR_DRAIN) {\
+		bbr->codel_drain_rounds = 0;\
+	}' "$BBRPLUSV3_SRC"
+
+echo "[7c-sextus/9] 已注入 codel-1: sojourn-based DRAIN exit (3 处注入)"
+
+# ============================================
+# 7c-septimus. tcpboost-kalman-1: scalar Kalman bw 估计
+# 来源: Kalman 1960; Welch & Bishop TR95-041 (随机游走 A=1,H=1)
+# 边界 (design-of-record docs/cross-domain-deep-dive.md §10.2):
+#   只替换 bbr->bw_latest (pacing/BDP 基线); 保留 bbr_max_bw() max 滤波器
+#   (PROBE_UP 靠峰值) 与 min_rtt min 滤波器。定点 16.16 (u64 防高速率溢出)。
+# 参数: kalman_enable(1) / kalman_q(16≈0.0625) / kalman_r(64≈0.25)
+# ============================================
+
+# K-1: struct bbr 加状态 (12B 预算: ICSK_CA_PRIV_SIZE 余量极小, 24B 已翻车一次)
+# kalman_p 全局化 (稳态 K_ss 闭式解), 每流只存 x + PI 位域
+sed -i '/u8	codel_drain_rounds;/a\
+	s32	pi_int_err:14, pi_gain_delta:7;	/* tcpboost-pi-1: +-8191 / +-63 */\
+	u64	kalman_x;	/* tcpboost-kalman-1: bw estimate 16.16 bytes/s */' "$BBRPLUSV3_SRC"
+
+# K-2: 静态变量 + 滤波器函数 (紧跟 codel statics 之后, 先于所有消费者)
+# 稳态 Kalman: K_ss 从 Q/R 闭式解一次算出 (P² + PQ − QR = 0 → P*,
+# K = (P*+Q)/(P*+Q+R)), 全局共享零每流成本; 每流状态仅 kalman_x
+sed -i '/static u32 bbrplusv3_codel_rounds = 2;/a\
+\
+/* tcpboost-kalman-1: scalar Kalman (steady-state gain), random-walk (A=1,H=1) */\
+static u32 bbrplusv3_kalman_enable = 1;	/* 0=raw sample, 1=smoothed */\
+static u32 bbrplusv3_kalman_q = 16;	/* process noise, 16.16 (default=4096) */\
+static u32 bbrplusv3_kalman_r = 64;	/* measurement noise, 16.16 (default=16384) */\
+static u32 bbr_max_bw(const struct sock *sk);	/* fwd decl: defined later in file */\
+\
+static u32 bbrplusv3_kalman_k16(void)\
+{\
+	u64 q = (u64)READ_ONCE(bbrplusv3_kalman_q) << 8;\
+	u64 r = (u64)READ_ONCE(bbrplusv3_kalman_r) << 8;\
+	u64 p = (int_sqrt(q * q + 4 * q * r) - q) / 2;\
+\
+	return (u32)div64_u64((p + q) << 16, p + q + r);\
+}\
+\
+static void bbrplusv3_kalman_update(struct bbr *bbr, u32 sample)\
+{\
+	static u32 k16_cache;\
+	u64 z = (u64)sample << 16;\
+	u32 k16;\
+	s64 diff;\
+\
+	if (unlikely(!k16_cache))\
+		k16_cache = bbrplusv3_kalman_k16() ?: 1;\
+	k16 = k16_cache;\
+	if (unlikely(!bbr->kalman_x)) {\
+		bbr->kalman_x = z;\
+		return;\
+	}\
+	diff = (s64)z - (s64)bbr->kalman_x;\
+	bbr->kalman_x = (u64)((s64)bbr->kalman_x +\
+			(((s64)k16 * (diff >> 4)) >> 12));\
+}\
+\
+/* tcpboost-pi-1: PI feedback on PROBE_BW pacing gain (RFC 8034 spirit).\
+ * bbr_update_gains() 重置 cycle gain 每 ACK, 故 delta 每 ACK 重放,\
+ * err/integral 每 round 更新 (ICSK_CA_PRIV_SIZE 不容纳时间戳). */\
+static u32 bbrplusv3_pi_enable = 1;\
+static u32 bbrplusv3_pi_kp = 250;	/* P: 0.25 gain scale */\
+static u32 bbrplusv3_pi_ki = 8;		/* I: 2.5/312.5 scale */\
+static u32 bbrplusv3_pi_setpoint_pct = 95;	/* target = 95% of btl max bw */\
+\
+static void bbrplusv3_pi_adjust(struct sock *sk, struct bbr *bbr)\
+{\
+	u32 measured, setpoint;\
+	s32 err, delta;\
+\
+	if (!READ_ONCE(bbrplusv3_pi_enable)) {\
+		bbr->pi_gain_delta = 0;\
+	} else if (bbr->round_start) {\
+		measured = (u32)(bbr->kalman_x >> 16);\
+		setpoint = (u32)div64_u64((u64)bbr_max_bw(sk) *\
+			   READ_ONCE(bbrplusv3_pi_setpoint_pct), 100);\
+		if (setpoint && measured) {\
+			err = (s32)(((s64)setpoint - measured) * 100 / setpoint);\
+			bbr->pi_int_err =\
+				clamp(bbr->pi_int_err + err, -3125, 3125);\
+			delta = (s32)(((s64)READ_ONCE(bbrplusv3_pi_kp) * err +\
+				(s64)READ_ONCE(bbrplusv3_pi_ki) *\
+				bbr->pi_int_err) / 1000);\
+			bbr->pi_gain_delta = clamp(delta, -25, 25);\
+		} else {\
+			bbr->pi_gain_delta = 0;\
+		}\
+	}\
+	bbr->pacing_gain = clamp(\
+		(int)bbr_pacing_gain[bbr->cycle_idx] + bbr->pi_gain_delta,\
+		BBR_UNIT * 3 / 4, BBR_UNIT * 5 / 4);\
+}' "$BBRPLUSV3_SRC"
+
+# K-3: 调用点 — bbr_main 里 sample 计算后、signals 消费后覆写 bw_latest
+sed -i 's|^\tbbr_update_latest_delivery_signals(sk, rs, \&ctx);$|\tbbr_update_latest_delivery_signals(sk, rs, \&ctx);\n\t/* tcpboost-kalman-1: smoothed mean replaces raw max in bw_latest (pacing/BDP baseline only; max filter intact for PROBE_UP) */\n\tif (READ_ONCE(bbrplusv3_kalman_enable)) {\n\t\tbbrplusv3_kalman_update(bbr, ctx.sample_bw);\n\t\tbbr->bw_latest = (u32)min_t(u64, bbr->kalman_x >> 16, U32_MAX);\n\t}|' "$BBRPLUSV3_SRC"
+
+# K-4: PI 钩子 — 整行替换: cycle gain 由 pi_adjust 内部重放 (delta 每 ACK 生效)
+sed -i 's|bbr->pacing_gain = bbr_pacing_gain\[bbr->cycle_idx\];|bbrplusv3_pi_adjust(sk, bbr);	/* tcpboost-pi-1: cycle gain + PI delta */|' "$BBRPLUSV3_SRC"
+
+# K-5: bbr_init 复位滤波器/控制器状态
+sed -i 's|^\tbbr->bw_latest = 0;$|\tbbr->bw_latest = 0;\n\tbbr->kalman_x = 0;\n\tbbr->pi_int_err = 0;\n\tbbr->pi_gain_delta = 0;|' "$BBRPLUSV3_SRC"
+
+# K-6: module_param 声明 (params heredoc 末尾)
+sed -i '/^module_param_named(rtt_hist_max_entries, bbrplusv3_rtt_hist_max_entries, uint, 0644);$/a\
+module_param_named(kalman_enable, bbrplusv3_kalman_enable, uint, 0644);\
+MODULE_PARM_DESC(kalman_enable, "Scalar Kalman smoothing of bw_latest (0=raw, 1=on, default=1)");\
+module_param_named(kalman_q, bbrplusv3_kalman_q, uint, 0644);\
+MODULE_PARM_DESC(kalman_q, "Kalman process noise Q (default=16 = 0.0625)");\
+module_param_named(kalman_r, bbrplusv3_kalman_r, uint, 0644);\
+MODULE_PARM_DESC(kalman_r, "Kalman measurement noise R (default=64 = 0.25)");\
+module_param_named(pi_enable, bbrplusv3_pi_enable, uint, 0644);\
+MODULE_PARM_DESC(pi_enable, "PI pacing-gain feedback in PROBE_BW (0=off, 1=on, default=1)");\
+module_param_named(pi_kp, bbrplusv3_pi_kp, uint, 0644);\
+MODULE_PARM_DESC(pi_kp, "PI proportional gain (default=250)");\
+module_param_named(pi_ki, bbrplusv3_pi_ki, uint, 0644);\
+MODULE_PARM_DESC(pi_ki, "PI integral gain (default=8)");\
+module_param_named(pi_setpoint_pct, bbrplusv3_pi_setpoint_pct, uint, 0644);\
+MODULE_PARM_DESC(pi_setpoint_pct, "PI setpoint as % of max bw (default=95)");' "$BBRPLUSV3_SRC"
+
+echo "[7c-septimus/9] 已注入 batch-2: kalman-1 (5 处) + pi-1 (4 处)"
+
+# ============================================
+# 7c2-mercury. tcpboost-cp-1: Bayesian change-point 触发器
+# 来源: Adams & MacKay 2007 (BOCPD), O(1) 近似 (MAP-run 后验, 不维护全分布)
+# design-of-record (bd 6oa, 2026-10-08):
+#   change-point 是触发器, Kalman 是估计器 — 不另立 bw state
+#   P(ended)>0.7 ≈ 双证据 AND:
+#     A) 预测惊异 |z-x| > 3σ 连续 2 轮 (run 长度后验坍缩的等价信号)
+#     B) min_rtt 相对上次 reset 位移 > 10% (路径切换签名)
+#   触发动作: kalman_x := 当前样本 (x_hat=新 run 首样本);
+#     Q 放大窗口 cp_boost_rtts 轮后回落 — P 已全局化 (batch-2 K_ss,
+#     不可每流放大), 以 per-flow 增益选择 k16/k16_boost 等效实现
+# ============================================
+
+# CP-1: struct bbr 加状态 (8B 含对齐; batch-2 后 ~168B, ICSK 256 余量充足)
+sed -i '/kalman_x;.*bw estimate 16\.16/a\
+	u32	cp_min_rtt_prev;	/* tcpboost-cp-1: min_rtt at last reset */\
+	u8	cp_surp, cp_rounds;	/* surprise streak / Q-boost rounds left */' "$BBRPLUSV3_SRC"
+
+# CP-2: 触发器 + 增益函数 (插在 kalman_update 定义之前)
+sed -i '/^static void bbrplusv3_kalman_update(struct bbr \*bbr, u32 sample)$/i\
+\
+/* tcpboost-cp-1: change-point 触发器状态 + 加速增益 */\
+static u32 bbrplusv3_cp_enable = 0;	/* 0=off 默认 (run 38096269627 soak: 争抢误触发 min -63% 自锁), 1=on */\
+static u32 bbrplusv3_cp_q_boost = 256;	/* Q during boost, 16.16/256 (默认 16x 基准) */\
+static u32 bbrplusv3_cp_boost_rtts = 10;	/* Q-boost 窗口, 轮 */\
+static u32 k16_boost_cache;	/* 加速增益, 闭式解缓存一次 */\
+\
+static u32 bbrplusv3_kalman_k16_boost(void)\
+{\
+	u64 q = (u64)READ_ONCE(bbrplusv3_cp_q_boost) << 8;\
+	u64 r = (u64)READ_ONCE(bbrplusv3_kalman_r) << 8;\
+	u64 p = (int_sqrt(q * q + 4 * q * r) - q) / 2;\
+\
+	return (u32)div64_u64((p + q) << 16, p + q + r);\
+}\
+\
+/* tcpboost-cp-1: fire = 2 轮 3σ 预测惊异 AND min_rtt 位移 >10%\
+ * -> x_hat := 样本, Q-boost 窗口开启 (误触发需双证据同时成立)\
+ */\
+static void bbrplusv3_cp_check(struct bbr *bbr, u32 sample)\
+{\
+	static u32 sigma16;	/* sqrt(P_ss + R), 16.16, 缓存一次 */\
+	u32 m, p0, d;\
+	u64 z = (u64)sample << 16;\
+	s64 diff = (s64)z - (s64)bbr->kalman_x;\
+\
+	if (unlikely(!READ_ONCE(bbrplusv3_cp_enable)))\
+		return;\
+	if (unlikely(!sigma16)) {\
+		u64 q = (u64)READ_ONCE(bbrplusv3_kalman_q) << 8;\
+		u64 r = (u64)READ_ONCE(bbrplusv3_kalman_r) << 8;\
+		u64 p = (int_sqrt(q * q + 4 * q * r) - q) / 2;\
+\
+		sigma16 = max_t(u64, int_sqrt(p + r), 1);\
+	}\
+	if (unlikely(diff < 0))\
+		diff = -diff;\
+	if (unlikely((u64)diff > 3 * (u64)sigma16)) {\
+		if (bbr->cp_surp < 2)\
+			bbr->cp_surp++;\
+	} else {\
+		bbr->cp_surp = 0;\
+	}\
+	if (bbr->cp_surp < 2)\
+		return;\
+	m = bbr->min_rtt_us;\
+	p0 = bbr->cp_min_rtt_prev;\
+	d = m > p0 ? m - p0 : p0 - m;\
+	if (!m || !p0 || d * 10 <= p0)\
+		return;\
+	/* run ended: 估计器重置进新 run */\
+	bbr->kalman_x = z;\
+	bbr->cp_rounds = min_t(u32, READ_ONCE(bbrplusv3_cp_boost_rtts), 255);\
+	bbr->cp_min_rtt_prev = m;\
+	bbr->cp_surp = 0;\
+}' "$BBRPLUSV3_SRC"
+
+# CP-3: kalman_update 增益选择 — Q-boost 窗口内用 k16_boost (每 ACK 递减)
+sed -i 's|^\tk16 = k16_cache;$|\tif (bbr->cp_rounds) {\n\t\tif (unlikely(!k16_boost_cache))\n\t\t\tk16_boost_cache = bbrplusv3_kalman_k16_boost() ?: 1;\n\t\tk16 = k16_boost_cache;\n\t\tbbr->cp_rounds--;\n\t} else {\n\t\tk16 = k16_cache;\n\t}|' "$BBRPLUSV3_SRC"
+
+# CP-4: 调用点 — kalman 平滑后、bw_latest 消费前检查触发 (触发则 x 已换新)
+sed -i 's|^\t\tbbr->bw_latest = (u32)min_t(u64, bbr->kalman_x >> 16, U32_MAX);$|\t\tbbrplusv3_cp_check(bbr, ctx.sample_bw);	/* tcpboost-cp-1: maybe reset+boost */\n\t\tbbr->bw_latest = (u32)min_t(u64, bbr->kalman_x >> 16, U32_MAX);|' "$BBRPLUSV3_SRC"
+
+# CP-5: bbr_init 复位触发器状态
+sed -i 's|^\tbbr->kalman_x = 0;$|\tbbr->kalman_x = 0;\n\tbbr->cp_min_rtt_prev = 0;\n\tbbr->cp_surp = 0;\n\tbbr->cp_rounds = 0;|' "$BBRPLUSV3_SRC"
+
+# CP-6: module_param 声明 (跟在 kalman_r 之后)
+sed -i '/^module_param_named(kalman_r, bbrplusv3_kalman_r, uint, 0644);$/a\
+module_param_named(cp_enable, bbrplusv3_cp_enable, uint, 0644);\
+MODULE_PARM_DESC(cp_enable, "Bayesian change-point trigger (0=off default, 1=on)");\
+module_param_named(cp_q_boost, bbrplusv3_cp_q_boost, uint, 0644);\
+MODULE_PARM_DESC(cp_q_boost, "Change-point boosted Kalman Q, 16.16/256 (default=256)");\
+module_param_named(cp_boost_rtts, bbrplusv3_cp_boost_rtts, uint, 0644);\
+MODULE_PARM_DESC(cp_boost_rtts, "Change-point Q-boost window in rounds (default=10)");' "$BBRPLUSV3_SRC"
+
+echo "[7c2-mercury/9] 已注入 batch-3: cp-1 (6 处)"
+
+# ============================================
 # 7d. tcpboost-wia: sed 替换验证
 # 验证所有关键 sed 修改已成功执行，防止静默 fallback 到 vanilla BBRv3
 # ============================================
@@ -822,6 +1157,20 @@ verify_pattern 'tcpboost-lotspeed-1: write back' "lotspeed-1 injection point 2"
 verify_pattern 'tcpboost-lotspeed-1: clean cross-conn' "lotspeed-1 module_exit cleanup"
 verify_pattern 'historical_cache_enable' "lotspeed-1 module_param"
 verify_pattern 'tcpboost-2s0' "2s0 PROBE_RTT 随机化注入"
+verify_pattern 'tcpboost-smartexit-1' "smartexit-1 RWND-aware STARTUP exit"
+verify_pattern 'bbrplusv3_smart_exit_enable' "smartexit-1 module_param"
+verify_pattern 'tcpboost-codel-1' "codel-1 sojourn-based DRAIN exit"
+verify_pattern 'bbrplusv3_codel_enable' "codel-1 module_param"
+verify_pattern 'tcpboost-kalman-1' "kalman-1 scalar Kalman bw estimate"
+verify_pattern 'bbrplusv3_kalman_enable' "kalman-1 module_param"
+verify_pattern 'bbrplusv3_kalman_update' "kalman-1 filter function"
+verify_pattern 'tcpboost-cp-1' "cp-1 change-point trigger"
+verify_pattern 'bbrplusv3_cp_enable' "cp-1 module_param"
+verify_pattern 'bbrplusv3_cp_check' "cp-1 check function"
+verify_pattern 'bbrplusv3_kalman_k16_boost' "cp-1 boosted gain"
+verify_pattern 'tcpboost-pi-1' "pi-1 PI pacing-gain feedback"
+verify_pattern 'bbrplusv3_pi_enable' "pi-1 module_param"
+verify_pattern 'bbrplusv3_pi_adjust' "pi-1 controller function"
 
 if [ "$SED_ERRORS" -gt 0 ]; then
     echo "" >&2
@@ -889,7 +1238,9 @@ if [ -f "$PRIV_FILE" ]; then
   # 默认值：无法检测时假设安全
   [ -z "$CURRENT_PRIV_SIZE" ] && CURRENT_PRIV_SIZE=0
   
-  NEED=152
+  # batch-2 (pi 位域 + kalman_x u64) + batch-3 (cp u32+u8x2) 后 ~176B
+  # 256 留足余量 (XanMod 7.2 原始 144, 此段是最终生效的修正 — workflow 层修改会被本步重置)
+  NEED=256
   if [ "$CURRENT_PRIV_SIZE" -gt 0 ] && [ "$CURRENT_PRIV_SIZE" -lt "$NEED" ]; then
     echo "增大 ICSK_CA_PRIV_SIZE ($CURRENT_PRIV_SIZE → $NEED)..."
     

@@ -1,0 +1,102 @@
+From TCPBoost <tcpboost@users.noreply.github.com> Mon Sep 17 00:00:00 2001
+From: TCPBoost <tcpboost@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 15:30:00 +0800
+Subject: [PATCH] net-tcp: un-pin advertised window via tcp_rcv_ssthresh_unstick
+
+[tcpboost-unstick-1]
+
+The advertised receive window is hard-capped by tp->rcv_ssthresh in
+__tcp_select_window(). rcv_ssthresh is a slow-start-era heuristic that
+only grows via small per-skb increments in tcp_grow_window(); on lossy,
+long-RTT paths an early loss/RTO burst can stall it at the initial
+~64KB, which then pins the window, delivered bytes and DRS growth in a
+closed loop (rcvq_space.space can never exceed the window, so the
+tcp_moderate_rcvbuf autotuning branch never runs either).
+
+Add net.ipv4.tcp_rcv_ssthresh_unstick (default 0 = vanilla behavior).
+When enabled, rcv_ssthresh tracks the buffer-derived limit
+(min(window_clamp, tcp_full_space()/tcp_space())) at initialization and
+inside tcp_rcv_space_adjust():
+
+- grow-only, so backoff paths (tcp_clamp_window, memory pressure) still
+  shrink it;
+- free-space driven, so a slow application (full receive queue) does
+  not get an inflated window;
+- sk_rcvbuf remains the hard memory bound, unchanged.
+
+On SO_RCVBUF-locked sockets (e.g. proxies setting a 4MB receive buffer)
+this un-pins the window at its intended size; on autotuned sockets it
+lets the window follow buffer growth instead of the stalled heuristic.
+
+Signed-off-by: TCPBoost <tcpboost@users.noreply.github.com>
+---
+diff --git a/include/net/netns/ipv4.h b/include/net/netns/ipv4.h
+index 6e27c56514df..2438c9a2100d 100644
+@@ -217,6 +217,10 @@
+ 	int sysctl_tcp_adv_win_scale; /* obsolete */
+ 	u8 sysctl_tcp_dsack;
+ 	u8 sysctl_tcp_app_win;
++	/* tcpboost-unstick-1: let the advertised window track the buffer
++	 * limit instead of the slow-start heuristic on lossy paths.
++	 */
++	u8 sysctl_tcp_rcv_ssthresh_unstick;
+ 	u8 sysctl_tcp_frto;
+ 	u8 sysctl_tcp_nometrics_save;
+ 	u8 sysctl_tcp_no_ssthresh_metrics_save;
+diff --git a/net/ipv4/sysctl_net_ipv4.c b/net/ipv4/sysctl_net_ipv4.c
+index c0e85cc171ae..bff1a16d608b 100644
+@@ -1351,6 +1351,13 @@
+ 		.proc_handler	= proc_dou8vec_minmax,
+ 	},
+ 	{
++		.procname	= "tcp_rcv_ssthresh_unstick",
++		.data		= &init_net.ipv4.sysctl_tcp_rcv_ssthresh_unstick,
++		.maxlen		= sizeof(u8),
++		.mode		= 0644,
++		.proc_handler	= proc_dou8vec_minmax,
++	},
++	{
+ 		.procname	= "tcp_rcvbuf_low_rtt",
+ 		.data		= &init_net.ipv4.sysctl_tcp_rcvbuf_low_rtt,
+ 		.maxlen		= sizeof(int),
+diff --git a/net/ipv4/tcp_input.c b/net/ipv4/tcp_input.c
+index de9f68a9c0cf..24d88e96f59e 100644
+@@ -774,6 +774,17 @@
+ 				    (u32)TCP_INIT_CWND * tp->advmss);
+ }
+ 
++	/* tcpboost-unstick-1: start the advertised window at the
++	 * buffer-derived limit rather than the slow-start heuristic, so an
++	 * early loss/RTO cannot pin the window (and DRS growth, which needs
++	 * delivered bytes) at the initial ~64KB.
++	 */
++	if (READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_rcv_ssthresh_unstick)) {
++		int lim = min_t(int, tp->window_clamp, tcp_full_space(sk));
++
++		tp->rcv_ssthresh = max_t(u32, tp->rcv_ssthresh, lim);
++	}
++
+ /* 4. Recalculate window clamp after socket hit its memory bounds. */
+ static void tcp_clamp_window(struct sock *sk)
+ {
+@@ -964,6 +975,20 @@
+ 
+ 	trace_tcp_rcv_space_adjust(sk);
+ 
++	/* tcpboost-unstick-1: __tcp_select_window() hard-caps the advertised
++	 * window at tp->rcv_ssthresh, whose per-skb slow-start heuristic can
++	 * stall under loss/RTO, permanently pinning the window (and DRS).
++	 * Track the buffer limit instead: grow-only, free-space driven, and
++	 * backed off by tcp_clamp_window() under memory pressure.
++	 */
++	if (READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_rcv_ssthresh_unstick) &&
++	    !tcp_under_memory_pressure(sk)) {
++		int lim = min_t(int, tp->window_clamp, tcp_space(sk));
++
++		if (lim > 0 && tp->rcv_ssthresh < (u32)lim)
++			tp->rcv_ssthresh = lim;
++	}
++
+ 	if (unlikely(!tp->rcv_rtt_est.rtt_us))
+ 		return;
+ 

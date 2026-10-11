@@ -1350,6 +1350,8 @@ net.ipv4.tcp_mtu_probing = 1
 
 # === Cloudflare TCP collapse（接收侧优化） ===
 net.ipv4.tcp_collapse_max_bytes = 2097152
+# tcpboost-unstick-1: 防 loss+高RTT 下收端窗被 rcv_ssthresh 慢启动启发式钉死 (需 tcpboost 内核)
+net.ipv4.tcp_rcv_ssthresh_unstick = 1
 EOF
 
   sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1
@@ -1403,6 +1405,8 @@ net.ipv4.tcp_collapse_max_bytes = 8388608
 # 50us 平衡 CPU 占用与延迟，配合 fq + BBR 降低 PROBE_RTT 阶段抖动
 net.core.busy_poll = 50
 net.core.busy_read = 50
+# tcpboost-unstick-1: 防 loss+高RTT 下收端窗被 rcv_ssthresh 慢启动启发式钉死 (需 tcpboost 内核)
+net.ipv4.tcp_rcv_ssthresh_unstick = 1
 EOF
 
   sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1
@@ -1457,6 +1461,8 @@ net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.ip_local_port_range = 1024 65535
+# tcpboost-unstick-1: 防 loss+高RTT 下收端窗被 rcv_ssthresh 慢启动启发式钉死 (需 tcpboost 6.12/6.18/7.0/7.1 内核)
+net.ipv4.tcp_rcv_ssthresh_unstick = 1
 
 # === 锐速风格 TCP 栈优化（稳定性修正） ===
 # tcp_retries2: 默认 15，过低会导致连接在临时拥塞时被过早杀死
@@ -1596,6 +1602,8 @@ net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_sack = 1
 net.ipv4.ip_local_port_range = 1024 65535
+# tcpboost-unstick-1: 防 loss+高RTT 下收端窗被 rcv_ssthresh 慢启动启发式钉死 (需 tcpboost 6.12/6.18/7.0/7.1 内核)
+net.ipv4.tcp_rcv_ssthresh_unstick = 1
 net.ipv4.tcp_retries2 = 15
 net.ipv4.tcp_no_metrics_save = 1
 net.ipv4.tcp_fin_timeout = 15
