@@ -1121,6 +1121,37 @@ MODULE_PARM_DESC(cp_boost_rtts, "Change-point Q-boost window in rounds (default=
 echo "[7c2-mercury/9] 已注入 batch-3: cp-1 (6 处)"
 
 # ============================================
+# 7c3-libra. tcpboost-rto-1: RTO 退出感知强削减 (CUBIC fast convergence 移植)
+# 来源: RFC 8312 §4.5 (CUBIC fast convergence); bd 6u8
+# 依据 (7.2 真源码 patch 0001):
+#   - set_state(TCP_CA_Loss) 只由 RTO/超时进入 (快恢复走 Recovery, 不进 Loss)
+#     → 天然 RTO 判别器, 无需检测 retransmits
+#   - bbr_handle_inflight_too_high 的削减只作用于 bw probing (bw_probe_samples)
+#     且按 beta 比例; RTO 后直接回满速形成锯齿 — 用 inflight_hi cap 封顶
+#   - bbr_exit_loss_recovery 不触碰 inflight_hi → RTO 入口 cap 存活到恢复后
+#   - 伪恢复: bbr_undo_cwnd 用 max(现值, undo 保存值) 恢复 → 伪 loss 自动豁免
+# ============================================
+
+# R6-1: 静态参数 (跟 codel statics 之后)
+sed -i '/^static u32 bbrplusv3_codel_rounds = 2;$/a\
+\
+/* tcpboost-rto-1: RTO 退出感知削减 (RFC 8312 §4.5 spirit) */\
+static u32 bbrplusv3_rto_fc_enable = 1;\t/* 0=vanilla, 1=RTO 时封顶 inflight_hi */\
+static u32 bbrplusv3_rto_fc_pct = 70;\t/* RTO 后探测上限 = target_inflight 的 % */' "$BBRPLUSV3_SRC"
+
+# R6-2: 钩子 — RTO 入口封顶探测上限 (仅 Loss 分支, range 限定防误伤同名行)
+sed -i '/tcp_plb_update_state_upon_rto(sk, &bbr->plb);/,/inflight_lo == ~0U/ s|^\t\ttcp_plb_update_state_upon_rto(sk, \&bbr->plb);$|\t\ttcp_plb_update_state_upon_rto(sk, \&bbr->plb);\n\t\t/* tcpboost-rto-1: RTO = 真拥塞证据, 立即封顶探测上限 */\n\t\tif (READ_ONCE(bbrplusv3_rto_fc_enable)) {\n\t\t\tu32 cut = (u64)bbr_target_inflight(sk) *\n\t\t\t\tREAD_ONCE(bbrplusv3_rto_fc_pct) / 100;\n\n\t\t\tif (cut)\n\t\t\t\tbbr->inflight_hi = min_t(u32, bbr->inflight_hi, cut);\n\t\t}|' "$BBRPLUSV3_SRC"
+
+# R6-3: module_param (跟 pi_setpoint_pct 之后)
+sed -i '/^module_param_named(pi_setpoint_pct, bbrplusv3_pi_setpoint_pct, uint, 0644);$/a\
+module_param_named(rto_fc_enable, bbrplusv3_rto_fc_enable, uint, 0644);\
+MODULE_PARM_DESC(rto_fc_enable, "CUBIC fast-convergence style cut on RTO (0=off, 1=on, default=1)");\
+module_param_named(rto_fc_pct, bbrplusv3_rto_fc_pct, uint, 0644);\
+MODULE_PARM_DESC(rto_fc_pct, "RTO cap = target_inflight * pct/100 (default=70)");' "$BBRPLUSV3_SRC"
+
+echo "[7c3-libra/9] 已注入 batch-4: rto-1 (3 处)"
+
+# ============================================
 # 7d. tcpboost-wia: sed 替换验证
 # 验证所有关键 sed 修改已成功执行，防止静默 fallback 到 vanilla BBRv3
 # ============================================
@@ -1168,6 +1199,9 @@ verify_pattern 'tcpboost-cp-1' "cp-1 change-point trigger"
 verify_pattern 'bbrplusv3_cp_enable' "cp-1 module_param"
 verify_pattern 'bbrplusv3_cp_check' "cp-1 check function"
 verify_pattern 'bbrplusv3_kalman_k16_boost' "cp-1 boosted gain"
+verify_pattern 'tcpboost-rto-1' "rto-1 RTO-aware cut"
+verify_pattern 'bbrplusv3_rto_fc_enable' "rto-1 module_param"
+verify_pattern 'bbrplusv3_rto_fc_pct' "rto-1 cap percent"
 verify_pattern 'tcpboost-pi-1' "pi-1 PI pacing-gain feedback"
 verify_pattern 'bbrplusv3_pi_enable' "pi-1 module_param"
 verify_pattern 'bbrplusv3_pi_adjust' "pi-1 controller function"
