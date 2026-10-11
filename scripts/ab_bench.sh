@@ -24,6 +24,9 @@
 #
 # ponytail: 相对阈值内建 (饿流 = < max(200Kbps, 0.15x中位数)); VPS 90s 严格
 #   复现 (xhttp-starvation-report.md 配方) 属 atj/人工层, 本脚本做 keep/reject 快门。
+#
+# 输出路径: 默认写 /var/log/tcpboost-soak/ (vng 配 --rwdir 同步挂进 guest),
+#   在 host 上保留可上传。环境变量 AB_BENCH_OUT 可覆盖。
 
 set -u
 
@@ -31,7 +34,7 @@ VARIANT="${1:?usage: ab_bench.sh E0|E1|E2|E3|E4}"
 DUR_SINGLE="${DUR_SINGLE:-10}"
 DUR_NETEM="${DUR_NETEM:-30}"
 P="/sys/module/tcp_bbrplusv3/parameters"
-OUT="/tmp/ab_bench_${VARIANT}.txt"
+OUT="${AB_BENCH_OUT:-/var/log/tcpboost-soak/ab_bench_${VARIANT}.txt}"
 : > "$OUT"
 
 SE=0; CE=0
@@ -45,7 +48,6 @@ case "$VARIANT" in
 esac
 
 log() { echo "$*" | tee -a "$OUT"; }
-
 set_params() {
   if [ "$SE" = "" ]; then return 0; fi
   echo "$SE" > "$P/smart_exit_enable" 2>/dev/null
