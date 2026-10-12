@@ -721,6 +721,9 @@ jobs:
       - name: A/B bench matrix (E0 on baseline; E1-E4 on variant)
         if: always()
         run: |
+          # 本分支无 ab_bench.sh (batch-1 时代才引入) 时跳过 — 否则 chmod 失败
+          # 会挂掉整个 job, 连带 soak-test 被依赖链跳过 (run 38237867127 实锤)
+          [ -f scripts/ab_bench.sh ] || { echo "ab_bench.sh 不在本分支, 跳过 bench (soak 照常)"; exit 0; }
           chmod +x scripts/ab_bench.sh
           # baseline 分支 (无 smartexit 参数) 跑 E0; variant 分支跑 E1-E4 (sysfs 切换, 单内核)
           if [ -f /sys/module/tcp_bbrplusv3/parameters/smart_exit_enable ]; then
