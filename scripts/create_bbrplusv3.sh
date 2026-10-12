@@ -1132,8 +1132,8 @@ echo "[7c2-mercury/9] 已注入 batch-3: cp-1 (6 处)"
 #   - 伪恢复: bbr_undo_cwnd 用 max(现值, undo 保存值) 恢复 → 伪 loss 自动豁免
 # ============================================
 
-# R6-1: 静态参数 (跟 codel statics 之后)
-sed -i '/^static u32 bbrplusv3_codel_rounds = 2;$/a\
+# R6-1: 静态参数 (跟 codel statics 之后; 锚不带 $ — 真行有尾注释, 带 $ 静默 no-op)
+sed -i '/^static u32 bbrplusv3_codel_rounds = 2;/a\
 \
 /* tcpboost-rto-1: RTO 退出感知削减 (RFC 8312 §4.5 spirit) */\
 static u32 bbrplusv3_rto_fc_enable = 1;\t/* 0=vanilla, 1=RTO 时封顶 inflight_hi */\
