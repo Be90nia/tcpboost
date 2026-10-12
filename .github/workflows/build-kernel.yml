@@ -787,14 +787,16 @@ jobs:
           # --rwdir 把 host 目录挂进 guest 同一路径, 避免 vng tmpfs 退出即丢
           # 开 unstick (L1 修: 防 rcv_ssthresh 钉 64K 饿死) — vng 内核里必须开着测
           sudo mkdir -p /var/log/tcpboost-soak
-          sudo env "PATH=$PATH" \
-            "DURATION=$SOAK_DURATION" "NSTREAMS=$SOAK_STREAMS" \
-            "LOSS=$SOAK_LOSS" "DELAY_MS=$SOAK_DELAY" \
-            "CC=$SOAK_CC" "SAMPLE_INTERVAL=$SOAK_INTERVAL" \
-            vng --disable-kvm --memory 4G --cpus 4 \
+          # env 只透传到 vng (宿主进程), QEMU guest 新 shell 不继承宿主 env —
+          # 必须把参数烤进 guest 命令行 (run 38166073488 实锤: soak_duration=24h
+          # 被吞, 恒跑默认 5h)
+          sudo env "PATH=$PATH" vng --disable-kvm --memory 4G --cpus 4 \
             --rwdir /var/log/tcpboost-soak \
             --run "/boot/vmlinuz-$KVER" -- /bin/bash -c \
-            "sysctl -w net.ipv4.tcp_rcv_ssthresh_unstick=1 && sysctl net.ipv4.tcp_rcv_ssthresh_unstick && /bin/bash $GITHUB_WORKSPACE/scripts/soak_test_5h.sh"
+            "sysctl -w net.ipv4.tcp_rcv_ssthresh_unstick=1 && sysctl net.ipv4.tcp_rcv_ssthresh_unstick && \
+             DURATION='$SOAK_DURATION' NSTREAMS='$SOAK_STREAMS' LOSS='$SOAK_LOSS' \
+             DELAY_MS='$SOAK_DELAY' CC='$SOAK_CC' SAMPLE_INTERVAL='$SOAK_INTERVAL' \
+             /bin/bash $GITHUB_WORKSPACE/scripts/soak_test_5h.sh"
 
       - name: Upload soak artifacts
         if: always()
