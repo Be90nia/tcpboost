@@ -1136,7 +1136,7 @@ echo "[7c2-mercury/9] 已注入 batch-3: cp-1 (6 处)"
 sed -i '/^static u32 bbrplusv3_codel_rounds = 2;/a\
 \
 /* tcpboost-rto-1: RTO 退出感知削减 (RFC 8312 §4.5 spirit) */\
-static u32 bbrplusv3_rto_fc_enable = 1;\t/* 0=vanilla, 1=RTO 时封顶 inflight_hi */\
+static u32 bbrplusv3_rto_fc_enable = 0;	/* 0=默认 (收益需 RTO 风暴场景, CI 不可测; 过度封顶失败模式 qemu 已实证), 1=VPS 实盘实验 */\
 static u32 bbrplusv3_rto_fc_pct = 70;\t/* RTO 后探测上限 = target_inflight 的 % */\
 static u32 bbrplusv3_rto_fc_min_rtt_us = 100000;\t/* 门: min_rtt >= 100ms 才生效 */' "$BBRPLUSV3_SRC"
 
