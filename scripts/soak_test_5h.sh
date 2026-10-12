@@ -52,12 +52,20 @@ else
 fi
 echo "[$(date -Iseconds)] netem 已加: $IFACE 双腿 ${DELAY_MS}ms/$LOSS"
 
-# ============ 启 iperf3 server (持续) ============
-iperf3 -s -p "$IPERF_PORT" > "$OUT/iperf3-server.log" 2>&1 &
-SERVER_PID=$!
+# ============ 启 iperf3 server (每流独立端口) ============
+# 单端口 server 一次只接一个测试: 8 个 watcher 抢 1 口 = 假 8 并发
+# (历史 soak 实为 1-2 条并发流轮转, streams/*.jsonl 恒零的根因之一)
+STREAM_PORTS=()
+for i in $(seq 1 "$NSTREAMS"); do
+  p=$((IPERF_PORT + i))
+  iperf3 -s -p "$p" > "$OUT/iperf3-server-$p.log" 2>&1 &
+  STREAM_PORTS+=("$p")
+done
 sleep 1
-[ -d "/proc/$SERVER_PID" ] || { echo "FATAL: iperf3 server 启动失败"; cat "$OUT/iperf3-server.log"; exit 1; }
-echo "[$(date -Iseconds)] iperf3 server pid=$SERVER_PID port=$IPERF_PORT"
+for p in "${STREAM_PORTS[@]}"; do
+  pgrep -f "iperf3 -s -p $p" >/dev/null || { echo "FATAL: iperf3 server $p 启动失败"; exit 1; }
+done
+echo "[$(date -Iseconds)] iperf3 servers x$NSTREAMS ports=${STREAM_PORTS[*]}"
 
 # ============ 流 watcher 循环 (每流 5min 一轮) ============
 STREAM_PIDS=()
@@ -67,14 +75,14 @@ stop_streams() {
     pkill -P "$pid" 2>/dev/null
   done
 }
-trap 'cleanup_netem; stop_streams; pkill -f "iperf3.*-p $IPERF_PORT" 2>/dev/null' EXIT
+trap 'cleanup_netem; stop_streams; for p in "${STREAM_PORTS[@]:-}"; do pkill -f "iperf3 -s -p $p" 2>/dev/null; done; pkill -f "iperf3 -c 127.0.0.1" 2>/dev/null' EXIT
 
 stream_watcher() {
   local idx=$1
   local log="$OUT/streams/stream-$idx.jsonl"
   while true; do
-    iperf3 -c 127.0.0.1 -p "$IPERF_PORT" -t "$STREAM_ROTATE_SEC" -J 2>/dev/null \
-      | grep -o '"bits_per_second":[0-9]*' | tail -1 | cut -d: -f2 \
+    iperf3 -c 127.0.0.1 -p "$((IPERF_PORT + idx))" -t "$STREAM_ROTATE_SEC" -J 2>/dev/null \
+      | grep -o '"bits_per_second": *[0-9]*' | grep -o '[0-9]*$' \
       >> "$log" || true
     # 流轮转空档标记
     echo "0" >> "$log"
@@ -105,9 +113,14 @@ DURATION_SEC=$(echo "$DURATION" | awk '{
 DEADLINE=$(($(date +%s) + DURATION_SEC))
 echo "[$(date -Iseconds)] 计划运行 ${DURATION_SEC}s ($(date -d @$DEADLINE -u +%FT%TZ) 结束)"
 
-# 当前每流 bps (从 ss -tin 实时抓)
+# 当前每流 bps (从 ss -tin 实时抓; 只看 8 条流的 CLIENT 侧 socket —
+# 不加过滤会把 server 侧 socket 一起数, 同连接双计)
 sample_streams() {
-  ss -tin state established 2>/dev/null | awk '
+  local filt="" p
+  for p in "${STREAM_PORTS[@]:-}"; do filt+="dport = :$p or "; done
+  [ -z "$filt" ] && { echo "0 0 0 0 0"; return; }
+  filt="( ${filt%or } )"
+  ss -tin state established "$filt" 2>/dev/null | awk '
     /delivery_rate/ {
       for (i=1;i<=NF;i++) {
         if ($i == "delivery_rate") { r=$(i+1); sub(/bps,?/,"",r); if (r ~ /Mbps$/) { sub(/Mbps/,"",r); r*=1e6 } else if (r ~ /Kbps$/) { sub(/Kbps/,"",r); r*=1e3 } else if (r ~ /Gbps$/) { sub(/Gbps/,"",r); r*=1e9 } rates[++n]=r }

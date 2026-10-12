@@ -1138,12 +1138,14 @@ sed -i '/^static u32 bbrplusv3_codel_rounds = 2;/a\
 /* tcpboost-rto-1: RTO 退出感知削减 (RFC 8312 §4.5 spirit) */\
 static u32 bbrplusv3_rto_fc_enable = 0;	/* 0=默认 (收益需 RTO 风暴场景, CI 不可测; 过度封顶失败模式 qemu 已实证), 1=VPS 实盘实验 */\
 static u32 bbrplusv3_rto_fc_pct = 70;\t/* RTO 后探测上限 = target_inflight 的 % */\
-static u32 bbrplusv3_rto_fc_min_rtt_us = 100000;\t/* 门: min_rtt >= 100ms 才生效 */' "$BBRPLUSV3_SRC"
+static u32 bbrplusv3_rto_fc_min_rtt_us = 100000;\t/* 门: min_rtt >= 100ms 才生效 */\
+static u32 bbrplusv3_rto_seen;		/* [诊断] Loss 入口计数 (env 有无 RTO) */\
+static u32 bbrplusv3_rto_fc_fires;	/* [诊断] 实际封顶次数 (机制是否行使) */' "$BBRPLUSV3_SRC"
 
 # R6-2: 钩子 — RTO 入口封顶探测上限 (仅 Loss 分支, range 限定防误伤同名行)
 # min_rtt 门: 低 RTT 路径 (loopback/LAN/TCG 抖动) 的 RTO 多为本机噪声且 BDP 小
 # 无过冲可治 — qemu 实测无门时单次 RTO 即把发端钉死 64KB (run 38195973873)
-sed -i '/tcp_plb_update_state_upon_rto(sk, &bbr->plb);/,/inflight_lo == ~0U/ s|^\t\ttcp_plb_update_state_upon_rto(sk, \&bbr->plb);$|\t\ttcp_plb_update_state_upon_rto(sk, \&bbr->plb);\n\t\t/* tcpboost-rto-1: RTO = 真拥塞证据, 立即封顶探测上限 (仅高 RTT 路径) */\n\t\tif (READ_ONCE(bbrplusv3_rto_fc_enable) \&\&\n\t\t    bbr->min_rtt_us != ~0U \&\&\n\t\t    bbr->min_rtt_us >= READ_ONCE(bbrplusv3_rto_fc_min_rtt_us)) {\n\t\t\tu32 cut = (u64)bbr_target_inflight(sk) *\n\t\t\t\tREAD_ONCE(bbrplusv3_rto_fc_pct) / 100;\n\n\t\t\tif (cut)\n\t\t\t\tbbr->inflight_hi = min_t(u32, bbr->inflight_hi, cut);\n\t\t}|' "$BBRPLUSV3_SRC"
+sed -i '/tcp_plb_update_state_upon_rto(sk, &bbr->plb);/,/inflight_lo == ~0U/ s|^\t\ttcp_plb_update_state_upon_rto(sk, \&bbr->plb);$|\t\ttcp_plb_update_state_upon_rto(sk, \&bbr->plb);\n\t\t/* tcpboost-rto-1: RTO = 真拥塞证据, 立即封顶探测上限 (仅高 RTT 路径) */\n\t\tWRITE_ONCE(bbrplusv3_rto_seen, bbrplusv3_rto_seen + 1);\n\t\tif (READ_ONCE(bbrplusv3_rto_fc_enable) \&\&\n\t\t    bbr->min_rtt_us != ~0U \&\&\n\t\t    bbr->min_rtt_us >= READ_ONCE(bbrplusv3_rto_fc_min_rtt_us)) {\n\t\t\tu32 cut = (u64)bbr_target_inflight(sk) *\n\t\t\t\tREAD_ONCE(bbrplusv3_rto_fc_pct) / 100;\n\n\t\t\tif (cut) {\n\t\t\t\tbbr->inflight_hi = min_t(u32, bbr->inflight_hi, cut);\n\t\t\t\tWRITE_ONCE(bbrplusv3_rto_fc_fires, bbrplusv3_rto_fc_fires + 1);\n\t\t\t}\n\t\t}|' "$BBRPLUSV3_SRC"
 
 # R6-3: module_param (跟 pi_setpoint_pct 之后)
 sed -i '/^module_param_named(pi_setpoint_pct, bbrplusv3_pi_setpoint_pct, uint, 0644);$/a\
@@ -1152,7 +1154,11 @@ MODULE_PARM_DESC(rto_fc_enable, "CUBIC fast-convergence style cut on RTO (0=off,
 module_param_named(rto_fc_pct, bbrplusv3_rto_fc_pct, uint, 0644);\
 MODULE_PARM_DESC(rto_fc_pct, "RTO cap = target_inflight * pct/100 (default=70)");\
 module_param_named(rto_fc_min_rtt_us, bbrplusv3_rto_fc_min_rtt_us, uint, 0644);\
-MODULE_PARM_DESC(rto_fc_min_rtt_us, "Apply RTO cut only when min_rtt >= this (default=100000)");' "$BBRPLUSV3_SRC"
+MODULE_PARM_DESC(rto_fc_min_rtt_us, "Apply RTO cut only when min_rtt >= this (default=100000)");\
+module_param_named(rto_seen, bbrplusv3_rto_seen, uint, 0444);\
+MODULE_PARM_DESC(rto_seen, "[diag] TCP_CA_Loss entry count (RTO events)");\
+module_param_named(rto_fc_fires, bbrplusv3_rto_fc_fires, uint, 0444);\
+MODULE_PARM_DESC(rto_fc_fires, "[diag] times the RTO cap actually fired");' "$BBRPLUSV3_SRC"
 
 echo "[7c3-libra/9] 已注入 batch-4: rto-1 (3 处)"
 
@@ -1208,6 +1214,8 @@ verify_pattern 'tcpboost-rto-1' "rto-1 RTO-aware cut"
 verify_pattern 'bbrplusv3_rto_fc_enable' "rto-1 module_param"
 verify_pattern 'bbrplusv3_rto_fc_pct' "rto-1 cap percent"
 verify_pattern 'bbrplusv3_rto_fc_min_rtt_us' "rto-1 min_rtt gate"
+verify_pattern 'bbrplusv3_rto_seen' "rto-1 diag counter rto_seen"
+verify_pattern 'bbrplusv3_rto_fc_fires' "rto-1 diag counter fires"
 verify_pattern 'tcpboost-pi-1' "pi-1 PI pacing-gain feedback"
 verify_pattern 'bbrplusv3_pi_enable' "pi-1 module_param"
 verify_pattern 'bbrplusv3_pi_adjust' "pi-1 controller function"
