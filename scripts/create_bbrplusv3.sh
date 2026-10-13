@@ -926,7 +926,8 @@ sed -i '/u8	codel_drain_rounds;/a\
 sed -i '/static u32 bbrplusv3_codel_rounds = 2;/a\
 \
 /* tcpboost-kalman-1: scalar Kalman (steady-state gain), random-walk (A=1,H=1) */\
-static u32 bbrplusv3_kalman_enable = 1;	/* 0=raw sample, 1=smoothed */\
+static u32 bbrplusv3_kalman_enable = 0;	/* 0=默认 (bisect 定位: kalman 是 min 流回归主犯,
+				  * 关后 5.2→8.3 回升 60%, run 38346116724), 1=opt-in */\
 static u32 bbrplusv3_kalman_q = 16;	/* process noise, 16.16 (default=4096) */\
 static u32 bbrplusv3_kalman_r = 64;	/* measurement noise, 16.16 (default=16384) */\
 static u32 bbr_max_bw(const struct sock *sk);	/* fwd decl: defined later in file */\
@@ -962,7 +963,8 @@ static void bbrplusv3_kalman_update(struct bbr *bbr, u32 sample)\
 /* tcpboost-pi-1: PI feedback on PROBE_BW pacing gain (RFC 8034 spirit).\
  * bbr_update_gains() 重置 cycle gain 每 ACK, 故 delta 每 ACK 重放,\
  * err/integral 每 round 更新 (ICSK_CA_PRIV_SIZE 不容纳时间戳). */\
-static u32 bbrplusv3_pi_enable = 1;\
+static u32 bbrplusv3_pi_enable = 0;	/* 0=默认 (bisect 定位: pi 是 min 流回归从犯,
+				 * 单关 kalman 已回升 60%, 留 0 稳), 1=opt-in */\
 static u32 bbrplusv3_pi_kp = 250;	/* P: 0.25 gain scale */\
 static u32 bbrplusv3_pi_ki = 8;		/* I: 2.5/312.5 scale */\
 static u32 bbrplusv3_pi_setpoint_pct = 95;	/* target = 95% of btl max bw */\
@@ -1007,13 +1009,13 @@ sed -i 's|^\tbbr->bw_latest = 0;$|\tbbr->bw_latest = 0;\n\tbbr->kalman_x = 0;\n\
 # K-6: module_param 声明 (params heredoc 末尾)
 sed -i '/^module_param_named(rtt_hist_max_entries, bbrplusv3_rtt_hist_max_entries, uint, 0644);$/a\
 module_param_named(kalman_enable, bbrplusv3_kalman_enable, uint, 0644);\
-MODULE_PARM_DESC(kalman_enable, "Scalar Kalman smoothing of bw_latest (0=raw, 1=on, default=1)");\
+MODULE_PARM_DESC(kalman_enable, "Scalar Kalman smoothing of bw_latest (0=raw default after bisect REGRESS verdict, 1=on opt-in)");\
 module_param_named(kalman_q, bbrplusv3_kalman_q, uint, 0644);\
 MODULE_PARM_DESC(kalman_q, "Kalman process noise Q (default=16 = 0.0625)");\
 module_param_named(kalman_r, bbrplusv3_kalman_r, uint, 0644);\
 MODULE_PARM_DESC(kalman_r, "Kalman measurement noise R (default=64 = 0.25)");\
 module_param_named(pi_enable, bbrplusv3_pi_enable, uint, 0644);\
-MODULE_PARM_DESC(pi_enable, "PI pacing-gain feedback in PROBE_BW (0=off, 1=on, default=1)");\
+MODULE_PARM_DESC(pi_enable, "PI pacing-gain feedback in PROBE_BW (0=off default after bisect, 1=on opt-in)");\
 module_param_named(pi_kp, bbrplusv3_pi_kp, uint, 0644);\
 MODULE_PARM_DESC(pi_kp, "PI proportional gain (default=250)");\
 module_param_named(pi_ki, bbrplusv3_pi_ki, uint, 0644);\
