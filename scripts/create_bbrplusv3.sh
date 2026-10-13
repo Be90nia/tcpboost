@@ -926,8 +926,7 @@ sed -i '/u8	codel_drain_rounds;/a\
 sed -i '/static u32 bbrplusv3_codel_rounds = 2;/a\
 \
 /* tcpboost-kalman-1: scalar Kalman (steady-state gain), random-walk (A=1,H=1) */\
-static u32 bbrplusv3_kalman_enable = 0;	/* 0=默认 (bisect 定位: kalman 是 min 流回归主犯,
-				  * 关后 5.2→8.3 回升 60%, run 38346116724), 1=opt-in */\
+static u32 bbrplusv3_kalman_enable = 0;	/* 0=默认 (bisect 定位主犯, 关后 5.2→8.3 回升 60%, run 38346116724), 1=opt-in */\
 static u32 bbrplusv3_kalman_q = 16;	/* process noise, 16.16 (default=4096) */\
 static u32 bbrplusv3_kalman_r = 64;	/* measurement noise, 16.16 (default=16384) */\
 static u32 bbr_max_bw(const struct sock *sk);	/* fwd decl: defined later in file */\
