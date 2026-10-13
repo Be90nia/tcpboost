@@ -35,6 +35,16 @@ which iperf3 >/dev/null 2>&1 || { echo "FATAL: iperf3 未装 (apt install iperf3
 which bc >/dev/null 2>&1 || apt-get install -y bc >/dev/null 2>&1
 sysctl -w net.ipv4.tcp_congestion_control="$CC" >/dev/null 2>&1 || echo "WARN: CC=$CC 切换失败, 沿用当前"
 
+# batch-2 特性运行时开关 (KALMAN_EN/PI_EN 由 workflow 烤进来, 默认 1=开)
+# 用于 bisect 解剖: min 流回归是 kalman 还是 pi (2026-10-12 配对 A/B 发现)
+PD=/sys/module/tcp_bbrplusv3/parameters
+if [ -d "$PD" ]; then
+  echo "${KALMAN_EN:-1}" > "$PD/kalman_enable" 2>/dev/null && \
+    echo "[$(date -Iseconds)] kalman_enable=$(cat "$PD/kalman_enable" 2>/dev/null)"
+  echo "${PI_EN:-1}" > "$PD/pi_enable" 2>/dev/null && \
+    echo "[$(date -Iseconds)] pi_enable=$(cat "$PD/pi_enable" 2>/dev/null)"
+fi
+
 # ============ 启 netem ============
 cleanup_netem() {
   tc qdisc del dev "$IFACE" root 2>/dev/null
