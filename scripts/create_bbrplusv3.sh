@@ -22,6 +22,8 @@
 
 set -e
 
+# 调试: 看 sed 失败时到底哪行错 (run 38355518794 死了两次没显示原因)
+set -x
 KERNEL_DIR="${1:-.}"
 cd "$KERNEL_DIR"
 
