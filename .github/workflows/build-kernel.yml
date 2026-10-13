@@ -796,13 +796,17 @@ jobs:
           # --run <path> -> virtme --kimg, 显式引导 $KVER (缺省回落宿主内核)
           # --rwdir 把 host 目录挂进 guest 同一路径, 避免 vng tmpfs 退出即丢
           sudo mkdir -p /var/log/tcpboost-soak
-          sudo env "PATH=$PATH" \
-            "DURATION=$SOAK_DURATION" "NSTREAMS=$SOAK_STREAMS" \
-            "LOSS=$SOAK_LOSS" "DELAY_MS=$SOAK_DELAY" \
-            "CC=$SOAK_CC" "SAMPLE_INTERVAL=$SOAK_INTERVAL" \
-            vng --disable-kvm --memory 4G --cpus 4 \
+          # env 必须烤进 guest 命令行: vng 前缀只到宿主进程, guest 新 shell 不继承
+          # (c49 24h 被吞 + 232/12 复测跑在 unstick=0 上, 双实锤)
+          # unstick=1: 饿死主修, vng 内核里必须开着测
+          sudo env "PATH=$PATH" vng --disable-kvm --memory 4G --cpus 4 \
             --rwdir /var/log/tcpboost-soak \
-            --run "/boot/vmlinuz-$KVER" -- /bin/bash "$GITHUB_WORKSPACE/scripts/soak_test_5h.sh"
+            --run "/boot/vmlinuz-$KVER" -- /bin/bash -c \
+            "sysctl -w net.ipv4.tcp_rcv_ssthresh_unstick=1 && sysctl net.ipv4.tcp_rcv_ssthresh_unstick && \
+             DURATION='$SOAK_DURATION' NSTREAMS='$SOAK_STREAMS' LOSS='$SOAK_LOSS' \
+             DELAY_MS='$SOAK_DELAY' CC='$SOAK_CC' SAMPLE_INTERVAL='$SOAK_INTERVAL' \
+             KALMAN_EN='$KALMAN_EN' PI_EN='$PI_EN' \
+             /bin/bash $GITHUB_WORKSPACE/scripts/soak_test_5h.sh"
 
       - name: Upload soak artifacts
         if: always()
