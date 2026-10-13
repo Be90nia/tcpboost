@@ -131,13 +131,21 @@ pkill -f 'iperf3.*-p 520[12]' 2>/dev/null
 
 echo "=== 8. unstick A/B (早窗期 rcv_ssthresh 对比) ==="
 measure_rsa() {
-  # 起 server, 客户端 0.4s 取 ss -tin rcv_ssthresh
-  iperf3 -s -D -p "$1" >/dev/null 2>&1
-  sleep 0.3
-  ( iperf3 -c 127.0.0.1 -p "$1" -t 1 >/dev/null 2>&1 ) &
-  sleep 0.4
-  ss -tin "sport = :$1" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i ~ /^rcv_ssthresh:/) {sub(/^rcv_ssthresh:/,"",$i); print $i; exit}}'
-  pkill -f "iperf3.*-p $1" 2>/dev/null
+  # 起 server, 客户端 0.4s 取 ss -tin rcv_ssthresh; 采 3 次取 max —
+  # TCG 抖动下 0.4s 单点采样是掷硬币 (on 腿偶尔正好没长, 恒 65536),
+  # 历史误判两次: rto-1 v2 (38195973873) 与 kalman=1/pi=0 探针 (38330867879)
+  local best=0 v t
+  for t in 1 2 3; do
+    iperf3 -s -D -p "$1" >/dev/null 2>&1
+    sleep 0.3
+    ( iperf3 -c 127.0.0.1 -p "$1" -t 1 >/dev/null 2>&1 ) &
+    sleep 0.4
+    v=$(ss -tin "sport = :$1" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i ~ /^rcv_ssthresh:/) {sub(/^rcv_ssthresh:/,"",$i); print $i; exit}}')
+    pkill -f "iperf3.*-p $1" 2>/dev/null
+    [ -n "$v" ] && [ "$v" -gt "$best" ] && best=$v
+    sleep 0.2
+  done
+  [ "$best" -gt 0 ] && echo "$best"
 }
 sysctl -w net.ipv4.tcp_rcv_ssthresh_unstick=0 >/dev/null 2>&1
 RSA0=$(measure_rsa 5203)
@@ -147,7 +155,7 @@ if [ -n "$RSA0" ] && [ -n "$RSA1" ]; then
   if [ "$RSA1" -ge "$RSA0" ]; then
     pass "unstick A/B: off=$RSA0  on=$RSA1 (on >= off, 早窗期未退步)"
   else
-    fail_hard "unstick A/B: off=$RSA0  on=$RSA1 (on 反而更低, patch 可能未生效)"
+    fail_hard "unstick A/B: off=$RSA0  on=$RSA1 (3 次取 max 后 on 仍更低, 真回归)"
   fi
 else
   fail_soft "A/B 采样失败 (rsa0='$RSA0' rsa1='$RSA1', ss 可能延迟未抓到)"

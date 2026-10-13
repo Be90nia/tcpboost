@@ -65,7 +65,7 @@ env:
 
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.inputs.kernel_series || '6.12' }}-${{ github.event.inputs.kernel_version || '' }}
+  group: ${{ github.workflow }}-${{ github.event.inputs.kernel_series || '6.12' }}-${{ github.event.inputs.kernel_version || '' }}-${{ github.event.inputs.kalman_en || '1' }}-${{ github.event.inputs.pi_en || '1' }}
   cancel-in-progress: false
 
 jobs:
