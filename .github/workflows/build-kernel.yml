@@ -806,6 +806,7 @@ jobs:
             "sysctl -w net.ipv4.tcp_rcv_ssthresh_unstick=1 && sysctl net.ipv4.tcp_rcv_ssthresh_unstick && \
              DURATION='$SOAK_DURATION' NSTREAMS='$SOAK_STREAMS' LOSS='$SOAK_LOSS' \
              DELAY_MS='$SOAK_DELAY' CC='$SOAK_CC' SAMPLE_INTERVAL='$SOAK_INTERVAL' \
+             KALMAN_EN='$KALMAN_EN' PI_EN='$PI_EN' \
              /bin/bash $GITHUB_WORKSPACE/scripts/soak_test_5h.sh"
 
       - name: Upload soak artifacts
