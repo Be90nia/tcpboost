@@ -22,8 +22,6 @@
 
 set -e
 
-# 调试: 看 sed 失败时到底哪行错 (run 38355518794 死了两次没显示原因)
-set -x
 KERNEL_DIR="${1:-.}"
 cd "$KERNEL_DIR"
 
@@ -964,8 +962,7 @@ static void bbrplusv3_kalman_update(struct bbr *bbr, u32 sample)\
 /* tcpboost-pi-1: PI feedback on PROBE_BW pacing gain (RFC 8034 spirit).\
  * bbr_update_gains() 重置 cycle gain 每 ACK, 故 delta 每 ACK 重放,\
  * err/integral 每 round 更新 (ICSK_CA_PRIV_SIZE 不容纳时间戳). */\
-static u32 bbrplusv3_pi_enable = 0;	/* 0=默认 (bisect 定位: pi 是 min 流回归从犯,
-				 * 单关 kalman 已回升 60%, 留 0 稳), 1=opt-in */\
+static u32 bbrplusv3_pi_enable = 0;	/* 0=默认 (bisect 定位从犯, 单关 kalman 已回升 60%, 留 0 稳), 1=opt-in */\
 static u32 bbrplusv3_pi_kp = 250;	/* P: 0.25 gain scale */\
 static u32 bbrplusv3_pi_ki = 8;		/* I: 2.5/312.5 scale */\
 static u32 bbrplusv3_pi_setpoint_pct = 95;	/* target = 95% of btl max bw */\
