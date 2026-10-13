@@ -703,7 +703,10 @@ write_bbrplusv3_service() {
   #     所以显式写入 historical_cache_enable=1 作为 aggressive 基线持久化
   #   - modprobe + 重试：确保 sysfs 参数目录存在
   #   - 不吞错误：失败信息输出到 systemd journal
-  local params="loss_thresh=${s_loss_thresh} beta=${s_beta} pacing_gain_down=${s_pacing_gain_down} probe_rtt_mode_ms=${s_probe_rtt_mode_ms} probe_rtt_win_ms=${s_probe_rtt_win_ms}"
+  # batch-1~5 机制全开: smartexit/codel (batch-1), kalman/pi (batch-2), cp (batch-3),
+  # rto_fc (batch-4), mlfq (batch-5) — 全部写 1
+  # 旧内核缺参数时该条 echo 失败, ; 链不影响其余参数 (journal 有噪音可忽略)
+  local params="loss_thresh=${s_loss_thresh} beta=${s_beta} pacing_gain_down=${s_pacing_gain_down} probe_rtt_mode_ms=${s_probe_rtt_mode_ms} probe_rtt_win_ms=${s_probe_rtt_win_ms} smart_exit_enable=1 codel_enable=1 kalman_enable=1 pi_enable=1 cp_enable=1 rto_fc_enable=1 mlfq_en=1"
   # lotspeed-1: 默认启用跨连接缓存（aggressive profile）；historical_cache_enable= 参数可覆盖
   if [ -z "$s_hist_cache" ]; then
     params="${params} historical_cache_enable=1"
@@ -788,6 +791,17 @@ apply_bbrplusv3_params() {
   if [ -w "$param_dir/historical_cache_enable" ]; then
     echo 1 > "$param_dir/historical_cache_enable" || warn "写入 historical_cache_enable 失败"
   fi
+
+  # 1c. batch-1~5 机制全开 (战役五批): smartexit/codel (batch-1), kalman/pi (batch-2),
+  #     cp (batch-3), rto_fc (batch-4, 自带 min_rtt>=100ms 门), mlfq (batch-5)
+  #     smartexit/codel/mlfq 内核默认已=1, 显式写入保证持久一致; kalman/pi/cp/rto_fc 默认=0
+  #     旧内核无这些参数时 -w 守卫跳过
+  local bp
+  for bp in smart_exit_enable codel_enable kalman_enable pi_enable cp_enable rto_fc_enable mlfq_en; do
+    if [ -w "$param_dir/$bp" ]; then
+      echo 1 > "$param_dir/$bp" || warn "写入 $bp 失败"
+    fi
+  done
 
   # 2. loss_thresh 覆盖（aggressive profile 默认 7=2.73%，需 8=3.125% 适配跨太 3% 背景丢包）
   #    beta/pacing_gain_down/probe_rtt_*_ms 与 aggressive profile 默认一致，不冗余写入
@@ -1902,6 +1916,17 @@ show_algorithm_status() {
         me=$(cat "$param_dir/rtt_hist_max_entries" 2>/dev/null || echo "?")
         echo "  lotspeed-1:     on (TTL=${ttl}s, min_samples=${ms}, max_entries=${me})"
       fi
+      # batch-1~5 机制开关 (旧内核无参数时自动跳过)
+      local bp bpv
+      for bp in smart_exit_enable codel_enable kalman_enable pi_enable cp_enable rto_fc_enable mlfq_en; do
+        bpv=$(cat "$param_dir/$bp" 2>/dev/null || echo "?")
+        [ "$bpv" = "?" ] && continue
+        if [ "$bpv" = "1" ]; then
+          echo "  $bp:  1 (on)"
+        else
+          echo "  $bp:  ${bpv} (off)"
+        fi
+      done
       if [ "$mpr" = "?" ] || [ "$mpr" = "0" ]; then
         echo "  min_pacing_rate: off"
       else
