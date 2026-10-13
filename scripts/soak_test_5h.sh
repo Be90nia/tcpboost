@@ -35,6 +35,16 @@ which iperf3 >/dev/null 2>&1 || { echo "FATAL: iperf3 未装 (apt install iperf3
 which bc >/dev/null 2>&1 || apt-get install -y bc >/dev/null 2>&1
 sysctl -w net.ipv4.tcp_congestion_control="$CC" >/dev/null 2>&1 || echo "WARN: CC=$CC 切换失败, 沿用当前"
 
+# batch-2 特性运行时开关 (KALMAN_EN/PI_EN 由 workflow 烤进来, 默认 1=开)
+# 用于 bisect 解剖: min 流回归是 kalman 还是 pi (2026-10-12 配对 A/B 发现)
+PD=/sys/module/tcp_bbrplusv3/parameters
+if [ -d "$PD" ]; then
+  echo "${KALMAN_EN:-1}" > "$PD/kalman_enable" 2>/dev/null && \
+    echo "[$(date -Iseconds)] kalman_enable=$(cat "$PD/kalman_enable" 2>/dev/null)"
+  echo "${PI_EN:-1}" > "$PD/pi_enable" 2>/dev/null && \
+    echo "[$(date -Iseconds)] pi_enable=$(cat "$PD/pi_enable" 2>/dev/null)"
+fi
+
 # ============ 启 netem ============
 cleanup_netem() {
   tc qdisc del dev "$IFACE" root 2>/dev/null
@@ -52,12 +62,20 @@ else
 fi
 echo "[$(date -Iseconds)] netem 已加: $IFACE 双腿 ${DELAY_MS}ms/$LOSS"
 
-# ============ 启 iperf3 server (持续) ============
-iperf3 -s -p "$IPERF_PORT" > "$OUT/iperf3-server.log" 2>&1 &
-SERVER_PID=$!
+# ============ 启 iperf3 server (每流独立端口) ============
+# 单端口 server 一次只接一个测试: 8 个 watcher 抢 1 口 = 假 8 并发
+# (历史 soak 实为 1-2 条并发流轮转, streams/*.jsonl 恒零的根因之一)
+STREAM_PORTS=()
+for i in $(seq 1 "$NSTREAMS"); do
+  p=$((IPERF_PORT + i))
+  iperf3 -s -p "$p" > "$OUT/iperf3-server-$p.log" 2>&1 &
+  STREAM_PORTS+=("$p")
+done
 sleep 1
-[ -d "/proc/$SERVER_PID" ] || { echo "FATAL: iperf3 server 启动失败"; cat "$OUT/iperf3-server.log"; exit 1; }
-echo "[$(date -Iseconds)] iperf3 server pid=$SERVER_PID port=$IPERF_PORT"
+for p in "${STREAM_PORTS[@]}"; do
+  pgrep -f "iperf3 -s -p $p" >/dev/null || { echo "FATAL: iperf3 server $p 启动失败"; exit 1; }
+done
+echo "[$(date -Iseconds)] iperf3 servers x$NSTREAMS ports=${STREAM_PORTS[*]}"
 
 # ============ 流 watcher 循环 (每流 5min 一轮) ============
 STREAM_PIDS=()
@@ -67,14 +85,14 @@ stop_streams() {
     pkill -P "$pid" 2>/dev/null
   done
 }
-trap 'cleanup_netem; stop_streams; pkill -f "iperf3.*-p $IPERF_PORT" 2>/dev/null' EXIT
+trap 'cleanup_netem; stop_streams; for p in "${STREAM_PORTS[@]:-}"; do pkill -f "iperf3 -s -p $p" 2>/dev/null; done; pkill -f "iperf3 -c 127.0.0.1" 2>/dev/null' EXIT
 
 stream_watcher() {
   local idx=$1
   local log="$OUT/streams/stream-$idx.jsonl"
   while true; do
-    iperf3 -c 127.0.0.1 -p "$IPERF_PORT" -t "$STREAM_ROTATE_SEC" -J 2>/dev/null \
-      | grep -o '"bits_per_second":[0-9]*' | tail -1 | cut -d: -f2 \
+    iperf3 -c 127.0.0.1 -p "$((IPERF_PORT + idx))" -t "$STREAM_ROTATE_SEC" -J 2>/dev/null \
+      | grep -o '"bits_per_second": *[0-9]*' | grep -o '[0-9]*$' \
       >> "$log" || true
     # 流轮转空档标记
     echo "0" >> "$log"
@@ -92,6 +110,7 @@ CSV="$OUT/timeseries.csv"
 echo "epoch,wall,total_mbps,min_mbps,p50_mbps,max_mbps,active_streams,tcp_estab,tcp_timewait,tcp_inuse,sockstat_orphan,conntrack_used,psicpu_some,psimem_some,psiio_some,load1,load5,load15,cpu_pct,mem_used_pct,unstick" > "$CSV"
 SAMPLES="$OUT/samples.jsonl"
 echo '{"epoch":0}' > "$SAMPLES"
+echo '{"epoch":0}' > "$OUT/memory.jsonl"
 
 # 把秒数转 epoch + 总时长终止点
 DURATION_SEC=$(echo "$DURATION" | awk '{
@@ -104,9 +123,14 @@ DURATION_SEC=$(echo "$DURATION" | awk '{
 DEADLINE=$(($(date +%s) + DURATION_SEC))
 echo "[$(date -Iseconds)] 计划运行 ${DURATION_SEC}s ($(date -d @$DEADLINE -u +%FT%TZ) 结束)"
 
-# 当前每流 bps (从 ss -tin 实时抓)
+# 当前每流 bps (从 ss -tin 实时抓; 只看 8 条流的 CLIENT 侧 socket —
+# 不加过滤会把 server 侧 socket 一起数, 同连接双计)
 sample_streams() {
-  ss -tin state established 2>/dev/null | awk '
+  local filt="" p
+  for p in "${STREAM_PORTS[@]:-}"; do filt+="dport = :$p or "; done
+  [ -z "$filt" ] && { echo "0 0 0 0 0"; return; }
+  filt="( ${filt%or } )"
+  ss -tin state established "$filt" 2>/dev/null | awk '
     /delivery_rate/ {
       for (i=1;i<=NF;i++) {
         if ($i == "delivery_rate") { r=$(i+1); sub(/bps,?/,"",r); if (r ~ /Mbps$/) { sub(/Mbps/,"",r); r*=1e6 } else if (r ~ /Kbps$/) { sub(/Kbps/,"",r); r*=1e3 } else if (r ~ /Gbps$/) { sub(/Gbps/,"",r); r*=1e9 } rates[++n]=r }
@@ -133,6 +157,28 @@ cpu_pct() {
   else
     top -bn2 -d1 2>/dev/null | awk '/^%Cpu/ {gsub(",","",$0); print $0; exit}' | awk '{print 100-$8}'
   fi
+}
+
+# 内存细采: slab/内核栈/碎片化/compact/iperf3 RSS — 5min 粒度落 memory.jsonl
+# 碎片化观测点: buddyinfo order-0/4/9 空闲页 (order-9 ≈ 2MB 巨页, 持续下降=碎片化)
+# 泄漏观测点: SUnreclaim(不可回收slab)/KernelStack/Vmalloc 持续单调涨=泄漏
+mem_snapshot() {
+  local pid="$1"
+  local mi slab unreclaim kstack vmalloc tcpmem
+  mi=$(cat /proc/meminfo)
+  slab=$(awk '/^Slab:/ {print $2}' <<<"$mi")
+  unreclaim=$(awk '/^SUnreclaim:/ {print $2}' <<<"$mi")
+  kstack=$(awk '/^KernelStack:/ {print $2}' <<<"$mi")
+  vmalloc=$(awk '/^VmallocUsed:/ {print $2}' <<<"$mi")
+  tcpmem=$(awk '/^TCP:/{print $2}' /proc/sockstat 2>/dev/null)
+  # buddyinfo: node0 各 order free 页数; 取 order0/4/9 (第4/9/15列, buddyinfo 从第4列起是 order0)
+  read -r b0 b4 b9 <<< "$(awk 'NR==2{print $4, $8, $13}' /proc/buddyinfo 2>/dev/null)"
+  # compact/alloc 压力事件
+  read -r cstall cfail csucc allocstall <<< "$(awk '/compact_stall/{s=$2}/compact_fail/{f=$2}/compact_success/{c=$2}/allocstall/{a+=$2}END{print s+0,f+0,c+0,a+0}' /proc/vmstat)"
+  # iperf3 进程 RSS (kB)
+  local rss=0
+  [ -n "$pid" ] && [ -r "/proc/$pid/status" ] && rss=$(awk '/^VmRSS:/{print $2}' "/proc/$pid/status")
+  echo "{\"epoch\":$(date +%s),\"slab_kb\":$slab,\"sunreclaim_kb\":$unreclaim,\"kstack_kb\":$kstack,\"vmalloc_kb\":$vmalloc,\"tcp_mem_pages\":${tcpmem:-0},\"buddy_o0\":${b0:-0},\"buddy_o4\":${b4:-0},\"buddy_o9\":${b9:-0},\"compact_stall\":$cstall,\"compact_fail\":$cfail,\"compact_success\":$csucc,\"allocstall\":$allocstall,\"iperf3_rss_kb\":$rss}"
 }
 
 UNSTICK=$(sysctl -n net.ipv4.tcp_rcv_ssthresh_unstick 2>/dev/null || echo 0)
@@ -174,6 +220,9 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   # 5min 一次完整快照
   if [ $((now - last_snap)) -ge "$SNAPSHOT_INTERVAL" ] || [ "$last_snap" = "0" ]; then
     last_snap=$now
+    # 内存/碎片化细采 (memory.jsonl, 5min 粒度)
+    iperf3_pid=$(pgrep -f 'iperf3 -s' | head -1)
+    mem_snapshot "$iperf3_pid" >> "$OUT/memory.jsonl"
     # 落 JSONL (详细)
     snap_json=$(cat <<EOF
 {"epoch":$now,"wall":"$wall","active":$active,"total_mbps":$total_mbps,"min_mbps":$min_mbps,"max_mbps":$max_mbps,"p50_mbps":$p50_mbps,"tcp_estab":${ss_estab:-0},"tcp_tw":${ss_tw:-0},"tcp_inuse":${ss_inuse:-0},"orphan":${ss_orphan:-0},"conntrack":$ct_used,"psicpu":$psicpu,"psimem":$psimem,"psiio":$psiio,"load1":$load1,"cpu_pct":$cpu,"mem_pct":$mem,"unstick":$UNSTICK,"tcp_rcv_ssthresh_unstick":$UNSTICK}
