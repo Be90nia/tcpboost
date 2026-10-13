@@ -332,7 +332,7 @@ apply_eevdf_tuning() {
     set_sysctl_key "net.core.busy_poll" "80" "$SYSCTL_FILE"
     set_sysctl_key "net.core.busy_read" "80" "$SYSCTL_FILE"
     set_sysctl_key "net.core.netdev_budget_usecs" "4000" "$SYSCTL_FILE"
-    sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1
+    sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true  # 内核缺键时 sysctl -p 非零, set -e 会崩死后续 batch 参数
     info "EEVDF 自适应 ($series >= 7.0): busy_poll=80, budget_usecs=4000"
   else
     # EEVDF 早期版本 (< 7.0)：ksoftirqd 唤醒延迟较高，保持默认预算
@@ -1368,7 +1368,7 @@ net.ipv4.tcp_collapse_max_bytes = 2097152
 net.ipv4.tcp_rcv_ssthresh_unstick = 1
 EOF
 
-  sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1
+  sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true  # 内核缺键时 sysctl -p 非零, set -e 会崩死后续 batch 参数
 
   # EEVDF 版本自适应优化
   apply_eevdf_tuning
@@ -1423,7 +1423,7 @@ net.core.busy_read = 50
 net.ipv4.tcp_rcv_ssthresh_unstick = 1
 EOF
 
-  sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1
+  sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true  # 内核缺键时 sysctl -p 非零, set -e 会崩死后续 batch 参数
 
   # EEVDF 版本自适应优化
   apply_eevdf_tuning
@@ -1495,7 +1495,6 @@ net.core.somaxconn = 65535
 net.ipv4.tcp_max_syn_backlog = 16384
 net.ipv4.tcp_max_tw_buckets = 10000
 net.ipv4.tcp_syncookies = 1
-net.ipv4.tcp_tw_recycle = 0
 
 # === Keepalive（NAT 保活修正） ===
 # 60s 开始探测，15s 间隔，4 次失败 = 总超时 60+15*4=120s
@@ -1532,7 +1531,7 @@ EOF
     systemctl daemon-reload 2>/dev/null || true
   fi
 
-  sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1
+  sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true  # 内核缺键时 sysctl -p 非零, set -e 会崩死后续 batch 参数
 
   # BBRPlusV3 最优参数（科学上网场景测试验证）
   apply_bbrplusv3_params
@@ -1630,7 +1629,6 @@ net.core.somaxconn = 65535
 net.ipv4.tcp_max_syn_backlog = 16384
 net.ipv4.tcp_max_tw_buckets = 10000
 net.ipv4.tcp_syncookies = 1
-net.ipv4.tcp_tw_recycle = 0
 
 # === Keepalive（NAT 保活修正） ===
 # 60s 开始探测，15s 间隔，4 次失败 = 总超时 120s（防半开连接）
@@ -1666,7 +1664,7 @@ EOF
     systemctl daemon-reload 2>/dev/null || true
   fi
 
-  sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1
+  sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true  # 内核缺键时 sysctl -p 非零, set -e 会崩死后续 batch 参数
 
   # BBRPlusV3 aggressive profile + apply_bbrplusv3_params 覆盖（与激进方案一致）
   # TLS 优化方案不降速: 使用与激进方案完全相同的 CC 参数
