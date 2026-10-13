@@ -1163,6 +1163,81 @@ MODULE_PARM_DESC(rto_fc_fires, "[diag] times the RTO cap actually fired");' "$BB
 echo "[7c3-libra/9] 已注入 batch-4: rto-1 (3 处)"
 
 # ============================================
+# 7c4-novem. tcpboost-mlfq-1: 3 档 MLFQ pacing gain (OSTEP §8, bd 0w6+wdb)
+# 设计定稿: docs/batch5-mlfq-design.md (wdb 分层 + 深扒 §2.3 骨架)
+# 机制: 连续 mlfq_loss_rounds 个 loss round → 降档 (基线 gain × l2_gain_pct);
+#       mlfq_boost_ms 稳定 → 升一级 (不直接跳顶, 减振荡).
+#       跳层清 pi_int_err (wdb 条 2); L2 时 inflight_hi 削减跳过 (wdb 条 3,
+#       beta 禁用 — L2 的 gain 0.7 即全部削减, effective cut ≤ 单机制).
+# 计数单位: round (loss_in_round && round_start 每 round 计一次)
+# ============================================
+
+# M-1: struct 加状态 (8B 含对齐; ~184B, ICSK 256 余量足)
+sed -i '/cp_surp, cp_rounds;/a\
+	u8	mlfq_level, mlfq_loss_cnt;	/* tcpboost-mlfq-1: L0/L1/L2 */\
+	u32	mlfq_last_loss;	/* tcpboost-mlfq-1: jiffies of last loss round */' "$BBRPLUSV3_SRC"
+
+# M-2: 静态 + 更新/乘数函数 (anchor 同 kalman/rto, 插入序在最前 = 先于所有使用者)
+sed -i '/^static u32 bbrplusv3_codel_rounds = 2;/a\
+\
+/* tcpboost-mlfq-1: 3-level MLFQ (OSTEP S8; wdb design-of-record) */\
+static u32 bbrplusv3_mlfq_en = 1;	/* 0=off, 1=on */\
+static u32 bbrplusv3_mlfq_l2_gain_pct = 70;	/* L2 基线 gain = vanilla 的 % */\
+static u32 bbrplusv3_mlfq_loss_rounds = 5;	/* 连续 N 个 loss round 降档 */\
+static u32 bbrplusv3_mlfq_boost_ms = 1000;	/* 稳定 N ms 升一档 (Rule 5) */\
+\
+static u32 bbrplusv3_mlfq_gain_mult(struct bbr *bbr)\
+{\
+	if (bbr->mlfq_level >= 2)\
+		return (u32)READ_ONCE(bbrplusv3_mlfq_l2_gain_pct) * 256 / 100;\
+	return 256;\
+}\
+\
+static void bbrplusv3_mlfq_update(struct bbr *bbr)\
+{\
+	u32 now = tcp_jiffies32;\
+\
+	if (bbr->loss_in_round && bbr->round_start) {\
+		bbr->mlfq_last_loss = now;\
+		if (bbr->mlfq_loss_cnt < 255)\
+			bbr->mlfq_loss_cnt++;\
+		if (bbr->mlfq_loss_cnt >= READ_ONCE(bbrplusv3_mlfq_loss_rounds) &&\
+		    bbr->mlfq_level < 2) {\
+			bbr->mlfq_level++;\
+			bbr->mlfq_loss_cnt = 0;\
+			bbr->pi_int_err = 0;	/* wdb 条2: 跳层清 PI 状态 */\
+		}\
+	} else if (bbr->round_start &&\
+		   now - bbr->mlfq_last_loss > READ_ONCE(bbrplusv3_mlfq_boost_ms)) {\
+		if (bbr->mlfq_level > 0) {\
+			bbr->mlfq_level--;\
+			bbr->mlfq_loss_cnt = 0;\
+			bbr->pi_int_err = 0;\
+		}\
+	}\
+}' "$BBRPLUSV3_SRC"
+
+# M-3: 接入 pi_adjust — 每 ACK 更新 level + 基线 gain 乘 mlfq 乘数
+sed -i 's|^\tbbr->pacing_gain = clamp(|\tbbrplusv3_mlfq_update(bbr);	/* tcpboost-mlfq-1 */\n\tbbr->pacing_gain = clamp(|' "$BBRPLUSV3_SRC"
+sed -i 's|^\t\t(int)bbr_pacing_gain\[bbr->cycle_idx\] + bbr->pi_gain_delta,|\t\t(int)(((u64)bbr_pacing_gain[bbr->cycle_idx] *\n\t\t\tbbrplusv3_mlfq_gain_mult(bbr)) >> 8) + bbr->pi_gain_delta,|' "$BBRPLUSV3_SRC"
+
+# M-4: wdb 条3 — L2 时 inflight_hi 的 beta 削减跳过 (gain 0.7 即全部削减)
+sed -i '/const u32 beta = bbr_param(sk, beta);/,/BBR_UNIT - beta/ s|^\tif (!rs->is_app_limited) {$|\tif (!rs->is_app_limited \&\& bbr->mlfq_level < 2) {	/* tcpboost-mlfq-1: L2 禁 beta 双重削减 */|' "$BBRPLUSV3_SRC"
+
+# M-5: module_param (跟 rto_fc_fires 之后)
+sed -i '/^module_param_named(rto_fc_fires, bbrplusv3_rto_fc_fires, uint, 0444);$/a\
+module_param_named(mlfq_en, bbrplusv3_mlfq_en, uint, 0644);\
+MODULE_PARM_DESC(mlfq_en, "3-level MLFQ pacing gain (0=off, 1=on, default=1)");\
+module_param_named(mlfq_l2_gain_pct, bbrplusv3_mlfq_l2_gain_pct, uint, 0644);\
+MODULE_PARM_DESC(mlfq_l2_gain_pct, "L2 baseline gain as % of vanilla (default=70)");\
+module_param_named(mlfq_loss_rounds, bbrplusv3_mlfq_loss_rounds, uint, 0644);\
+MODULE_PARM_DESC(mlfq_loss_rounds, "Consecutive loss rounds to demote (default=5)");\
+module_param_named(mlfq_boost_ms, bbrplusv3_mlfq_boost_ms, uint, 0644);\
+MODULE_PARM_DESC(mlfq_boost_ms, "Stable ms to promote one level (default=1000)");' "$BBRPLUSV3_SRC"
+
+echo "[7c4-novem/9] 已注入 batch-5: mlfq-1 (5 处)"
+
+# ============================================
 # 7d. tcpboost-wia: sed 替换验证
 # 验证所有关键 sed 修改已成功执行，防止静默 fallback 到 vanilla BBRv3
 # ============================================
@@ -1216,6 +1291,10 @@ verify_pattern 'bbrplusv3_rto_fc_pct' "rto-1 cap percent"
 verify_pattern 'bbrplusv3_rto_fc_min_rtt_us' "rto-1 min_rtt gate"
 verify_pattern 'bbrplusv3_rto_seen' "rto-1 diag counter rto_seen"
 verify_pattern 'bbrplusv3_rto_fc_fires' "rto-1 diag counter fires"
+verify_pattern 'tcpboost-mlfq-1' "mlfq-1 3-level pacing gain"
+verify_pattern 'bbrplusv3_mlfq_en' "mlfq-1 module_param"
+verify_pattern 'bbrplusv3_mlfq_gain_mult' "mlfq-1 gain multiplier"
+verify_pattern 'bbrplusv3_mlfq_update' "mlfq-1 level update"
 verify_pattern 'tcpboost-pi-1' "pi-1 PI pacing-gain feedback"
 verify_pattern 'bbrplusv3_pi_enable' "pi-1 module_param"
 verify_pattern 'bbrplusv3_pi_adjust' "pi-1 controller function"
