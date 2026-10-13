@@ -31,6 +31,14 @@ on:
         description: '并发流数'
         required: false
         default: '8'
+      kalman_en:
+        description: 'kalman_enable 运行时开关 (bisect 用, 默认 1)'
+        required: false
+        default: '1'
+      pi_en:
+        description: 'pi_enable 运行时开关 (bisect 用, 默认 1)'
+        required: false
+        default: '1'
       soak_loss:
         description: 'netem 丢包率 (5% 加压, 0.5% 模拟报告原条件)'
         required: false
@@ -743,6 +751,8 @@ jobs:
     timeout-minutes: 360
     env:
       SOAK_DURATION: ${{ inputs.soak_duration || '5h' }}
+      KALMAN_EN: ${{ inputs.kalman_en || '1' }}
+      PI_EN: ${{ inputs.pi_en || '1' }}
       SOAK_STREAMS: ${{ inputs.soak_streams || '8' }}
       SOAK_LOSS: ${{ inputs.soak_loss || '5%' }}
       SOAK_DELAY: ${{ inputs.soak_delay_ms || '75' }}
