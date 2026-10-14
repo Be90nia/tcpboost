@@ -9,6 +9,8 @@
 # 输出: /var/log/tcpboost-soak/<ts>/{timeseries.csv, samples.jsonl, streams/*.jsonl, summary.md, regression.md}
 
 set -u
+STREAM_PORTS=()   # 提前初始化: EXIT trap 在数组定义前就可能触发 (启动期 FATAL)
+STREAM_PIDS=()
 
 # ============ 参数 ============
 DURATION="${DURATION:-5h}"
@@ -49,7 +51,37 @@ fi
 cleanup_netem() {
   tc qdisc del dev "$IFACE" root 2>/dev/null
 }
-trap 'cleanup_netem; pkill -P $$ 2>/dev/null; pkill -f "iperf3.*-p $IPERF_PORT" 2>/dev/null' EXIT
+
+# 收尾唯一入口 (正常到点 / TERM / INT / 异常 FATAL 都走同一 EXIT trap):
+# 清现场 + 无条件出 summary.md — 原来分析器只在正常 24h 到点后跑,
+# 104 那轮 4h 被定点重启杀掉后连 summary 都没有
+analyzer_done=0
+run_analyzer() {
+  [ "$analyzer_done" = 1 ] && return 0
+  analyzer_done=1
+  [ -s "$OUT/timeseries.csv" ] || return 0   # 启动期 FATAL: 无数据可析
+  local analyze="$(dirname "$0")/soak_analyze.sh"
+  if [ -x "$analyze" ]; then
+    echo "[$(date -Iseconds)] 跑分析: $analyze $OUT"
+    bash "$analyze" "$OUT"
+  else
+    echo "[$(date -Iseconds)] 分析器未找到 ($analyze), 跳过"
+  fi
+}
+on_exit() {
+  cleanup_netem
+  stop_streams
+  for p in "${STREAM_PORTS[@]:-}"; do pkill -f "iperf3 -s -p $p" 2>/dev/null; done
+  pkill -f "iperf3 -c 127.0.0.1" 2>/dev/null
+  run_analyzer
+  echo "[$(date -Iseconds)] 长跑套件收尾完成"
+  echo "结果: $OUT"
+  ls -la "$OUT"
+}
+trap on_exit EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
 
 # lo/eth 上网段 netem (双向同 delay 同 loss) - 模拟报告 §6 条件并加压
 if [ "$IFACE" = "lo" ]; then
@@ -85,17 +117,20 @@ stop_streams() {
     pkill -P "$pid" 2>/dev/null
   done
 }
-trap 'cleanup_netem; stop_streams; for p in "${STREAM_PORTS[@]:-}"; do pkill -f "iperf3 -s -p $p" 2>/dev/null; done; pkill -f "iperf3 -c 127.0.0.1" 2>/dev/null' EXIT
 
 stream_watcher() {
   local idx=$1
   local log="$OUT/streams/stream-$idx.jsonl"
+  local t0
   while true; do
+    t0=$(date +%s)
     iperf3 -c 127.0.0.1 -p "$((IPERF_PORT + idx))" -t "$STREAM_ROTATE_SEC" -J 2>/dev/null \
       | grep -o '"bits_per_second": *[0-9]*' | grep -o '[0-9]*$' \
       >> "$log" || true
     # 流轮转空档标记
     echo "0" >> "$log"
+    # iperf3 秒退 (server 忙/死) 时退避, 防热循环刷 0; 正常跑满一轮不 sleep
+    [ "$(( $(date +%s) - t0 ))" -lt 10 ] && sleep 5
   done
 }
 
@@ -189,6 +224,15 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   now=$(date +%s)
   wall=$(date -Iseconds)
 
+  # watcher 探活: 被外部杀死 (OOM/运维) 的 watcher 原位重生, 兄弟流与采样不受影响
+  for i in $(seq 1 "$NSTREAMS"); do
+    if ! kill -0 "${STREAM_PIDS[$((i - 1))]}" 2>/dev/null; then
+      stream_watcher "$i" &
+      STREAM_PIDS[$((i - 1))]=$!
+      echo "[$wall] watcher-$i 死亡, 已重生 pid=${STREAM_PIDS[$((i - 1))]}"
+    fi
+  done
+
   # 流数据: 活跃数/总bps/最小/最大/平均 (Mbps)
   read -r active minbps maxbps sumbps p50bps <<<"$(sample_streams)"
   total_mbps=$(echo "scale=2; ${sumbps:-0} / 1000000" | bc 2>/dev/null || echo 0)
@@ -239,21 +283,4 @@ EOF
 done
 
 echo "[$(date -Iseconds)] 采样循环结束"
-cleanup_netem
-stop_streams
-sleep 2
-pkill -f "iperf3.*-p $IPERF_PORT" 2>/dev/null
-sleep 1
-
-# ============ 收尾: 调分析器 ============
-ANALYZE="$(dirname "$0")/soak_analyze.sh"
-if [ -x "$ANALYZE" ]; then
-  echo "[$(date -Iseconds)] 跑分析: $ANALYZE $OUT"
-  bash "$ANALYZE" "$OUT"
-else
-  echo "[$(date -Iseconds)] 分析器未找到 ($ANALYZE), 跳过"
-fi
-
-echo "[$(date -Iseconds)] 长跑套件收尾完成"
-echo "结果: $OUT"
-ls -la "$OUT"
+exit 0   # 清理+分析统一走 EXIT trap (异常终止也出 summary.md)
