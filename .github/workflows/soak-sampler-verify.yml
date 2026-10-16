@@ -10,6 +10,12 @@ name: Soak Sampler Verify
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - fix/soak-sampler
+    paths:
+      - 'scripts/soak_test_5h.sh'
+      - '.github/workflows/soak-sampler-verify.yml'
 
 permissions:
   contents: read
