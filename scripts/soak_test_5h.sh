@@ -60,7 +60,8 @@ run_analyzer() {
   [ "$analyzer_done" = 1 ] && return 0
   analyzer_done=1
   [ -s "$OUT/timeseries.csv" ] || return 0   # 启动期 FATAL: 无数据可析
-  local analyze="$(dirname "$0")/soak_analyze.sh"
+  local analyze
+  analyze="$(dirname "$0")/soak_analyze.sh"
   if [ -x "$analyze" ]; then
     echo "[$(date -Iseconds)] 跑分析: $analyze $OUT"
     bash "$analyze" "$OUT"
