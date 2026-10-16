@@ -63,6 +63,11 @@ on:
         description: 'AQM A/B 请求限速 (默认 200Mbit, TCG 容量不足自动下调)'
         required: false
         default: '200Mbit'
+      aqm_skip_release:
+        description: '跳过 create-release (支线实验 dispatch 必填 1, 防覆盖生产 release)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -886,6 +891,8 @@ jobs:
           if-no-files-found: warn
 
   create-release:
+    # aqm_skip_release=1 时跳过 (支线实验 dispatch 禁覆盖生产 release tag)
+    if: ${{ inputs.aqm_skip_release != '1' }}
     needs: [check-version, build-kernel, qemu-test, soak-test]
     runs-on: ubuntu-24.04
     permissions:
