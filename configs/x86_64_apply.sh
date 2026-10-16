@@ -103,6 +103,9 @@ fi
 ./scripts/config --enable CONFIG_NET_SCH_SFQ
 ./scripts/config --enable CONFIG_NET_SCH_RED
 ./scripts/config --enable CONFIG_NET_SCH_HFSC
+# AQM A/B 实验 (bd yve): netem 延迟/丢包注入 + ifb 入口重定向, harness 按需 modprobe
+./scripts/config --module CONFIG_NET_SCH_NETEM
+./scripts/config --module CONFIG_IFB
 
 # ============================================
 # 网络 Buffer 优化

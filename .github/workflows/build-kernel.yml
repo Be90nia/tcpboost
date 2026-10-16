@@ -55,6 +55,14 @@ on:
         description: '采样间隔秒 (30s 标准, 60s 减轻开销)'
         required: false
         default: '30'
+      aqm_leg_sec:
+        description: 'AQM A/B 每腿秒数 (默认 1200, 快探可填 300)'
+        required: false
+        default: '1200'
+      aqm_shape_req:
+        description: 'AQM A/B 请求限速 (默认 200Mbit, TCG 容量不足自动下调)'
+        required: false
+        default: '200Mbit'
 
 permissions:
   contents: read
@@ -815,6 +823,65 @@ jobs:
         with:
           name: soak-test-results
           path: /var/log/tcpboost-soak/
+          retention-days: 7
+          if-no-files-found: warn
+
+  aqm-ab-test:
+    # bd yve: AQM hardening 三臂×两腿 A/B (fq 基线 vs fq_codel vs cake)
+    # 只在 feature/aqm-ab-ci 支线跑; 若合主线会给每次 CI 增加约 2h, 合并前 PM 裁决
+    needs: build-kernel
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      AQM_LEG_SEC: ${{ inputs.aqm_leg_sec || '1200' }}
+      AQM_SHAPE_REQ: ${{ inputs.aqm_shape_req || '200Mbit' }}
+    steps:
+      - name: Checkout tcpboost repo
+        uses: actions/checkout@v4
+
+      - name: Install QEMU + virtme-ng + iperf3 + ethtool
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 iperf3 kmod curl ethtool jq
+          sudo pip3 install --break-system-packages virtme-ng
+
+      - name: Download kernel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-x86_64
+          path: artifact/
+
+      - name: Install kernel deb and detect KVER
+        run: |
+          set -e
+          DEB="$(ls artifact/*.deb | head -1)"
+          echo "DEB=$DEB"
+          sudo dpkg -i --force-all "$DEB" 2>&1 | tail -5 || true
+          PKG="$(dpkg -I "$DEB" | awk '/^ Package: linux-image-/{print $2; exit}')"
+          KVER="${PKG#linux-image-}"
+          echo "KVER=$KVER"
+          [ -n "$KVER" ] || { echo "FATAL: 提取 KVER 失败"; exit 1; }
+          test -f "/boot/vmlinuz-$KVER" || { echo "FATAL: vmlinuz 缺失"; exit 1; }
+          test -d "/lib/modules/$KVER" || { echo "FATAL: modules 缺失"; exit 1; }
+          echo "KVER=$KVER" >> "$GITHUB_ENV"
+
+      - name: Run AQM A/B (3 arms x 2 legs) in QEMU
+        run: |
+          chmod +x scripts/aqm_ab_test.sh
+          sudo mkdir -p /var/log/tcpboost-soak
+          # env 烤进 guest 命令行 (vng guest 不继承宿主 env, run 38166073488 实锤)
+          sudo env "PATH=$PATH" vng --disable-kvm --memory 4G --cpus 4 \
+            --rwdir /var/log/tcpboost-soak \
+            --run "/boot/vmlinuz-$KVER" -- /bin/bash -c \
+            "LEG_SEC='$AQM_LEG_SEC' SHAPE_REQ='$AQM_SHAPE_REQ' \
+             /bin/bash $GITHUB_WORKSPACE/scripts/aqm_ab_test.sh"
+
+      - name: Upload AQM A/B artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aqm-ab-results
+          path: /var/log/tcpboost-soak/aqm_ab/
           retention-days: 7
           if-no-files-found: warn
 
