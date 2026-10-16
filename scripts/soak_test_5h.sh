@@ -60,7 +60,8 @@ run_analyzer() {
   [ "$analyzer_done" = 1 ] && return 0
   analyzer_done=1
   [ -s "$OUT/timeseries.csv" ] || return 0   # 启动期 FATAL: 无数据可析
-  local analyze="$(dirname "$0")/soak_analyze.sh"
+  local analyze
+  analyze="$(dirname "$0")/soak_analyze.sh"
   if [ -x "$analyze" ]; then
     echo "[$(date -Iseconds)] 跑分析: $analyze $OUT"
     bash "$analyze" "$OUT"
@@ -185,7 +186,7 @@ tcp_sockstat() {
   local estab
   estab=$(awk '$4 == "01"' /proc/net/tcp /proc/net/tcp6 2>/dev/null | wc -l)
   awk -v e="$estab" '/^TCP:/ { for (i = 2; i < NF; i += 2) v[$i] = $(i+1) }
-    END { printf "%d %d %d %d %d\n", e, v["tw"]+0, v["inuse"]+0, v["orphan"]+0, v["alloc"]+0 }' /proc/net/sockstat 2>/dev/null
+    END { printf "%d %d %d %d\n", e, v["tw"]+0, v["inuse"]+0, v["orphan"]+0 }' /proc/net/sockstat 2>/dev/null
 }
 
 # 取 PSI 值 (百分比, 1位小数)
@@ -253,7 +254,7 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
 
   # sockstat: /proc/net/sockstat 的 TCP 行是 "标签 值" 交替 (TCP: inuse N orphan N tw N
   # alloc N mem N), 固定列位会抓到标签字符串; estab 全局数从 /proc/net/tcp{,6} state==01 计数
-  read -r ss_estab ss_tw ss_inuse ss_orphan ss_alloc <<< "$(tcp_sockstat)"
+  read -r ss_estab ss_tw ss_inuse ss_orphan <<< "$(tcp_sockstat)"
 
   # conntrack
   [[ -r /proc/net/nf_conntrack ]] && ct_used=$(wc -l < /proc/net/nf_conntrack) || ct_used=0
