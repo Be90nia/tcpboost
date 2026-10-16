@@ -15,6 +15,7 @@ Thumbs.db
 *.tar.gz
 *.patch.orig
 build/
+__pycache__/
 
 # OpenCode session
 .omo/

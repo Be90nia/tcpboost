@@ -1,0 +1,1186 @@
+{
+ "bbrplusv3": {
+  "5pe": {
+   "sprt_log4": {
+    "delays": [
+     0,
+     0,
+     0
+    ],
+    "stream_hours": 8.18,
+    "dep30": {
+     "true": 3,
+     "caught": 3
+    },
+    "dead": {
+     "true": 5,
+     "caught": 5
+    },
+    "false_eps": 95,
+    "false_seconds": 3705,
+    "fp_per_sh": 11.614,
+    "median_delay": 0.0
+   },
+   "sprt_log8": {
+    "delays": [
+     0,
+     0,
+     0
+    ],
+    "stream_hours": 8.18,
+    "dep30": {
+     "true": 3,
+     "caught": 3
+    },
+    "dead": {
+     "true": 5,
+     "caught": 5
+    },
+    "false_eps": 91,
+    "false_seconds": 3344,
+    "fp_per_sh": 11.125,
+    "median_delay": 0.0
+   },
+   "sprt_log16": {
+    "delays": [
+     0,
+     0,
+     0
+    ],
+    "stream_hours": 8.18,
+    "dep30": {
+     "true": 3,
+     "caught": 3
+    },
+    "dead": {
+     "true": 5,
+     "caught": 5
+    },
+    "false_eps": 81,
+    "false_seconds": 3007,
+    "fp_per_sh": 9.902,
+    "median_delay": 0.0
+   },
+   "sprt8_self": {
+    "delays": [
+     2,
+     0,
+     0
+    ],
+    "stream_hours": 8.18,
+    "dep30": {
+     "true": 3,
+     "caught": 3
+    },
+    "dead": {
+     "true": 5,
+     "caught": 5
+    },
+    "false_eps": 86,
+    "false_seconds": 3829,
+    "fp_per_sh": 10.513,
+    "median_delay": 0.0
+   },
+   "sprt16_self": {
+    "delays": [
+     3,
+     0,
+     0
+    ],
+    "stream_hours": 8.18,
+    "dep30": {
+     "true": 3,
+     "caught": 3
+    },
+    "dead": {
+     "true": 5,
+     "caught": 5
+    },
+    "false_eps": 89,
+    "false_seconds": 3351,
+    "fp_per_sh": 10.88,
+    "median_delay": 0.0
+   },
+   "base_single": {
+    "delays": [
+     0,
+     0,
+     0
+    ],
+    "stream_hours": 8.18,
+    "dep30": {
+     "true": 3,
+     "caught": 3
+    },
+    "dead": {
+     "true": 5,
+     "caught": 5
+    },
+    "false_eps": 93,
+    "false_seconds": 2972,
+    "fp_per_sh": 11.369,
+    "median_delay": 0.0
+   },
+   "base_persist3": {
+    "delays": [
+     0,
+     2,
+     2
+    ],
+    "stream_hours": 8.18,
+    "dep30": {
+     "true": 3,
+     "caught": 3
+    },
+    "dead": {
+     "true": 5,
+     "caught": 5
+    },
+    "false_eps": 51,
+    "false_seconds": 1074,
+    "fp_per_sh": 6.235,
+    "median_delay": 2.0
+   },
+   "base_persist5": {
+    "delays": [
+     0,
+     4,
+     4
+    ],
+    "stream_hours": 8.18,
+    "dep30": {
+     "true": 3,
+     "caught": 3
+    },
+    "dead": {
+     "true": 5,
+     "caught": 5
+    },
+    "false_eps": 30,
+    "false_seconds": 499,
+    "fp_per_sh": 3.667,
+    "median_delay": 4.0
+   },
+   "base_persist10": {
+    "delays": [
+     0,
+     9,
+     9
+    ],
+    "stream_hours": 8.18,
+    "dep30": {
+     "true": 3,
+     "caught": 3
+    },
+    "dead": {
+     "true": 5,
+     "caught": 5
+    },
+    "false_eps": 10,
+    "false_seconds": 70,
+    "fp_per_sh": 1.222,
+    "median_delay": 9.0
+   }
+  },
+  "e18": {
+   "hmm_viterbi_abs": {
+    "stream_hours": 8.18,
+    "false_state_seconds": 4338,
+    "dep30": {
+     "true": 3,
+     "caught": 3,
+     "delays": [
+      0,
+      0,
+      0
+     ]
+    },
+    "dead": {
+     "true": 5,
+     "caught": 5,
+     "delays": [
+      0,
+      0,
+      0,
+      0,
+      0
+     ]
+    },
+    "fp_per_sh": 17.677
+   },
+   "hmm_online_abs": {
+    "stream_hours": 8.18,
+    "false_state_seconds": 4313,
+    "dep30": {
+     "true": 3,
+     "caught": 3,
+     "delays": [
+      0,
+      1,
+      1
+     ]
+    },
+    "dead": {
+     "true": 5,
+     "caught": 5,
+     "delays": [
+      0,
+      2,
+      0,
+      1,
+      1
+     ]
+    },
+    "fp_per_sh": 17.575
+   },
+   "hmm_viterbi_flow": {
+    "stream_hours": 8.18,
+    "false_state_seconds": 27373,
+    "dep30": {
+     "true": 3,
+     "caught": 3,
+     "delays": [
+      0,
+      0,
+      0
+     ]
+    },
+    "dead": {
+     "true": 5,
+     "caught": 5,
+     "delays": [
+      0,
+      0,
+      0,
+      0,
+      0
+     ]
+    },
+    "fp_per_sh": 111.544
+   },
+   "hmm_online_flow": {
+    "stream_hours": 8.18,
+    "false_state_seconds": 27179,
+    "dep30": {
+     "true": 3,
+     "caught": 3,
+     "delays": [
+      0,
+      0,
+      0
+     ]
+    },
+    "dead": {
+     "true": 5,
+     "caught": 5,
+     "delays": [
+      0,
+      1,
+      0,
+      0,
+      1
+     ]
+    },
+    "fp_per_sh": 110.754
+   },
+   "heuristic_thr": {
+    "stream_hours": 8.18,
+    "false_state_seconds": 1834,
+    "dep30": {
+     "true": 3,
+     "caught": 3,
+     "delays": [
+      0,
+      0,
+      0
+     ]
+    },
+    "dead": {
+     "true": 5,
+     "caught": 5,
+     "delays": [
+      0,
+      0,
+      0,
+      0,
+      0
+     ]
+    },
+    "fp_per_sh": 7.474
+   }
+  },
+  "b9z": {
+   "l1_only": {
+    "stream_hours": 8.18,
+    "false_eps": 76,
+    "false_seconds": 2634,
+    "delays": [
+     0,
+     0,
+     1
+    ],
+    "dep30": {
+     "true": 3,
+     "caught": 3
+    },
+    "dead": {
+     "true": 5,
+     "caught": 5
+    },
+    "fp_per_sh": 9.291,
+    "median_delay": 0.0
+   },
+   "l2_only": {
+    "stream_hours": 8.18,
+    "false_eps": 86,
+    "false_seconds": 3829,
+    "delays": [
+     2,
+     0,
+     0
+    ],
+    "dep30": {
+     "true": 3,
+     "caught": 3
+    },
+    "dead": {
+     "true": 5,
+     "caught": 5
+    },
+    "fp_per_sh": 10.513,
+    "median_delay": 0.0
+   },
+   "hier": {
+    "stream_hours": 8.18,
+    "false_eps": 74,
+    "false_seconds": 2179,
+    "delays": [
+     2,
+     0,
+     1
+    ],
+    "dep30": {
+     "true": 3,
+     "caught": 3
+    },
+    "dead": {
+     "true": 5,
+     "caught": 5
+    },
+    "fp_per_sh": 9.046,
+    "median_delay": 1.0
+   }
+  },
+  "3wi": {
+   "old_A": {
+    "stream_hours": 8.18,
+    "false_eps": 26,
+    "false_seconds": 96,
+    "delays": [
+     9
+    ],
+    "dep30": {
+     "true": 3,
+     "caught": 1
+    },
+    "dead": {
+     "true": 5,
+     "caught": 3
+    },
+    "fp_per_sh": 3.178,
+    "median_delay": 9.0
+   },
+   "resid_4of7": {
+    "stream_hours": 8.18,
+    "false_eps": 13,
+    "false_seconds": 130,
+    "delays": [
+     2,
+     3
+    ],
+    "dep30": {
+     "true": 3,
+     "caught": 2
+    },
+    "dead": {
+     "true": 5,
+     "caught": 5
+    },
+    "fp_per_sh": 1.589,
+    "median_delay": 2.5
+   },
+   "gated_8of10": {
+    "stream_hours": 8.18,
+    "false_eps": 12,
+    "false_seconds": 114,
+    "delays": [
+     2,
+     3
+    ],
+    "dep30": {
+     "true": 3,
+     "caught": 2
+    },
+    "dead": {
+     "true": 5,
+     "caught": 5
+    },
+    "fp_per_sh": 1.467,
+    "median_delay": 2.5
+   },
+   "_cv_hi": 0.133
+  }
+ },
+ "cubic": {
+  "5pe": {
+   "sprt_log4": {
+    "delays": [
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "stream_hours": 8.006666666666666,
+    "dep30": {
+     "true": 5,
+     "caught": 5
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "false_eps": 59,
+    "false_seconds": 2206,
+    "fp_per_sh": 7.369,
+    "median_delay": 0.0
+   },
+   "sprt_log8": {
+    "delays": [
+     0,
+     1,
+     0,
+     0,
+     0
+    ],
+    "stream_hours": 8.006666666666666,
+    "dep30": {
+     "true": 5,
+     "caught": 5
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "false_eps": 52,
+    "false_seconds": 1685,
+    "fp_per_sh": 6.495,
+    "median_delay": 0.0
+   },
+   "sprt_log16": {
+    "delays": [
+     0,
+     1,
+     0,
+     0,
+     0
+    ],
+    "stream_hours": 8.006666666666666,
+    "dep30": {
+     "true": 5,
+     "caught": 5
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "false_eps": 48,
+    "false_seconds": 1287,
+    "fp_per_sh": 5.995,
+    "median_delay": 0.0
+   },
+   "sprt8_self": {
+    "delays": [
+     0,
+     0,
+     0,
+     300
+    ],
+    "stream_hours": 8.006666666666666,
+    "dep30": {
+     "true": 5,
+     "caught": 4
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "false_eps": 59,
+    "false_seconds": 2737,
+    "fp_per_sh": 7.369,
+    "median_delay": 0.0
+   },
+   "sprt16_self": {
+    "delays": [
+     0,
+     0,
+     0,
+     300
+    ],
+    "stream_hours": 8.006666666666666,
+    "dep30": {
+     "true": 5,
+     "caught": 4
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "false_eps": 55,
+    "false_seconds": 2654,
+    "fp_per_sh": 6.869,
+    "median_delay": 0.0
+   },
+   "base_single": {
+    "delays": [
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "stream_hours": 8.006666666666666,
+    "dep30": {
+     "true": 5,
+     "caught": 5
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "false_eps": 62,
+    "false_seconds": 1844,
+    "fp_per_sh": 7.744,
+    "median_delay": 0.0
+   },
+   "base_persist3": {
+    "delays": [
+     0,
+     2,
+     0,
+     0,
+     0
+    ],
+    "stream_hours": 8.006666666666666,
+    "dep30": {
+     "true": 5,
+     "caught": 5
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "false_eps": 23,
+    "false_seconds": 332,
+    "fp_per_sh": 2.873,
+    "median_delay": 0.0
+   },
+   "base_persist5": {
+    "delays": [
+     0,
+     4,
+     0,
+     0,
+     4
+    ],
+    "stream_hours": 8.006666666666666,
+    "dep30": {
+     "true": 5,
+     "caught": 5
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "false_eps": 7,
+    "false_seconds": 91,
+    "fp_per_sh": 0.874,
+    "median_delay": 0.0
+   },
+   "base_persist10": {
+    "delays": [
+     0,
+     9,
+     0,
+     0,
+     9
+    ],
+    "stream_hours": 8.006666666666666,
+    "dep30": {
+     "true": 5,
+     "caught": 5
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "false_eps": 2,
+    "false_seconds": 12,
+    "fp_per_sh": 0.25,
+    "median_delay": 0.0
+   }
+  },
+  "e18": {
+   "hmm_viterbi_abs": {
+    "stream_hours": 8.006666666666666,
+    "false_state_seconds": 4687,
+    "dep30": {
+     "true": 5,
+     "caught": 5,
+     "delays": [
+      0,
+      0,
+      0,
+      0,
+      0
+     ]
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0,
+     "delays": []
+    },
+    "fp_per_sh": 19.513
+   },
+   "hmm_online_abs": {
+    "stream_hours": 8.006666666666666,
+    "false_state_seconds": 4629,
+    "dep30": {
+     "true": 5,
+     "caught": 5,
+     "delays": [
+      0,
+      1,
+      0,
+      0,
+      0
+     ]
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0,
+     "delays": []
+    },
+    "fp_per_sh": 19.271
+   },
+   "hmm_viterbi_flow": {
+    "stream_hours": 8.006666666666666,
+    "false_state_seconds": 26436,
+    "dep30": {
+     "true": 5,
+     "caught": 5,
+     "delays": [
+      0,
+      0,
+      0,
+      0,
+      0
+     ]
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0,
+     "delays": []
+    },
+    "fp_per_sh": 110.058
+   },
+   "hmm_online_flow": {
+    "stream_hours": 8.006666666666666,
+    "false_state_seconds": 26220,
+    "dep30": {
+     "true": 5,
+     "caught": 5,
+     "delays": [
+      0,
+      0,
+      0,
+      0,
+      0
+     ]
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0,
+     "delays": []
+    },
+    "fp_per_sh": 109.159
+   },
+   "heuristic_thr": {
+    "stream_hours": 8.006666666666666,
+    "false_state_seconds": 1873,
+    "dep30": {
+     "true": 5,
+     "caught": 5,
+     "delays": [
+      0,
+      0,
+      0,
+      0,
+      0
+     ]
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0,
+     "delays": []
+    },
+    "fp_per_sh": 7.798
+   }
+  },
+  "b9z": {
+   "l1_only": {
+    "stream_hours": 8.006666666666666,
+    "false_eps": 51,
+    "false_seconds": 1718,
+    "delays": [
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "dep30": {
+     "true": 5,
+     "caught": 5
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "fp_per_sh": 6.37,
+    "median_delay": 0.0
+   },
+   "l2_only": {
+    "stream_hours": 8.006666666666666,
+    "false_eps": 59,
+    "false_seconds": 2737,
+    "delays": [
+     0,
+     0,
+     0,
+     300
+    ],
+    "dep30": {
+     "true": 5,
+     "caught": 4
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "fp_per_sh": 7.369,
+    "median_delay": 0.0
+   },
+   "hier": {
+    "stream_hours": 8.006666666666666,
+    "false_eps": 50,
+    "false_seconds": 1230,
+    "delays": [
+     0,
+     0,
+     0,
+     300
+    ],
+    "dep30": {
+     "true": 5,
+     "caught": 4
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "fp_per_sh": 6.245,
+    "median_delay": 0.0
+   }
+  },
+  "3wi": {
+   "old_A": {
+    "stream_hours": 8.006666666666666,
+    "false_eps": 16,
+    "false_seconds": 68,
+    "delays": [
+     300
+    ],
+    "dep30": {
+     "true": 5,
+     "caught": 1
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "fp_per_sh": 1.998,
+    "median_delay": 300.0
+   },
+   "resid_4of7": {
+    "stream_hours": 8.006666666666666,
+    "false_eps": 14,
+    "false_seconds": 89,
+    "delays": [],
+    "dep30": {
+     "true": 5,
+     "caught": 0
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "fp_per_sh": 1.749,
+    "median_delay": null
+   },
+   "gated_8of10": {
+    "stream_hours": 8.006666666666666,
+    "false_eps": 13,
+    "false_seconds": 72,
+    "delays": [],
+    "dep30": {
+     "true": 5,
+     "caught": 0
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "fp_per_sh": 1.624,
+    "median_delay": null
+   },
+   "_cv_hi": 0.126
+  }
+ },
+ "bbr": {
+  "5pe": {
+   "sprt_log4": {
+    "delays": [],
+    "stream_hours": 8.097777777777777,
+    "dep30": {
+     "true": 0,
+     "caught": 0
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "false_eps": 128,
+    "false_seconds": 7528,
+    "fp_per_sh": 15.807,
+    "median_delay": null
+   },
+   "sprt_log8": {
+    "delays": [],
+    "stream_hours": 8.097777777777777,
+    "dep30": {
+     "true": 0,
+     "caught": 0
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "false_eps": 110,
+    "false_seconds": 6844,
+    "fp_per_sh": 13.584,
+    "median_delay": null
+   },
+   "sprt_log16": {
+    "delays": [],
+    "stream_hours": 8.097777777777777,
+    "dep30": {
+     "true": 0,
+     "caught": 0
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "false_eps": 108,
+    "false_seconds": 6158,
+    "fp_per_sh": 13.337,
+    "median_delay": null
+   },
+   "sprt8_self": {
+    "delays": [],
+    "stream_hours": 8.097777777777777,
+    "dep30": {
+     "true": 0,
+     "caught": 0
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "false_eps": 116,
+    "false_seconds": 6318,
+    "fp_per_sh": 14.325,
+    "median_delay": null
+   },
+   "sprt16_self": {
+    "delays": [],
+    "stream_hours": 8.097777777777777,
+    "dep30": {
+     "true": 0,
+     "caught": 0
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "false_eps": 111,
+    "false_seconds": 5991,
+    "fp_per_sh": 13.707,
+    "median_delay": null
+   },
+   "base_single": {
+    "delays": [],
+    "stream_hours": 8.097777777777777,
+    "dep30": {
+     "true": 0,
+     "caught": 0
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "false_eps": 124,
+    "false_seconds": 4017,
+    "fp_per_sh": 15.313,
+    "median_delay": null
+   },
+   "base_persist3": {
+    "delays": [],
+    "stream_hours": 8.097777777777777,
+    "dep30": {
+     "true": 0,
+     "caught": 0
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "false_eps": 55,
+    "false_seconds": 1270,
+    "fp_per_sh": 6.792,
+    "median_delay": null
+   },
+   "base_persist5": {
+    "delays": [],
+    "stream_hours": 8.097777777777777,
+    "dep30": {
+     "true": 0,
+     "caught": 0
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "false_eps": 27,
+    "false_seconds": 378,
+    "fp_per_sh": 3.334,
+    "median_delay": null
+   },
+   "base_persist10": {
+    "delays": [],
+    "stream_hours": 8.097777777777777,
+    "dep30": {
+     "true": 0,
+     "caught": 0
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "false_eps": 5,
+    "false_seconds": 37,
+    "fp_per_sh": 0.617,
+    "median_delay": null
+   }
+  },
+  "e18": {
+   "hmm_viterbi_abs": {
+    "stream_hours": 8.097777777777777,
+    "false_state_seconds": 3889,
+    "dep30": {
+     "true": 0,
+     "caught": 0,
+     "delays": []
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0,
+     "delays": []
+    },
+    "fp_per_sh": 16.009
+   },
+   "hmm_online_abs": {
+    "stream_hours": 8.097777777777777,
+    "false_state_seconds": 4065,
+    "dep30": {
+     "true": 0,
+     "caught": 0,
+     "delays": []
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0,
+     "delays": []
+    },
+    "fp_per_sh": 16.733
+   },
+   "hmm_viterbi_flow": {
+    "stream_hours": 8.097777777777777,
+    "false_state_seconds": 27611,
+    "dep30": {
+     "true": 0,
+     "caught": 0,
+     "delays": []
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0,
+     "delays": []
+    },
+    "fp_per_sh": 113.657
+   },
+   "hmm_online_flow": {
+    "stream_hours": 8.097777777777777,
+    "false_state_seconds": 27526,
+    "dep30": {
+     "true": 0,
+     "caught": 0,
+     "delays": []
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0,
+     "delays": []
+    },
+    "fp_per_sh": 113.307
+   },
+   "heuristic_thr": {
+    "stream_hours": 8.097777777777777,
+    "false_state_seconds": 1192,
+    "dep30": {
+     "true": 0,
+     "caught": 0,
+     "delays": []
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0,
+     "delays": []
+    },
+    "fp_per_sh": 4.907
+   }
+  },
+  "b9z": {
+   "l1_only": {
+    "stream_hours": 8.097777777777777,
+    "false_eps": 106,
+    "false_seconds": 4438,
+    "delays": [],
+    "dep30": {
+     "true": 0,
+     "caught": 0
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "fp_per_sh": 13.09,
+    "median_delay": null
+   },
+   "l2_only": {
+    "stream_hours": 8.097777777777777,
+    "false_eps": 116,
+    "false_seconds": 6318,
+    "delays": [],
+    "dep30": {
+     "true": 0,
+     "caught": 0
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "fp_per_sh": 14.325,
+    "median_delay": null
+   },
+   "hier": {
+    "stream_hours": 8.097777777777777,
+    "false_eps": 101,
+    "false_seconds": 2860,
+    "delays": [],
+    "dep30": {
+     "true": 0,
+     "caught": 0
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "fp_per_sh": 12.473,
+    "median_delay": null
+   }
+  },
+  "3wi": {
+   "old_A": {
+    "stream_hours": 8.097777777777777,
+    "false_eps": 34,
+    "false_seconds": 77,
+    "delays": [],
+    "dep30": {
+     "true": 0,
+     "caught": 0
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "fp_per_sh": 4.199,
+    "median_delay": null
+   },
+   "resid_4of7": {
+    "stream_hours": 8.097777777777777,
+    "false_eps": 23,
+    "false_seconds": 160,
+    "delays": [],
+    "dep30": {
+     "true": 0,
+     "caught": 0
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "fp_per_sh": 2.84,
+    "median_delay": null
+   },
+   "gated_8of10": {
+    "stream_hours": 8.097777777777777,
+    "false_eps": 18,
+    "false_seconds": 115,
+    "delays": [],
+    "dep30": {
+     "true": 0,
+     "caught": 0
+    },
+    "dead": {
+     "true": 0,
+     "caught": 0
+    },
+    "fp_per_sh": 2.223,
+    "median_delay": null
+   },
+   "_cv_hi": 0.127
+  }
+ }
+}
