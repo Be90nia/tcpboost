@@ -124,8 +124,10 @@ stream_watcher() {
   local t0
   while true; do
     t0=$(date +%s)
+    # iperf3 -J 输出是 tab 缩进 JSON ('\t"bits_per_second":\t<val>,'), ': *' 不匹配 tab;
+    # [0-9.]+ 兼容浮点值
     iperf3 -c 127.0.0.1 -p "$((IPERF_PORT + idx))" -t "$STREAM_ROTATE_SEC" -J 2>/dev/null \
-      | grep -o '"bits_per_second": *[0-9]*' | grep -o '[0-9]*$' \
+      | grep -oE '"bits_per_second":[[:space:]]*[0-9.]+' | grep -oE '[0-9.]+$' \
       >> "$log" || true
     # 流轮转空档标记
     echo "0" >> "$log"
@@ -178,10 +180,19 @@ sample_streams() {
   ' 2>/dev/null
 }
 
+# 全局 TCP sockstat: "estab tw inuse orphan alloc" 五个数值, 供 CSV/samples.jsonl 落盘
+tcp_sockstat() {
+  local estab
+  estab=$(awk '$4 == "01"' /proc/net/tcp /proc/net/tcp6 2>/dev/null | wc -l)
+  awk -v e="$estab" '/^TCP:/ { for (i = 2; i < NF; i += 2) v[$i] = $(i+1) }
+    END { printf "%d %d %d %d %d\n", e, v["tw"]+0, v["inuse"]+0, v["orphan"]+0, v["alloc"]+0 }' /proc/net/sockstat 2>/dev/null
+}
+
 # 取 PSI 值 (百分比, 1位小数)
 psi() {
   local f="/proc/pressure/$1"
-  [ -r "$f" ] || { echo "n/a"; return; }
+  # -1 = PSI 不可用 (LXC/老内核), 输出数值保证 samples.jsonl 每行合法 JSON
+  [ -r "$f" ] || { echo "-1"; return; }
   awk '/^some/ {printf "%.1f", $2}' "$f"
 }
 
@@ -205,7 +216,7 @@ mem_snapshot() {
   unreclaim=$(awk '/^SUnreclaim:/ {print $2}' <<<"$mi")
   kstack=$(awk '/^KernelStack:/ {print $2}' <<<"$mi")
   vmalloc=$(awk '/^VmallocUsed:/ {print $2}' <<<"$mi")
-  tcpmem=$(awk '/^TCP:/{print $2}' /proc/sockstat 2>/dev/null)
+  tcpmem=$(awk '/^TCP:/ { for (i = 2; i < NF; i += 2) v[$i] = $(i+1) } END { print v["mem"]+0 }' /proc/net/sockstat 2>/dev/null)
   # buddyinfo: node0 各 order free 页数; 取 order0/4/9 (第4/9/15列, buddyinfo 从第4列起是 order0)
   read -r b0 b4 b9 <<< "$(awk 'NR==2{print $4, $8, $13}' /proc/buddyinfo 2>/dev/null)"
   # compact/alloc 压力事件
@@ -240,11 +251,9 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   max_mbps=$(echo "scale=2; ${maxbps:-0} / 1000000" | bc 2>/dev/null || echo 0)
   p50_mbps=$(echo "scale=2; ${p50bps:-0} / 1000000" | bc 2>/dev/null || echo 0)
 
-  # sockstat
-  ss_estab=$(awk '/^TCP:/ {print $2}' /proc/net/sockstat 2>/dev/null)
-  ss_tw=$(awk '/^TCP:/ {print $7}' /proc/net/sockstat 2>/dev/null)
-  ss_inuse=$(awk '/^TCP:/ {print $4}' /proc/net/sockstat 2>/dev/null)
-  ss_orphan=$(awk '/^TCP:/ {print $9}' /proc/net/sockstat 2>/dev/null)
+  # sockstat: /proc/net/sockstat 的 TCP 行是 "标签 值" 交替 (TCP: inuse N orphan N tw N
+  # alloc N mem N), 固定列位会抓到标签字符串; estab 全局数从 /proc/net/tcp{,6} state==01 计数
+  read -r ss_estab ss_tw ss_inuse ss_orphan ss_alloc <<< "$(tcp_sockstat)"
 
   # conntrack
   [[ -r /proc/net/nf_conntrack ]] && ct_used=$(wc -l < /proc/net/nf_conntrack) || ct_used=0
@@ -257,9 +266,10 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   # load
   read -r load1 load5 load15 _ < /proc/loadavg
 
-  # CPU + mem
+  # CPU + mem (兜底空值, 保证 samples.jsonl 每行合法 JSON)
   cpu=$(cpu_pct)
   mem=$(free | awk '/^Mem:/ {printf "%.1f", $3/$2*100}')
+  cpu=${cpu:-0}; mem=${mem:-0}
 
   # 5min 一次完整快照
   if [ $((now - last_snap)) -ge "$SNAPSHOT_INTERVAL" ] || [ "$last_snap" = "0" ]; then

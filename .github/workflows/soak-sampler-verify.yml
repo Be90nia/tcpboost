@@ -1,0 +1,81 @@
+# Soak 采样器验证 (fix/soak-sampler 分支专用)
+# 验证 scripts/soak_test_5h.sh 采样器三处修复:
+#   1. samples.jsonl 每行合法 JSON (sockstat 标签/值错位根因)
+#   2. streams/stream-*.jsonl 非零 (iperf3 -J tab 缩进解析)
+#   3. timeseries.csv 第 8-12 列数值 (estab/tw/inuse/orphan/alloc)
+# 纯用户态验证, 不需要 tcpboost 内核 — runner 宿主内核即可。
+# 合入主线后此文件可删 (或留作采样器回归门禁)。
+
+name: Soak Sampler Verify
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sampler-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y iperf3 bc jq
+
+      - name: Run 3m sampler soak
+        run: |
+          sudo env DURATION=3m NSTREAMS=4 SAMPLE_INTERVAL=15 \
+            STREAM_ROTATE_SEC=45 LOG_ROOT=/tmp/soak-verify \
+            bash scripts/soak_test_5h.sh 2>&1 | tail -40
+
+      - name: Verify outputs
+        run: |
+          set -e
+          OUT="$(ls -d /tmp/soak-verify/*/ | head -1)"
+          echo "OUT=$OUT"
+          ls -la "$OUT" "$OUT/streams/"
+
+          echo "=== 1. samples.jsonl 每行 jq parse ==="
+          jq -ce . "$OUT/samples.jsonl" > /dev/null
+          echo "jq parse: OK ($(wc -l < "$OUT/samples.jsonl") lines)"
+
+          echo "=== 2. 关键字段数值性 (标签串会在此失败) ==="
+          jq -e 'select(.epoch != 0) | .tcp_estab | numbers' "$OUT/samples.jsonl" | head -3
+          jq -e 'select(.epoch != 0) | .tcp_inuse | numbers' "$OUT/samples.jsonl" | head -3
+          jq -e 'select(.epoch != 0) | .orphan | numbers' "$OUT/samples.jsonl" | head -3
+          echo "numeric: OK"
+
+          echo "=== 3. stream-*.jsonl 非零 ==="
+          fail=0
+          for f in "$OUT"/streams/stream-*.jsonl; do
+            nz=$(grep -cv '^0$' "$f" || true)
+            echo "$f: $nz nonzero / $(wc -l < "$f") lines"
+            [ "$nz" -gt 0 ] || { echo "FAIL: $f 全零"; fail=1; }
+          done
+          [ "$fail" = 0 ] || exit 1
+
+          echo "=== 4. CSV 表头 vs 数据列 (8-12 列必须数值) ==="
+          head -1 "$OUT/timeseries.csv"
+          awk -F, 'NR==2 {
+            print "cols=" NF; print "col8-12:", $8, $9, $10, $11, $12
+            if ($8 !~ /^[0-9]+$/ || $10 !~ /^[0-9]+$/) { print "FAIL: 标签串仍在"; exit 1 }
+          }' "$OUT/timeseries.csv"
+
+          echo "=== 5. estab 列有正样本 (iperf 活跃期) ==="
+          awk -F, 'NR>1 && $8+0 > 0 {n++} END {
+            print "estab>0 samples:", n+0
+            exit (n+0 > 0 ? 0 : 1)
+          }' "$OUT/timeseries.csv"
+          echo "ALL CHECKS PASSED"
+
+      - name: Upload verify artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-sampler-verify
+          path: /tmp/soak-verify/
+          retention-days: 7
