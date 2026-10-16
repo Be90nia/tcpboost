@@ -287,7 +287,15 @@ ip netns exec ns_srv ip route add default via 10.0.1.254
 ip netns exec ns_cli ip route add default via 10.0.2.254
 
 modprobe ifb numifbs=1 2>/dev/null
-ip link show ifb0 >/dev/null 2>&1 || fail "ifb0 设备未创建"
+# ifb 冷插 quirk: 模块加载成功但 netdev 可能不出现, 卸载重载重试 (120.79 VPS 同坑实证)
+IFB_OK=0
+for a in 1 2 3 4 5 6 7 8 9 10; do
+  ip link show ifb0 >/dev/null 2>&1 && { IFB_OK=1; break; }
+  modprobe -r ifb 2>/dev/null
+  modprobe ifb numifbs=1 2>/dev/null
+  sleep 0.3
+done
+[ "$IFB_OK" = 1 ] || { lsmod | grep ifb; ls /sys/class/net; dmesg | tail -5; fail "ifb0 设备未创建 (10 次重载失败)"; }
 ip link set ifb0 up
 tc qdisc add dev v_s handle ffff: ingress || fail "v_s ingress"
 tc filter add dev v_s parent ffff: protocol ip u32 match u32 0 0 action mirred egress redirect dev ifb0 \
