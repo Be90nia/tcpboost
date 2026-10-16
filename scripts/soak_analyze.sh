@@ -53,20 +53,18 @@ END {
   first_30_end = start_epoch + 1800
   last_30_start = end_epoch - 1800
 
+  # CSV 实际布局: 1=epoch 2=wall(字符串) 3=total 4=min 5=p50 6=max 7=active 8=tcp_estab
+  # 9=tw 10=inuse 11=orphan 12=conntrack 13=psicpu 14=psimem 15=psiio 16=load1 17=load5
+  # 18=load15 19=cpu 20=mem 21=unstick (旧版映射漏了 wall 列, 全部指标偏 1 → regression 垃圾)
   for (i = 1; i <= n; i++) {
     split(data[i], a, ",")
-    if (a[1] <= first_30_end) { fn++; for (k=2;k<=NF-1;k++) first_30[k] += a[k] }
-    if (a[1] >= last_30_start) { ln++; for (k=2;k<=NF-1;k++) last_30[k] += a[k] }
+    if (a[1] <= first_30_end) { fn++; for (k=2;k<=NF;k++) first_30[k] += a[k] }
+    if (a[1] >= last_30_start) { ln++; for (k=2;k<=NF;k++) last_30[k] += a[k] }
   }
   for (k=2;k<=21;k++) {
     first_30[k] = (fn>0) ? first_30[k]/fn : 0
     last_30[k]  = (ln>0) ? last_30[k]/ln : 0
   }
-
-  # 列对应: 2=total_mbps 3=min_mbps 4=p50_mbps 5=max_mbps 6=active
-  # 7=tcp_estab 8=tw 9=inuse 10=orphan 11=conntrack
-  # 12=psicpu 13=psimem 14=psiio 15=load1 16=load5 17=load15
-  # 18=cpu_pct 19=mem_pct 20=unstick
 
   issues = 0
   fail_count = 0
@@ -75,70 +73,70 @@ END {
   print "---|---|---|---|---|---|---"
 
   # total_mbps
-  dpct = pct(last_30[2], first_30[2])
+  dpct = pct(last_30[3], first_30[3])
   v = verdict(dpct, warn_total+0, fail_total+0)
-  print reg_row("total_mbps", first_30[2], last_30[2], v, "")
+  print reg_row("total_mbps", first_30[3], last_30[3], v, "")
   if (v == "FAIL") fail_count++; else if (v == "WARN") warn_count++
 
   # p50_mbps
-  dpct = pct(last_30[4], first_30[4])
+  dpct = pct(last_30[5], first_30[5])
   v = verdict(dpct, warn_p50+0, 999)
-  print reg_row("p50_mbps", first_30[4], last_30[4], v, "")
+  print reg_row("p50_mbps", first_30[5], last_30[5], v, "")
   if (v == "WARN") warn_count++
 
   # min_mbps (饿死指标)
-  dpct = pct(last_30[3], first_30[3])
+  dpct = pct(last_30[4], first_30[4])
   if (dpct < 0 && -dpct >= fail_min) { v = "FAIL" } else if (dpct < 0 && -dpct >= fail_min/2) { v = "WARN" } else { v = "OK" }
-  print reg_row("min_mbps", first_30[3], last_30[3], v, "饿死敏感")
+  print reg_row("min_mbps", first_30[4], last_30[4], v, "饿死敏感")
   if (v == "FAIL") fail_count++; else if (v == "WARN") warn_count++
 
   # active streams
-  dpct = pct(last_30[6], first_30[6])
+  dpct = pct(last_30[7], first_30[7])
   if (dpct < -20) { v = "WARN" } else { v = "OK" }
-  print reg_row("active_streams", first_30[6], last_30[6], v, "")
+  print reg_row("active_streams", first_30[7], last_30[7], v, "")
   if (v == "WARN") warn_count++
 
   # orphan 增长 (泄漏信号)
-  delta = last_30[10] - first_30[10]
+  delta = last_30[11] - first_30[11]
   if (delta > warn_orphan) { v = "FAIL" } else if (delta > warn_orphan/2) { v = "WARN" } else { v = "OK" }
-  print reg_row("tcp_orphan", first_30[10], last_30[10], v, "泄漏/未清理 fd")
+  print reg_row("tcp_orphan", first_30[11], last_30[11], v, "泄漏/未清理 fd")
   if (v == "FAIL") fail_count++; else if (v == "WARN") warn_count++
 
   # psi.cpu sustained
-  if (last_30[12] >= fail_psi) { v = "FAIL" } else if (last_30[12] >= fail_psi/2) { v = "WARN" } else { v = "OK" }
-  print reg_row("psi.cpu_some", first_30[12], last_30[12], v, "持续 CPU 争抢")
+  if (last_30[13] >= fail_psi) { v = "FAIL" } else if (last_30[13] >= fail_psi/2) { v = "WARN" } else { v = "OK" }
+  print reg_row("psi.cpu_some", first_30[13], last_30[13], v, "持续 CPU 争抢")
   if (v == "FAIL") fail_count++; else if (v == "WARN") warn_count++
 
   # psi.mem
-  if (last_30[13] >= fail_psi*2) { v = "WARN" } else { v = "OK" }
-  print reg_row("psi.mem_some", first_30[13], last_30[13], v, "")
+  if (last_30[14] >= fail_psi*2) { v = "WARN" } else { v = "OK" }
+  print reg_row("psi.mem_some", first_30[14], last_30[14], v, "")
   if (v == "WARN") warn_count++
 
   # psi.io
-  if (last_30[14] >= fail_psi*2) { v = "WARN" } else { v = "OK" }
-  print reg_row("psi.io_some", first_30[14], last_30[14], v, "")
+  if (last_30[15] >= fail_psi*2) { v = "WARN" } else { v = "OK" }
+  print reg_row("psi.io_some", first_30[15], last_30[15], v, "")
   if (v == "WARN") warn_count++
 
   # load1
-  delta = last_30[15] - first_30[15]
+  delta = last_30[16] - first_30[16]
   if (delta > fail_load) { v = "FAIL" } else if (delta > fail_load/2) { v = "WARN" } else { v = "OK" }
-  print reg_row("load1", first_30[15], last_30[15], v, "")
+  print reg_row("load1", first_30[16], last_30[16], v, "")
   if (v == "FAIL") fail_count++; else if (v == "WARN") warn_count++
 
   # mem_pct
-  delta = last_30[19] - first_30[19]
+  delta = last_30[20] - first_30[20]
   if (delta > warn_mem) { v = "FAIL" } else if (delta > warn_mem/2) { v = "WARN" } else { v = "OK" }
-  print reg_row("mem_pct", first_30[19], last_30[19], v, "进程内存压力")
+  print reg_row("mem_pct", first_30[20], last_30[20], v, "进程内存压力")
   if (v == "FAIL") fail_count++; else if (v == "WARN") warn_count++
 
-  # verdict
-  if (fail_count > 0) verdict = "FAIL"
-  else if (warn_count >= 3) verdict = "FAIL"
-  else if (warn_count > 0) verdict = "WARN"
-  else verdict = "PASS"
+  # verdict 汇总 (局部变量改名 final_v: 与上方 function verdict() 同名会令 gawk 解析报错)
+  if (fail_count > 0) final_v = "FAIL"
+  else if (warn_count >= 3) final_v = "FAIL"
+  else if (warn_count > 0) final_v = "WARN"
+  else final_v = "PASS"
 
   printf "\nFAIL=%d WARN=%d\n", fail_count, warn_count
-  printf "VERDICT: %s\n", verdict
+  printf "VERDICT: %s\n", final_v
 }' "$CSV" > "$OUT/regression.md"
 
 # 渲染人类可读 summary.md
