@@ -289,7 +289,7 @@ ip netns exec ns_cli ip route add default via 10.0.2.254
 modprobe ifb numifbs=1 2>/dev/null
 # ifb 冷插 quirk: 模块加载成功但 netdev 可能不出现, 卸载重载重试 (120.79 VPS 同坑实证)
 IFB_OK=0
-for a in 1 2 3 4 5 6 7 8 9 10; do
+for _ in 1 2 3 4 5 6 7 8 9 10; do
   ip link show ifb0 >/dev/null 2>&1 && { IFB_OK=1; break; }
   modprobe -r ifb 2>/dev/null
   modprobe ifb numifbs=1 2>/dev/null
