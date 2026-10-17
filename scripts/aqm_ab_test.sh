@@ -8,7 +8,9 @@
 #   ns_srv(10.0.1.1) --(ve_s|v_s) host 路由 --(v_c|ve_c) ns_cli(10.0.2.1)
 #   数据方向 srv->cli: ve_s egress [tbf 限速 + 被测 qdisc, 瓶颈队列在此] -> v_s ingress -> 路由 -> v_c egress [netem 延迟/丢包, 无 rate]
 #   ACK  方向 cli->srv: ve_c egress -> v_c ingress -> 路由 -> v_s egress [netem 延迟, 无 rate]
-#   RTT ~= 2x75ms 均值 (每方向 delay 75ms 75ms 抖动), 复现 150ms RTT + loss 0.5% 报告条件
+#   RTT = 2xRTT_HALF_MS 固定 150ms (禁抖动: 75ms±75ms 均匀抖动会在 bbrplusv3 rto-1 门下诱发
+#   虚假 RTO 风暴, cwnd 钉 11-13 包 + rcv_space 钉 14480, 全流塌缩 0.6Mbps, run 39039732757 实证;
+#   战役原始复现配方即固定双向 150ms)
 #
 # 为什么 netem 不与被测 qdisc 串同一设备链: netem enqueue 即按时间戳入 tfifo,
 #   恒吃掉批量队列, 下游 qdisc 永远近空载 -> 三臂假性无差异 (120.79 VPS smoke 实证后撤离)。
@@ -100,12 +102,12 @@ run_batch() {
 run_leg() {
   local ARM=$1 LEG=$2 TAG="${1}_${2}"
   local PID_PING PID_SS PID_TC
-  local data_netem="delay ${RTT_HALF_MS}ms ${RTT_HALF_MS}ms limit 10000"
-  [ "$LEG" = loss ] && data_netem="delay ${RTT_HALF_MS}ms ${RTT_HALF_MS}ms loss ${LOSS_PCT}% limit 10000"
+  local data_netem="delay ${RTT_HALF_MS}ms limit 10000"
+  [ "$LEG" = loss ] && data_netem="delay ${RTT_HALF_MS}ms loss ${LOSS_PCT}% limit 10000"
   echo "--- leg $TAG start $(date +%s) ---"
   qdisc_reset
   if ! { tc qdisc add dev v_c root netem $data_netem \
-         && tc qdisc add dev v_s root netem delay ${RTT_HALF_MS}ms ${RTT_HALF_MS}ms limit 10000; }; then
+         && tc qdisc add dev v_s root netem delay ${RTT_HALF_MS}ms limit 10000; }; then
     fail "netem 建立失败 $TAG"
   fi
   # 瓶颈在 ve_s (ns_srv 数据出口): tbf 优先, 拒绝子 graft 时回落 htb (两种都让队列落在被测 qdisc)
@@ -116,7 +118,7 @@ run_leg() {
   else
     qdisc_reset
     tc qdisc add dev v_c root netem $data_netem || fail "netem 重建失败 $TAG"
-    tc qdisc add dev v_s root netem delay ${RTT_HALF_MS}ms ${RTT_HALF_MS}ms limit 10000 || fail "v_s netem 重建失败 $TAG"
+    tc qdisc add dev v_s root netem delay ${RTT_HALF_MS}ms limit 10000 || fail "v_s netem 重建失败 $TAG"
     ip netns exec ns_srv tc qdisc add dev ve_s root handle 1: htb default 1 || fail "htb root $TAG"
     ip netns exec ns_srv tc class add dev ve_s parent 1: classid 1:1 htb rate "${SHAPE}Mbit" burst 1mb || fail "htb class $TAG"
     ip netns exec ns_srv tc qdisc add dev ve_s parent 1:1 handle 10: "$ARM" || fail "被测 qdisc $ARM $TAG"
@@ -142,7 +144,8 @@ run_leg() {
     run_batch "$b" "$CSV"
   done
   kill "$PID_PING" "$PID_SS" "$PID_TC" 2>/dev/null
-  wait 2>/dev/null || true
+  # 禁裸 wait: 会等 exec> >(tee) 的 tee 子进程 (等 stdout EOF) -> 死锁 (run 39039732757 实证)
+  sleep 1
   ip netns exec ns_srv tc -s qdisc show dev ve_s > "$LOGS/tc_final_$TAG.txt" 2>&1
   nrows=$(wc -l < "$CSV")
   [ "$nrows" -gt 8 ] || { dump_diag; fail "leg $TAG 产出不足 1 批"; }
