@@ -4,24 +4,28 @@
 # 矩阵: fq(基线) | fq_codel | cake  ×  loss(0.5%) | clean(净腿), 每腿 LEG_SEC 秒
 # 判据: 三指标 (total/min/加载 RTT) 任一 qdisc 显著优于 fq -> KEEP 候选 (PM 裁决)
 #
-# 拓扑 (路由三节点, 被测 qdisc 位于瓶颈队列):
+# 拓扑 (双 netns 路由, 被测 qdisc 位于瓶颈队列, 无 ifb):
 #   ns_srv(10.0.1.1) --(ve_s|v_s) host 路由 --(v_c|ve_c) ns_cli(10.0.2.1)
-#   数据方向 srv->cli: v_s ingress -(mirred)-> ifb0 [netem 延迟/丢包] -> 路由 -> v_c egress [tbf 限速 + 被测 qdisc]
-#   ACK  方向 cli->srv: v_c ingress -> 路由 -> v_s egress [netem 延迟]
+#   数据方向 srv->cli: ve_s egress [tbf 限速 + 被测 qdisc, 瓶颈队列在此] -> v_s ingress -> 路由 -> v_c egress [netem 延迟/丢包, 无 rate]
+#   ACK  方向 cli->srv: ve_c egress -> v_c ingress -> 路由 -> v_s egress [netem 延迟, 无 rate]
 #   RTT ~= 2x75ms 均值 (每方向 delay 75ms 75ms 抖动), 复现 150ms RTT + loss 0.5% 报告条件
 #
-# 为什么 netem 不与被测 qdisc 串一条链: netem enqueue 即按时间戳入 tfifo,
+# 为什么 netem 不与被测 qdisc 串同一设备链: netem enqueue 即按时间戳入 tfifo,
 #   恒吃掉批量队列, 下游 qdisc 永远近空载 -> 三臂假性无差异 (120.79 VPS smoke 实证后撤离)。
+#   且 ifb 冷插 quirk + netem-on-ifb 兼容性在 7.2 guest 内核两次烧穿 CI (run 38840464139/38853683704),
+#   纯 egress 方案两条失败路径全删。
 # 数据来源: 本 harness 自采 (iperf3 -J 逐流 + ss -tin 循环 + ping 循环), 不依赖旧 soak harness JSONL。
 # 环境政策 2026-10-16: 实验一律 CI QEMU guest, 禁用用户 VPS。
 #
 # env (vng 命令行烤入, guest 不继承宿主 env):
 #   LEG_SEC 每腿秒数(默认 1200)  SHAPE_REQ 请求限速(默认 200Mbit, TCG 容量不足自动下调)
+#   ARMS 参赛 qdisc 列表(默认 "fq fq_codel cake", 烟雾探针可传 "fq_codel cake")
 #   BYTES 单流字节(默认 12.5M)  RTT_HALF_MS 单向均值 ms(默认 75)  LOSS_PCT loss 腿丢包率(默认 0.5)
 #   OUT 输出目录(默认 /var/log/tcpboost-soak/aqm_ab)
 set -u
 
 LEG_SEC="${LEG_SEC:-1200}"
+ARMS="${ARMS:-fq fq_codel cake}"
 BYTES="${BYTES:-12.5M}"
 SHAPE_REQ="${SHAPE_REQ:-200Mbit}"
 RTT_HALF_MS="${RTT_HALF_MS:-75}"
@@ -40,8 +44,8 @@ fail() { echo "FATAL: $*"; exit 3; }
 
 qdisc_reset() {
   tc qdisc del dev v_c root 2>/dev/null
-  tc qdisc del dev ifb0 root 2>/dev/null
   tc qdisc del dev v_s root 2>/dev/null
+  ip netns exec ns_srv tc qdisc del dev ve_s root 2>/dev/null
 }
 
 cleanup() {
@@ -51,7 +55,6 @@ cleanup() {
   ip netns del ns_cli 2>/dev/null
   ip link del v_s 2>/dev/null
   ip link del v_c 2>/dev/null
-  modprobe -r ifb 2>/dev/null
 }
 trap cleanup EXIT
 
@@ -62,7 +65,8 @@ dump_diag() {
   ip netns exec ns_cli ip route 2>&1
   ip netns exec ns_cli ss -tin 2>&1 | head -20
   tc -s qdisc show dev v_c 2>&1
-  tc -s qdisc show dev ifb0 2>&1
+  tc -s qdisc show dev v_s 2>&1
+  ip netns exec ns_srv tc -s qdisc show dev ve_s 2>&1
   echo "--- diag end ---"
 }
 
@@ -100,22 +104,22 @@ run_leg() {
   [ "$LEG" = loss ] && data_netem="delay ${RTT_HALF_MS}ms ${RTT_HALF_MS}ms loss ${LOSS_PCT}% limit 10000"
   echo "--- leg $TAG start $(date +%s) ---"
   qdisc_reset
-  if ! { tc qdisc add dev ifb0 root netem $data_netem \
+  if ! { tc qdisc add dev v_c root netem $data_netem \
          && tc qdisc add dev v_s root netem "delay ${RTT_HALF_MS}ms ${RTT_HALF_MS}ms limit 10000"; }; then
     fail "netem 建立失败 $TAG"
   fi
-  # 瓶颈: tbf 优先 (派单指定), 拒绝子 graft 时回落 htb (两种都让队列落在被测 qdisc)
+  # 瓶颈在 ve_s (ns_srv 数据出口): tbf 优先, 拒绝子 graft 时回落 htb (两种都让队列落在被测 qdisc)
   local graft=tbf
-  if tc qdisc add dev v_c root handle 1: tbf rate "${SHAPE}Mbit" burst 256kb latency 1000ms 2>/dev/null \
-     && tc qdisc add dev v_c parent 1:1 handle 10: "$ARM" 2>/dev/null; then
+  if ip netns exec ns_srv tc qdisc add dev ve_s root handle 1: tbf rate "${SHAPE}Mbit" burst 256kb latency 1000ms 2>/dev/null \
+     && ip netns exec ns_srv tc qdisc add dev ve_s parent 1:1 handle 10: "$ARM" 2>/dev/null; then
     :
   else
     qdisc_reset
-    tc qdisc add dev ifb0 root netem $data_netem || fail "netem 重建失败 $TAG"
+    tc qdisc add dev v_c root netem $data_netem || fail "netem 重建失败 $TAG"
     tc qdisc add dev v_s root netem "delay ${RTT_HALF_MS}ms ${RTT_HALF_MS}ms limit 10000" || fail "v_s netem 重建失败 $TAG"
-    tc qdisc add dev v_c root handle 1: htb default 1 || fail "htb root $TAG"
-    tc class add dev v_c parent 1: classid 1:1 htb rate "${SHAPE}Mbit" burst 1mb || fail "htb class $TAG"
-    tc qdisc add dev v_c parent 1:1 handle 10: "$ARM" || fail "被测 qdisc $ARM $TAG"
+    ip netns exec ns_srv tc qdisc add dev ve_s root handle 1: htb default 1 || fail "htb root $TAG"
+    ip netns exec ns_srv tc class add dev ve_s parent 1: classid 1:1 htb rate "${SHAPE}Mbit" burst 1mb || fail "htb class $TAG"
+    ip netns exec ns_srv tc qdisc add dev ve_s parent 1:1 handle 10: "$ARM" || fail "被测 qdisc $ARM $TAG"
     graft=htb
   fi
   # 连通性 fail-fast: ICMP + 2s TCP 预检 (120.79 VPS SYN 黑洞教训: 诊断后即停, 不烧腿)
@@ -128,7 +132,7 @@ run_leg() {
   PID_PING=$!
   ( while :; do echo "=== $(date +%s)"; ip netns exec ns_cli ss -tin dst "$SRV_IP"; sleep 5; done ) > "$LOGS/ss_$TAG.txt" 2>&1 &
   PID_SS=$!
-  ( while :; do echo "=== $(date +%s)"; tc -s qdisc show dev v_c; sleep 30; done ) > "$LOGS/tc_$TAG.txt" 2>&1 &
+  ( while :; do echo "=== $(date +%s)"; ip netns exec ns_srv tc -s qdisc show dev ve_s; sleep 30; done ) > "$LOGS/tc_$TAG.txt" 2>&1 &
   PID_TC=$!
 
   local CSV="$DATA/$TAG.csv" deadline b=0 nrows
@@ -139,7 +143,7 @@ run_leg() {
   done
   kill "$PID_PING" "$PID_SS" "$PID_TC" 2>/dev/null
   wait 2>/dev/null || true
-  tc -s qdisc show dev v_c > "$LOGS/tc_final_$TAG.txt" 2>&1
+  ip netns exec ns_srv tc -s qdisc show dev ve_s > "$LOGS/tc_final_$TAG.txt" 2>&1
   nrows=$(wc -l < "$CSV")
   [ "$nrows" -gt 8 ] || { dump_diag; fail "leg $TAG 产出不足 1 批"; }
   qdisc_reset
@@ -148,12 +152,13 @@ run_leg() {
 }
 
 python3_analyze() {
-  python3 - "$DATA" "$LOGS" "$OUT" <<'PYEOF'
+  python3 - "$DATA" "$LOGS" "$OUT" "$ARMS" <<'PYEOF'
 import os, re, sys
 from collections import defaultdict
 
 DATA, LOGS, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
-TAGS = ['fq_loss', 'fq_clean', 'fq_codel_loss', 'fq_codel_clean', 'cake_loss', 'cake_clean']
+ARMS = sys.argv[4].split() if len(sys.argv) > 4 else ['fq', 'fq_codel', 'cake']
+TAGS = [a + '_' + leg for a in ARMS for leg in ('loss', 'clean')]
 
 def load_csv(tag):
     rows = []
@@ -254,10 +259,10 @@ PYEOF
 }
 
 echo "=== 0. 预检 (fail-fast) ==="
-for m in sch_netem ifb sch_tbf sch_fq sch_fq_codel sch_cake; do
+for m in sch_netem sch_tbf sch_fq sch_fq_codel sch_cake; do
   modprobe "$m" 2>/dev/null || fail "内核模块 $m 不可用 (未编入本内核)"
 done
-echo "modules: sch_netem/ifb/sch_tbf/sch_fq/fq_codel/cake 全部 OK"
+echo "modules: sch_netem/sch_tbf/sch_fq/fq_codel/cake 全部 OK"
 for b in tc ip ss ping jq python3 ethtool iperf3; do
   command -v "$b" >/dev/null 2>&1 || fail "二进制 $b 缺失"
 done
@@ -286,22 +291,7 @@ ip netns exec ns_cli ip link set lo up
 ip netns exec ns_srv ip route add default via 10.0.1.254
 ip netns exec ns_cli ip route add default via 10.0.2.254
 
-modprobe ifb numifbs=1 2>/dev/null
-# ifb 冷插 quirk: 模块加载成功但 netdev 可能不出现, 卸载重载重试 (120.79 VPS 同坑实证)
-IFB_OK=0
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  ip link show ifb0 >/dev/null 2>&1 && { IFB_OK=1; break; }
-  modprobe -r ifb 2>/dev/null
-  modprobe ifb numifbs=1 2>/dev/null
-  sleep 0.3
-done
-[ "$IFB_OK" = 1 ] || { lsmod | grep ifb; ls /sys/class/net; dmesg | tail -5; fail "ifb0 设备未创建 (10 次重载失败)"; }
-ip link set ifb0 up
-tc qdisc add dev v_s handle ffff: ingress || fail "v_s ingress"
-tc filter add dev v_s parent ffff: protocol ip u32 match u32 0 0 action mirred egress redirect dev ifb0 \
-  || fail "mirred redirect"
-
-for d in v_s v_c ifb0; do ethtool -K "$d" tso off gso off gro off 2>/dev/null; done
+for d in v_s v_c; do ethtool -K "$d" tso off gso off gro off 2>/dev/null; done
 ip netns exec ns_srv ethtool -K ve_s tso off gso off gro off 2>/dev/null
 ip netns exec ns_cli ethtool -K ve_c tso off gso off gro off 2>/dev/null
 echo "offloads off (1500B 段, AQM 粒度三臂一致)"
@@ -325,8 +315,8 @@ SHAPE=$(awk -v cap="$CAP" -v req="$SHAPE_REQ" 'BEGIN{
 echo "SHAPE=${SHAPE}Mbit (req=$SHAPE_REQ, raw_cap=${CAP}Mbps, 0.6x 余量)"
 awk -v s="$SHAPE" 'BEGIN{exit !(s < 30)}' && echo "WARN: TCG 容量过低 (<30Mbit), 绝对值仅做相对比较"
 
-echo "=== 3. 六腿矩阵 (loss 腿先跑, 早出饿死信号) ==="
-for ARM in fq fq_codel cake; do
+echo "=== 3. 腿矩阵 (loss 腿先跑, 早出饿死信号; arms=$ARMS) ==="
+for ARM in $ARMS; do
   for LEG in loss clean; do
     run_leg "$ARM" "$LEG"
   done
