@@ -105,7 +105,7 @@ run_leg() {
   echo "--- leg $TAG start $(date +%s) ---"
   qdisc_reset
   if ! { tc qdisc add dev v_c root netem $data_netem \
-         && tc qdisc add dev v_s root netem "delay ${RTT_HALF_MS}ms ${RTT_HALF_MS}ms limit 10000"; }; then
+         && tc qdisc add dev v_s root netem delay ${RTT_HALF_MS}ms ${RTT_HALF_MS}ms limit 10000; }; then
     fail "netem 建立失败 $TAG"
   fi
   # 瓶颈在 ve_s (ns_srv 数据出口): tbf 优先, 拒绝子 graft 时回落 htb (两种都让队列落在被测 qdisc)
@@ -116,7 +116,7 @@ run_leg() {
   else
     qdisc_reset
     tc qdisc add dev v_c root netem $data_netem || fail "netem 重建失败 $TAG"
-    tc qdisc add dev v_s root netem "delay ${RTT_HALF_MS}ms ${RTT_HALF_MS}ms limit 10000" || fail "v_s netem 重建失败 $TAG"
+    tc qdisc add dev v_s root netem delay ${RTT_HALF_MS}ms ${RTT_HALF_MS}ms limit 10000 || fail "v_s netem 重建失败 $TAG"
     ip netns exec ns_srv tc qdisc add dev ve_s root handle 1: htb default 1 || fail "htb root $TAG"
     ip netns exec ns_srv tc class add dev ve_s parent 1: classid 1:1 htb rate "${SHAPE}Mbit" burst 1mb || fail "htb class $TAG"
     ip netns exec ns_srv tc qdisc add dev ve_s parent 1:1 handle 10: "$ARM" || fail "被测 qdisc $ARM $TAG"
