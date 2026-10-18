@@ -149,7 +149,7 @@ run_leg() {
   IFS=: read -r TAG JIT LOSSFLAG CC PARAMS <<< "$(leg_expand "$2")"
   local TAGFULL="${ARM}_${TAG}"
   local PID_PING PID_SS PID_TC PID_SSSRV
-  local data_netem="delay ${RTT_HALF_MS}ms limit 10000"
+  local jit="" data_netem="delay ${RTT_HALF_MS}ms limit 10000"
   local ack_netem="delay ${RTT_HALF_MS}ms limit 10000"
   [ "$LOSSFLAG" = 1 ] && data_netem="delay ${RTT_HALF_MS}ms loss ${LOSS_PCT}% limit 10000"
   # 7hn: 抖动挂 v_s(ACK 向), 复刻 run 39039732757 现场 (delay H J = 0-2H 均匀)
