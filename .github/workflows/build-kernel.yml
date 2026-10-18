@@ -67,6 +67,14 @@ on:
         description: 'AQM A/B 请求限速 (默认 200Mbit, TCG 容量不足自动下调)'
         required: false
         default: '200Mbit'
+      aqm_legs:
+        description: 'AQM A/B 腿规格 (bd 7hn, 默认 "loss clean"; 7hn 探针填 "TAG:JIT:LOSS:CC:PARAMS" 列表)'
+        required: false
+        default: 'loss clean'
+      aqm_jitter_ms:
+        description: 'AQM A/B 抖动幅度 ms (bd 7hn, JIT=1 腿的 netem delay H J)'
+        required: false
+        default: '75'
       aqm_skip_release:
         description: '跳过 create-release (支线实验 dispatch 必填 1, 防覆盖生产 release)'
         required: false
@@ -837,7 +845,8 @@ jobs:
 
   aqm-ab-test:
     # bd yve: AQM hardening 三臂×两腿 A/B (fq 基线 vs fq_codel vs cake)
-    # 只在 feature/aqm-ab-ci 支线跑; 若合主线会给每次 CI 增加约 2h, 合并前 PM 裁决
+    # bd 7hn: 腿规格/CC/模块参数维度 (LEGS/JITTER_MS) 支持抖动×rto-cut A/B
+    # 只在支线跑; 若合主线会给每次 CI 增加约 2h, 合并前 PM 裁决
     needs: build-kernel
     runs-on: ubuntu-24.04
     timeout-minutes: 240
@@ -845,6 +854,8 @@ jobs:
       AQM_LEG_SEC: ${{ inputs.aqm_leg_sec || '1200' }}
       AQM_SHAPE_REQ: ${{ inputs.aqm_shape_req || '200Mbit' }}
       AQM_ARMS: ${{ inputs.aqm_arms || 'fq fq_codel cake' }}
+      AQM_LEGS: ${{ inputs.aqm_legs || 'loss clean' }}
+      AQM_JITTER_MS: ${{ inputs.aqm_jitter_ms || '75' }}
     steps:
       - name: Checkout tcpboost repo
         uses: actions/checkout@v4
@@ -884,6 +895,7 @@ jobs:
             --rwdir /var/log/tcpboost-soak \
             --run "/boot/vmlinuz-$KVER" -- /bin/bash -c \
             "LEG_SEC='$AQM_LEG_SEC' SHAPE_REQ='$AQM_SHAPE_REQ' ARMS='$AQM_ARMS' \
+             LEGS='$AQM_LEGS' JITTER_MS='$AQM_JITTER_MS' \
              /bin/bash $GITHUB_WORKSPACE/scripts/aqm_ab_test.sh"
 
       - name: Upload AQM A/B artifacts
