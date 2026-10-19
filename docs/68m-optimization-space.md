@@ -76,6 +76,8 @@ beta=30% → 保留 70%；beta=25% → 保留 75%，即**更浅的削减**。因
 - **VERDICT: FAIL**。beta 削浅减少了深跌次数、加快中位恢复，但总吞吐下降且长尾未恢复更多——乘法削减深度不是主杠杆。
 - 注意: `summary.md` 的 total/min 是 timeseries 派生口径（min_mbps 在 30s 瞬时采样），本节一律用逐秒 server log。
 - **决定**: 按预注册顺序先测 **C1b 绝对 BDP 地板**（`c1_floor_pct=50`，需新内核）；C1b 仍 FAIL 则转 C2。C1b 代码已默认 off，main workflow 已接 `c1_floor_pct` 输入。
+- C1b 构建: run `39237198600`（7.2, force_build, soak 30m, c1_floor_pct=50）。首个 run `39237061632` 因 sed 锚点跨行陷阱取消：`*inflight = max_t(...)` 跨两行，`a\` 会插进语句中间；已改为锚第二行并加位置守卫（`create_bbrplusv3.sh:549`）。
+- 探针产物: `reports/68m/probe-beta/{baseline,c1}/`（逐秒 server log + 原始 artifact）。
 
 **预期**（目标，不是实测）: 未恢复率 9.5%→<5%，恢复 p90 21s→<12s，total 均值 +5% 量级；min 不降。若 total 不升而 min 升，也算部分成功。
 
