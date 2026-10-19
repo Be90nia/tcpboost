@@ -94,6 +94,10 @@ done
 
 echo "[3/9] 已去掉可调参数的 const 限定符"
 
+# C1: loss-cut floor 开关 (默认 0=off; 0-100 = 跌后 inflight_lo 不低于 BDP 的百分比)
+sed -i '/^static u32 bbr_beta = /a\
+static u32 bbrplusv3_c1_floor_pct;\t/* tcpboost-c1: loss-cut floor % of BDP (0=off) */' "$BBRPLUSV3_SRC"
+
 # ============================================
 # 4. 应用 BBRPlus aggressive 参数值（默认 profile）
 # ============================================
@@ -531,6 +535,40 @@ sed -i '/u32 ecn_inflight_lo = ~0U;/a\
 \t\treturn;' "$BBRPLUSV3_SRC"
 
 echo "[7c-bis/9] 已注入 A4: PROBE_RTT 期间冻结 lower bound 更新"
+
+# ============================================
+# 7c-bis2. tcpboost-c1: 丢包削减地板 (68m 结果)
+# 机制: bbr_loss_lower_bounds() 的 *inflight 是 (1-beta)×inflight_lo,
+#       在 0.5% loss + 150ms 下会砍到远低于 BDP, 形成 11-18 Mbps 低平台 (68m)。
+# 改法: 丢包后 inflight_lo 不低于当前 BDP 的 c1_floor_pct% (默认 0=off)。
+# 依据: 68m 深跌 411 次, 9.5% 在 60s 内未恢复; 无 DRS/无规律锯齿。
+# 风险: 地板上移会保留更多 inflight, 可能增加队列/丢包 -> 默认 off, 单特性 A/B。
+# ============================================
+
+sed -i '/\*inflight = max_t(u32, bbr->inflight_latest,/a\
+\t/* tcpboost-c1: loss-cut floor as % of current BDP (0=off) */\
+\tif (READ_ONCE(bbrplusv3_c1_floor_pct)) {\
+\t\tu32 c1_bdp = bbr_bdp(sk, bbr_max_bw(sk), BBR_UNIT);\
+\t\tu32 c1_floor = (u64)c1_bdp * READ_ONCE(bbrplusv3_c1_floor_pct) / 100;\
+\
+\t\t*inflight = max_t(u32, *inflight, c1_floor);\
+\t}' "$BBRPLUSV3_SRC"
+
+grep -q 'tcpboost-c1:' "$BBRPLUSV3_SRC" || {
+  echo "FATAL: c1 loss-floor injection failed (anchor changed?)"
+  exit 1
+}
+
+sed -i '/^module_param_named(min_pacing_rate,/i\
+module_param_named(c1_floor_pct, bbrplusv3_c1_floor_pct, uint, 0644);\
+MODULE_PARM_DESC(c1_floor_pct, "Loss-cut floor as % of BDP (0=off, default=0)");' "$BBRPLUSV3_SRC"
+
+grep -q 'module_param_named(c1_floor_pct' "$BBRPLUSV3_SRC" || {
+  echo "FATAL: c1 module_param injection failed"
+  exit 1
+}
+
+echo "[7c-bis2/9] 已注入 C1: 丢包削减地板 (默认 off)"
 
 # ============================================
 # 7c-ter. tcpboost-A5: STARTUP loss 退出禁用 + startup_max_ms 兜底
