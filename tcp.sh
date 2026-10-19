@@ -743,6 +743,8 @@ write_bbrplusv3_service() {
   done
   # 移除末尾多余空格
   exec_script="${exec_script% }"
+  # boot 竞态兜底 (176 unit 实证): 模块加载完后再写回 CC, 避免 systemd 启动期模块未就位导致静默失败
+  exec_script+=' sysctl -w net.ipv4.tcp_congestion_control=bbrplusv3'
 
   cat > /etc/systemd/system/tcpboost-bbrplusv3.service <<EOF
 [Unit]
