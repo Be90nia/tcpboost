@@ -1238,6 +1238,230 @@ MODULE_PARM_DESC(mlfq_boost_ms, "Stable ms to promote one level (default=1000)")
 echo "[7c4-novem/9] 已注入 batch-5: mlfq-1 (5 处)"
 
 # ============================================
+# 7c5-decimus. tcpboost-obbr-1: oBBR 三件套 (batch-6 候选 1)
+# 来源: Bi et al., "oBBR: Optimize Retransmissions of BBR Flows on the
+#       Internet", USENIX ATC'23 (github.com/bpq233/oBBR, QUIC 用户态)
+# 机制: ① 丢包 -> 自适应 cwnd gain g = clamp(RTT_latest/RTprop, 1.25, g_max)
+#       ② per-ACK 线性回填 g += alpha*S_ack/BDP 爬回 g_max (旁路等 probe
+#          周期的 inflight_hi 慢爬升: 每个 ACK 都有进展)
+#       ③ k=30 连续样本带宽跌检测 (<0.75*btlbw 或 RTT>2.5*RTprop) ->
+#          用 k 样本均值刷新 BtlBw; T=200ms 内投递分变差即回滚
+# 边界: 仅 PROBE_BW 相位生效 (STARTUP 归 smartexit/A5 管); 默认 off
+#       (obbr_enable=0 全路径零行为变化); 固定点 16.16 (BBR_UNIT=256=1.0)
+# ============================================
+
+# OBB-0: 状态结构 + 三件套函数 (awk splice 到 bbr_update_gains 之前)
+# 大代码块走 heredoc+awk (A6-1 同款), 避免 sed 大块续行陷阱
+TMP_BLOCK=$(mktemp) || { echo "错误: mktemp 失败" >&2; exit 1; }
+trap 'rm -f "$TMP_BLOCK"' EXIT
+cat > "$TMP_BLOCK" <<'OBBR1_EOF'
+/* tcpboost-obbr-1: oBBR trio port (Bi et al., USENIX ATC'23). See
+ * section header in scripts/create_bbrplusv3.sh for the mechanism map.
+ * Default off: obbr_enable=0 keeps behavior identical to mlfq-1 baseline. */
+static u32 bbrplusv3_obbr_enable = 0;	/* 0=off (batch-6 default), 1=on */
+static u32 bbrplusv3_obbr_alpha = 10;	/* refill alpha, milli (0.01) */
+static u32 bbrplusv3_obbr_k = 30;	/* consecutive-sample drop threshold */
+static u32 bbrplusv3_obbr_rolls_ms = 200;	/* score eval window (T) */
+/* [diag] mechanism counters (exposed as 0444 params below) */
+static u32 bbrplusv3_obbr_cuts;		/* adaptive-g loss cuts fired */
+static u32 bbrplusv3_obbr_drops;	/* bw-drop refreshes fired */
+static u32 bbrplusv3_obbr_rolls;	/* rollbacks after score regression */
+
+#define BBRPLUSV3_OBBR_G_MAX	(BBR_UNIT * 2 << 8)	/* g_max=2.0, 16.16 */
+#define BBRPLUSV3_OBBR_G_MIN	(BBR_UNIT * 5 / 4 << 8)	/* floor 1.25 */
+
+/* delivery score U = delivered - 10*unacked; u32 wrap is safe because the
+ * rollback compares two snapshots ~200ms apart via a signed delta */
+static u32 bbrplusv3_obbr_score(const struct sock *sk)
+{
+	const struct tcp_sock *tp = tcp_sk(sk);
+
+	return (u32)tp->delivered - 10U * tcp_packets_in_flight(tp);
+}
+
+/* piece 3: refresh BtlBw (bw_hi[1]) with the streak mean, arm rollback */
+static void bbrplusv3_obbr_refresh(struct sock *sk, struct bbr *bbr, u32 mean)
+{
+	if (!mean || (bbr->obbr_flags & BIT(1)))
+		return;
+	bbr->obbr_bw_saved = bbr->bw_hi[1];
+	bbr->bw_hi[1] = mean;
+	bbr->obbr_u_before = bbrplusv3_obbr_score(sk);
+	bbr->obbr_rb_at = tcp_jiffies32 +
+			  msecs_to_jiffies(READ_ONCE(bbrplusv3_obbr_rolls_ms));
+	WRITE_ONCE(bbrplusv3_obbr_drops, bbrplusv3_obbr_drops + 1);
+	bbr->obbr_n = 0;
+	bbr->obbr_sum = 0;
+	bbr->obbr_flags |= BIT(1);
+}
+
+/* per-ACK oBBR entry: rollback eval, loss cut, drop detect, linear refill */
+static void bbrplusv3_obbr_update(struct sock *sk, struct bbr *bbr,
+				  const struct rate_sample *rs, u32 bw)
+{
+	u32 btl;
+
+	if (!READ_ONCE(bbrplusv3_obbr_enable))
+		return;
+
+	/* piece 3 rollback: undo refresh if delivery score regressed */
+	if ((bbr->obbr_flags & BIT(1)) &&
+	    time_after(tcp_jiffies32, bbr->obbr_rb_at)) {
+		if ((s32)(bbrplusv3_obbr_score(sk) - bbr->obbr_u_before) < 0) {
+			bbr->bw_hi[1] = max_t(u32, bbr->bw_hi[1],
+					      bbr->obbr_bw_saved);
+			WRITE_ONCE(bbrplusv3_obbr_rolls,
+				   bbrplusv3_obbr_rolls + 1);
+		}
+		bbr->obbr_flags &= ~BIT(1);
+	}
+
+	if (bbr->mode != BBR_PROBE_BW || rs->is_app_limited)
+		return;
+
+	/* piece 1: on loss, g := clamp(RTT_latest/RTprop [mu=1], 1.25, 2.0) */
+	if (rs->losses > 0 && bbr->min_rtt_us != ~0U && bbr->min_rtt_us &&
+	    rs->rtt_us >= 0) {
+		u32 g = min_t(u32, ((u32)rs->rtt_us << 8) /
+				   bbr->min_rtt_us << 8,
+			      BBRPLUSV3_OBBR_G_MAX);
+
+		bbr->obbr_g = clamp_t(u32, g, BBRPLUSV3_OBBR_G_MIN,
+				      BBRPLUSV3_OBBR_G_MAX);
+		bbr->obbr_flags |= BIT(0);
+		/* cap the probe ceiling too: it binds in UP/DOWN/REFILL */
+		bbr->inflight_hi = min_t(u32, bbr->inflight_hi,
+					 bbr_inflight(sk, bbr_bw(sk),
+						      (int)(bbr->obbr_g >> 8)));
+		WRITE_ONCE(bbrplusv3_obbr_cuts, bbrplusv3_obbr_cuts + 1);
+	}
+
+	/* piece 3 channel A: k consecutive samples below 3/4 of btl bw */
+	btl = bbr_max_bw(sk);
+	if (btl > bw && btl - btl / 4 > bw) {
+		bbr->obbr_sum += bw;
+		if (bbr->obbr_n < 0xFFFFU)
+			bbr->obbr_n++;
+		if (bbr->obbr_n >= READ_ONCE(bbrplusv3_obbr_k))
+			bbrplusv3_obbr_refresh(sk, bbr,
+				(u32)div64_u64(bbr->obbr_sum, bbr->obbr_n));
+	} else {
+		bbr->obbr_n = 0;
+		bbr->obbr_sum = 0;
+	}
+
+	/* piece 3 channel B: k consecutive RTT > (g_max+0.5)*RTprop */
+	if (bbr->min_rtt_us != ~0U && bbr->min_rtt_us && rs->rtt_us >= 0 &&
+	    (u64)rs->rtt_us > (u64)bbr->min_rtt_us * 5 / 2) {
+		if (bbr->obbr_rtt_cnt < 0xFFFFU)
+			bbr->obbr_rtt_cnt++;
+		if (bbr->obbr_rtt_cnt >= READ_ONCE(bbrplusv3_obbr_k)) {
+			bbr->obbr_rtt_cnt = 0;
+			/* shortcut: channel B needs below-threshold evidence
+			 * to build a mean; skip refresh if streak is thin */
+			if (bbr->obbr_n >= READ_ONCE(bbrplusv3_obbr_k) / 3)
+				bbrplusv3_obbr_refresh(sk, bbr,
+					(u32)div64_u64(bbr->obbr_sum,
+						       max(1U, bbr->obbr_n)));
+		}
+	} else {
+		bbr->obbr_rtt_cnt = 0;
+	}
+
+	/* piece 2: per-ACK linear refill g += alpha*S_ack/BDP (16.16 fp) */
+	if (bbr->obbr_flags & BIT(0)) {
+		u32 bdp = bbr_inflight(sk, bw, BBR_UNIT);
+		u64 add;
+
+		if (bdp) {
+			bbr->obbr_frac += (u64)READ_ONCE(bbrplusv3_obbr_alpha) *
+					  (u32)rs->acked_sacked * 65536;
+			add = div64_u64(bbr->obbr_frac, 1000ULL * bdp);
+			if (add) {
+				bbr->obbr_frac -= add * (1000ULL * bdp);
+				bbr->obbr_g = min_t(u32,
+						    bbr->obbr_g + (u32)add,
+						    BBRPLUSV3_OBBR_G_MAX);
+				if (bbr->obbr_g >= BBRPLUSV3_OBBR_G_MAX)
+					bbr->obbr_flags &= ~BIT(0);
+			}
+			/* probe ceiling tracks the refilled gain */
+			bbr->inflight_hi = max_t(u32, bbr->inflight_hi,
+						 bbr_inflight(sk, bw,
+						      (int)(bbr->obbr_g >> 8)));
+		}
+	}
+}
+
+OBBR1_EOF
+
+# 注入到 bbr_update_gains 之前 (awk splicing; 该行全文件唯一, 已核)
+if ! awk -v block_file="$TMP_BLOCK" '/^static void bbr_update_gains\(struct sock \*sk\)$/{
+	while ((getline line < block_file) > 0) print line
+	close(block_file)
+}
+{print}' "$BBRPLUSV3_SRC" > "$BBRPLUSV3_SRC.tmp"; then
+    echo "错误: awk 注入 obbr-1 失败" >&2
+    exit 1
+fi
+mv "$BBRPLUSV3_SRC.tmp" "$BBRPLUSV3_SRC"
+rm -f "$TMP_BLOCK"
+
+# OBB-1: struct bbr 加状态 (约 +44B 含对齐; 预算 ~202B -> ~246B, ICSK 256 内)
+sed -i '/^\tu32\tmlfq_last_loss;/a\
+	u32	obbr_g;		/* tcpboost-obbr-1: adaptive gain 16.16 */\
+	u64	obbr_sum;	/* tcpboost-obbr-1: bw sum in drop streak */\
+	u64	obbr_frac;	/* tcpboost-obbr-1: refill remainder accu */\
+	u32	obbr_rb_at;	/* tcpboost-obbr-1: rollback eval jiffies */\
+	u32	obbr_u_before;	/* tcpboost-obbr-1: score at refresh */\
+	u32	obbr_bw_saved;	/* tcpboost-obbr-1: bw_hi before refresh */\
+	u16	obbr_n;		/* tcpboost-obbr-1: samples in drop streak */\
+	u16	obbr_rtt_cnt;	/* tcpboost-obbr-1: RTT-channel streak */\
+	u8	obbr_flags;	/* tcpboost-obbr-1: bit0 refill, bit1 rollback */' "$BBRPLUSV3_SRC"
+
+# OBB-2: gain cap — PROBE_BW 稳态 cwnd_gain 钳到自适应 g (enable 门控零成本)
+sed -i '/^\t\t\t\tBBR_UNIT \* bbr_param(sk, bw_probe_cwnd_gain) \/ 4;$/a\
+\t\t/* tcpboost-obbr-1: clamp steady-state gain at adaptive g */\
+\t\tif (READ_ONCE(bbrplusv3_obbr_enable))\
+\t\t\tbbr->cwnd_gain = min_t(u32, bbr->cwnd_gain,\
+\t\t\t\t\t       bbr->obbr_g >> 8);' "$BBRPLUSV3_SRC"
+
+# OBB-3: per-ACK 钩子 — 合法样本入口 (早退之后), 先于 loss_in_round 标记
+sed -i 's|^\tbw = ctx->sample_bw;$|\tbw = ctx->sample_bw;\n\t/* tcpboost-obbr-1: loss cut + drop detect + per-ACK refill */\n\tbbrplusv3_obbr_update(sk, bbr, rs, (u32)bw);|' "$BBRPLUSV3_SRC"
+
+# OBB-4: bbr_init 复位 (obbr_g 满档 = 关闭语义)
+sed -i '/^\tbbr->plb.pause_until = 0;$/a\
+\t/* tcpboost-obbr-1: full gain + clear trio state */\
+\tbbr->obbr_g = BBRPLUSV3_OBBR_G_MAX;\
+\tbbr->obbr_sum = 0;\
+\tbbr->obbr_frac = 0;\
+\tbbr->obbr_rb_at = 0;\
+\tbbr->obbr_u_before = 0;\
+\tbbr->obbr_bw_saved = 0;\
+\tbbr->obbr_n = 0;\
+\tbbr->obbr_rtt_cnt = 0;\
+\tbbr->obbr_flags = 0;' "$BBRPLUSV3_SRC"
+
+# OBB-5: module_param (跟 mlfq_boost_ms 之后; 含 3 个 0444 诊断计数)
+sed -i '/^module_param_named(mlfq_boost_ms, bbrplusv3_mlfq_boost_ms, uint, 0644);$/a\
+module_param_named(obbr_enable, bbrplusv3_obbr_enable, uint, 0644);\
+MODULE_PARM_DESC(obbr_enable, "oBBR trio: adaptive g + per-ACK refill + bw-drop rollback (0=off default, 1=on)");\
+module_param_named(obbr_alpha, bbrplusv3_obbr_alpha, uint, 0644);\
+MODULE_PARM_DESC(obbr_alpha, "oBBR refill alpha in milli-units (default=10 = 0.01)");\
+module_param_named(obbr_k, bbrplusv3_obbr_k, uint, 0644);\
+MODULE_PARM_DESC(obbr_k, "oBBR consecutive-sample bw-drop threshold (default=30)");\
+module_param_named(obbr_rolls_ms, bbrplusv3_obbr_rolls_ms, uint, 0644);\
+MODULE_PARM_DESC(obbr_rolls_ms, "oBBR delivery-score eval window ms (default=200)");\
+module_param_named(obbr_cuts, bbrplusv3_obbr_cuts, uint, 0444);\
+MODULE_PARM_DESC(obbr_cuts, "[diag] adaptive-g loss cuts fired");\
+module_param_named(obbr_drops, bbrplusv3_obbr_drops, uint, 0444);\
+MODULE_PARM_DESC(obbr_drops, "[diag] bw-drop refreshes fired");\
+module_param_named(obbr_rolls, bbrplusv3_obbr_rolls, uint, 0444);\
+MODULE_PARM_DESC(obbr_rolls, "[diag] rollbacks after score regression");' "$BBRPLUSV3_SRC"
+
+echo "[7c5-decimus/9] 已注入 batch-6: obbr-1 (6 处)"
+
+# ============================================
 # 7d. tcpboost-wia: sed 替换验证
 # 验证所有关键 sed 修改已成功执行，防止静默 fallback 到 vanilla BBRv3
 # ============================================
@@ -1298,6 +1522,13 @@ verify_pattern 'bbrplusv3_mlfq_update' "mlfq-1 level update"
 verify_pattern 'tcpboost-pi-1' "pi-1 PI pacing-gain feedback"
 verify_pattern 'bbrplusv3_pi_enable' "pi-1 module_param"
 verify_pattern 'bbrplusv3_pi_adjust' "pi-1 controller function"
+verify_pattern 'tcpboost-obbr-1' "obbr-1 oBBR trio state"
+verify_pattern 'bbrplusv3_obbr_enable' "obbr-1 module_param"
+verify_pattern 'bbrplusv3_obbr_cut' "obbr-1 loss cut function"
+verify_pattern 'bbrplusv3_obbr_refresh' "obbr-1 bw-drop refresh function"
+verify_pattern 'bbrplusv3_obbr_update' "obbr-1 per-ACK entry function"
+verify_pattern 'BBRPLUSV3_OBBR_G_MAX' "obbr-1 gain ceiling constant"
+verify_pattern 'bbrplusv3_obbr_cuts' "obbr-1 diag counter cuts"
 
 if [ "$SED_ERRORS" -gt 0 ]; then
     echo "" >&2
