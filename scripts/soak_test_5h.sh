@@ -45,6 +45,11 @@ if [ -d "$PD" ]; then
     echo "[$(date -Iseconds)] kalman_enable=$(cat "$PD/kalman_enable" 2>/dev/null)"
   echo "${PI_EN:-1}" > "$PD/pi_enable" 2>/dev/null && \
     echo "[$(date -Iseconds)] pi_enable=$(cat "$PD/pi_enable" 2>/dev/null)"
+  # C1b 探针: 丢包削减地板 (0=off; 仅新内核有此参数, 旧内核静默跳过)
+  if [ -n "${C1_FLOOR_PCT:-}" ]; then
+    echo "$C1_FLOOR_PCT" > "$PD/c1_floor_pct" 2>/dev/null && \
+      echo "[$(date -Iseconds)] c1_floor_pct=$(cat "$PD/c1_floor_pct" 2>/dev/null)"
+  fi
 fi
 
 # ============ 启 netem ============
