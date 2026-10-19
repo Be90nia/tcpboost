@@ -66,10 +66,61 @@ github.com/bpq233/oBBR, QUIC 用户态; 逻辑纯计数器, 内核可移植)。
   soak_duration=5m (本跑为 A/B, 不做长跑门禁), aqm_leg_sec=300, aqm_arms=fq, aqm_legs=上表 7 腿。
 - 禁碰: 生产 VPS / release tag / main。
 
-## 4. 结果 (点火后回填)
+## 4. 结果 (run 39189344806, 2026-10-19, kernel 7.2.11, 全 job success)
 
-TBD
+CI: check-version/build-kernel/qemu-test/soak-test(5m)/aqm-ab-test 全 success, create-release skipped。
+接线证明: harness.log 每腿 `bpv3 params applied: obbr_enable=N` (sysfs fail-fast 通过, 模块参数存在);
+cubic 腿 CC 切换生效。artifact: `aqm-ab-results` (retention 7d)。
 
-## 5. 裁决 (TBD)
+```
+leg                      tot_p50  tot_p5  min_p50  starv%  pinmax  cw50  retrans_sum
+fq_bpv3_loss_ob0          139.8    82.3    14.97    0.00      0     15     13511
+fq_bpv3_loss_ob1          120.7    76.5    11.65    0.00      0     14     13239
+fq_bpv3_clean_ob0         125.7   113.5    13.10    0.00      0     15       342
+fq_bpv3_clean_ob1         123.7   110.2    13.10    0.00      0     15       272
+fq_bpv3_jloss_ob0         125.9    84.7     9.53    0.00      0     15     12717
+fq_bpv3_jloss_ob1         118.5    80.1     9.53    0.00      0     14     12832
+fq_cubic_loss              13.6     7.9     1.34    0.00      0     10      1460
+```
 
-TBD
+recovery (预注册估计量: B=p75(cwnd), dip=<0.9B 连续段, 5s 采样粒度):
+- loss_ob1: p50=1027ms p90=3550ms n=14 段;  loss_ob0: p50=854ms p90=5500ms n=10 段
+
+### 门禁裁决
+
+| 门 | 结果 | 数据 |
+|---|---|---|
+| G1 (loss 回填加速) | **FAIL** | tot_p50 120.7 vs 139.8 (**−13.7%**) 且 recovery_p50 1027 vs 854ms (更慢) — 两个方向都反 |
+| G2 (clean 无回归) | PASS | 123.7 ≥ 0.9×125.7 (=113.1), −1.6% |
+| G3 (jloss 不塌) | PASS | tot 118.5 ≥ 0.9×125.9; min_p50 持平 9.53 |
+| G4 (无 starv/pin) | PASS | 三对腿 starv 均 0.00%, pinmax 均 0; 机制行使证据见下 |
+| G5 (cubic 参照) | 记录 | 13.6 (bbrplusv3 两位数倍于 cubic, 与历史一致) |
+
+**VERDICT: FAIL** (G1 不过) → `obbr_enable` 维持默认 **0**, 不合主线建议, 归档 follow-up。
+
+### 解读与 follow-up 假设 (未经本轮验证, 供 PM 决策)
+
+1. **机制确实行使**: ob1 与 ob0 唯一差异是 enable 门控代码路径; loss 腿 tot −13.7% + 发端 cwnd p50
+   15→14 + 批次数 32→27, 方向一致。局限: harness 未采样 `obbr_cuts/obbr_drops/obbr_rolls` 计数器
+   (0444 sysfs), 行使次数无直接读数 — follow-up 可在 harness leg 末尾加一行 param dump。
+2. **双重削减假设 (主嫌疑)**: bbrplusv3 在 0.5% 随机 loss 下已有 v3 lower-bound 削减
+   (adapt_lower_bounds→loss_lower_bounds 压 inflight_lo/bw_lo) + mlfq 降档; obbr 再叠 inflight_hi cap
+   + cwnd_gain 钳制 = 对同一次丢包双重响应。oBBR 论文的增益是相对 BBRv2 (β=0.7 深削) 的;
+   v3/bpv3 的 loss 响应本就更温和, 第二套削减是净负。
+3. **per-ACK 重割棘轮假设**: 0.5% loss ≈ 每 ~200 包一次 loss ACK, 每次都把 g 重设为当前 RTT 比值
+   (fq 浅队列下 ≈ 地板 1.25); α=0.01/RTT 的回填每 RTT 只 +1%, 割得快填得慢 → g 长期贴地板,
+   等效 cwnd 永久 −25~35%, 与 −13.7% tot 量级吻合。潜在修法 (未验证): 割一次后本轮 recovery
+   内抑制重割, 或 α 随 RTT 比值放大。
+4. **重传未降**: loss 腿 retrans_sum ob1≈ob0 (13239 vs 13511) — 论文 headline (2% loss 重传大降)
+   在 0.5%+fq 场景不成立。
+5. **环境噪声带**: loss_ob0 (139.8) > clean_ob0 (125.7) +11% (同配置不同腿), 说明腿间噪声
+   ~±10%; G1 的 −13.7% 只略出噪声带, 但与 cwnd 签名/recovery 同向, FAIL 判定稳健。
+6. **抖动腿尾部改善信号**: jloss_ob1 最差流 min 5.5 vs ob0 3.7 (+49%), tot −5.9% — 机制在抖动
+   场景或对尾部流有益, 若未来重启候选值得单独探针。
+
+## 5. 裁决
+
+按预注册规则: **FAIL**。默认 off 维持; 本分支保留实现与判据供复验 (重跑命令见 §3), 合并/回滚归 PM。
+follow-up 候选 (均需重新预注册): 计数器采样进 harness、双重削减去耦 (只留回填不留割)、
+抖动场景单独探针。
+
