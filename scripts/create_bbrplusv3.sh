@@ -545,7 +545,8 @@ echo "[7c-bis/9] 已注入 A4: PROBE_RTT 期间冻结 lower bound 更新"
 # 风险: 地板上移会保留更多 inflight, 可能增加队列/丢包 -> 默认 off, 单特性 A/B。
 # ============================================
 
-sed -i '/\*inflight = max_t(u32, bbr->inflight_latest,/a\
+# 锚必须是跨行语句的第二行; 锚第一行会把代码插进 max_t( ... ) 中间
+sed -i '/bbr->inflight_lo \* loss_cut >> BBR_SCALE);/a\
 \t/* tcpboost-c1: loss-cut floor as % of current BDP (0=off) */\
 \tif (READ_ONCE(bbrplusv3_c1_floor_pct)) {\
 \t\tu32 c1_bdp = bbr_bdp(sk, bbr_max_bw(sk), BBR_UNIT);\
@@ -556,6 +557,12 @@ sed -i '/\*inflight = max_t(u32, bbr->inflight_latest,/a\
 
 grep -q 'tcpboost-c1:' "$BBRPLUSV3_SRC" || {
   echo "FATAL: c1 loss-floor injection failed (anchor changed?)"
+  exit 1
+}
+# 位置守卫: C1 块必须紧跟完整 max_t 语句 (第二行), 不能插进语句中间
+grep -A1 'bbr->inflight_lo \* loss_cut >> BBR_SCALE);' "$BBRPLUSV3_SRC" | \
+  grep -q 'tcpboost-c1:' || {
+  echo "FATAL: c1 loss-floor injected at wrong position"
   exit 1
 }
 
