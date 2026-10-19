@@ -43,6 +43,10 @@ on:
         description: '丢包削减地板 %BDP (0=off; 公平性旋钮)'
         required: false
         default: '0'
+      c2_early_probe:
+        description: 'C2 早重探测 (0=off, 1=on)'
+        required: false
+        default: '0'
 
 permissions:
   contents: read
@@ -101,6 +105,7 @@ jobs:
              KALMAN_EN=1 PI_EN=1 \
              BETA='${{ inputs.beta }}' MIN_PACING_RATE='${{ inputs.min_pacing_rate }}' \
              C1_FLOOR_PCT='${{ inputs.c1_floor_pct }}' \
+             C2_EARLY_PROBE='${{ inputs.c2_early_probe }}' \
              /bin/bash $GITHUB_WORKSPACE/scripts/soak_test_5h.sh"
 
       - name: Upload soak artifacts

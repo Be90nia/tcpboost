@@ -393,6 +393,7 @@ cat >> "$BBRPLUSV3_SRC" << 'BBRPLUSV3_ALGO_EOF'
  * ============================================ */
 
 static u64 bbrplusv3_min_pacing_rate;
+static uint bbrplusv3_c2_early_probe;
 
 /* tcpboost-4cf: 参数范围验证标志（首次 ACK 时验证一次） */
 static atomic_t bbrplusv3_params_checked = ATOMIC_INIT(0);
@@ -488,6 +489,8 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 
 module_param_named(min_pacing_rate, bbrplusv3_min_pacing_rate, ullong, 0644);
 MODULE_PARM_DESC(min_pacing_rate, "Min pacing rate bytes/s (0=off, e.g. 1250000=10Mbps)");
+module_param_named(c2_early_probe, bbrplusv3_c2_early_probe, uint, 0644);
+MODULE_PARM_DESC(c2_early_probe, "Early re-probe when cruising below 1/2 max_bw (0=off, 1=on)");
 BBRPLUSV3_ALGO_EOF
 
 echo "[7b/9] 已注入 cong_control wrapper + min_pacing_rate floor"
@@ -563,6 +566,32 @@ grep -q 'tcpboost-c1:' "$BBRPLUSV3_SRC" || {
 grep -A1 'bbr->inflight_lo \* loss_cut >> BBR_SCALE);' "$BBRPLUSV3_SRC" | \
   grep -q 'tcpboost-c1:' || {
   echo "FATAL: c1 loss-floor injected at wrong position"
+  exit 1
+}
+
+# ============================================
+# 7c-bis3. C2: 未恢复早重探测 (跌后平台加速回归, 仅 CRUISE 相位触发)
+# range 限定在 check_time_to_probe_bw 函数体内, 锚 = 函数内唯一的 u32 n;
+# ============================================
+sed -i '/bbr_check_time_to_probe_bw(struct sock/,/^}/ {
+  /^\tu32 n;$/a\
+  /* tcpboost-c2: cruise far below max_bw -> reprobe now (0=off) */\
+  if (READ_ONCE(bbrplusv3_c2_early_probe)) {\
+    if ((u64)bbr->bw_latest * 2 < (u64)bbr_max_bw(sk)) {\
+      bbr_start_bw_probe_refill(sk, 0);\
+      return true;\
+    }\
+  }
+}' "$BBRPLUSV3_SRC"
+
+grep -q 'tcpboost-c2' "$BBRPLUSV3_SRC" || {
+  echo "FATAL: c2 early-probe injection failed (anchor changed?)"
+  exit 1
+}
+# 位置守卫: c2 触发必须在 check_time_to_probe_bw 函数体内 (非文件级误插)
+sed -n '/bbr_check_time_to_probe_bw(struct sock/,/^}/p' "$BBRPLUSV3_SRC" | \
+  grep -q 'tcpboost-c2' || {
+  echo "FATAL: c2 early-probe injected at wrong position"
   exit 1
 }
 
