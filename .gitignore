@@ -29,3 +29,4 @@ __pycache__/
 .codebase-memory/
 graphify-out/
 *.rej
+reports/

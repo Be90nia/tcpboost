@@ -59,6 +59,8 @@ def load_stream_log(results_dir: Path, port: int) -> np.ndarray:
     offset = 0.0
     prev_end = 0.0
     for a, b, mbps in rows:
+        if b - a > 5:  # 测试 summary 行 (0.00-300.xx) 不是每秒样本; 保留会拼出恒值块
+            continue
         if a < prev_end - 1e-6:  # 新测试从头开始
             offset += prev_end
         segs.append((a + offset, b + offset, mbps))

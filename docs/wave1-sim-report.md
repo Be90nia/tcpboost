@@ -24,7 +24,7 @@ bbrplusv3: dep30 3/3, FP 1.2/sh (persist10) vs SPRT 9.9-11.6 / HMM 17.7 / 分层
 - ⚠️ **数据质量上报 (PM 关注)**:
   1. `timeseries.csv` 的 `total_mbps` 是**派生列**: total = 16 × p50 逐桶精确成立 (779.75=16×48.73, 2143.79=16×133.98), 非真实求和; 该列不能当总吞吐用时序分析。`active_streams=16` vs 实际 8 端口也待解释。
   2. `streams/stream-*.jsonl` (修复产物) 与 log/CSV 均不可对齐 (逐端口×多偏移最大 corr 0.357, 成对重复含相位漂移+精度混杂), **弃用作输入**, 仅存档。
-- 每轮 8 流 (端口 5202-5209), 有效时长 3603-3681s (7 块拼接, 末块 ~29s teardown)。
+- 每轮 8 流 (端口 5202-5209), 有效时长 3603-3681s (7 块拼接, 末块 ~29s teardown)。**勘误 (2026-10-19): 实为 ~1800s, 见 §9。**
 
 ### 1.2 观测域映射 (票面 loss/RTT 域 → trace 吞吐域)
 
@@ -152,3 +152,21 @@ python scripts/wave1_sim/run_all.py   # ~85s, 输出汇总表 + scripts/wave1_si
 ```
 
 代码: `common.py` (loader/标签/评分) + `t5pe_sprt.py` / `e18_hmm.py` / `b9z_hier.py` / `t3wi_cp1.py` / `run_all.py`。
+
+## 9. 勘误 (2026-10-19, 68m 分析发现 loader bug)
+
+`common.py:load_stream_log` 曾把每段 iperf3 测试的 summary 行 (0.00–300.xx) 当成 300s 样本块拼接，导致时间轴翻倍（3603–3681s 实为 ~1800s）且约一半样本是恒值。修复：跳过 `b-a>5` 的行（`common.py:62`）。已用修复后 loader 重跑 `run_all.py`（61s），`scripts/wave1_sim/results_all.json` 已覆盖为修正结果。
+
+修正后关键变化：
+
+| 项 | 旧报告 | 修正后 |
+|---|---|---|
+| bbrplusv3 dep30 真值 | 3/3 | **2/2** |
+| cubic dep30 真值 | 5/5 | **2/2** |
+| bbrplusv3 dead | 5/5 | 5/5（不变） |
+| persist10 FP/sh (bbrplusv3/cubic/bbr) | 1.2 / 0.25 / 0.62 | 3.91 / 1.75 / 1.24 |
+| 3wi cp recall (bbrplusv3/cubic) | 1–2/3, 0/5 | **1/2, 0/2** |
+
+- 旧报告中的 310s/301s/536s “持续 depression” 是 summary 恒值块伪影，不是真实网络事件。
+- **排序与裁决不变**：persist10 仍全面最优；SPRT/HMM/分层仍 REJECT；3wi 仍 INCONCLUSIVE（修正后 cp recall 更低）。
+- §1.3 及各检测器旧表数字已被本节取代；旧表保留作历史对照。
