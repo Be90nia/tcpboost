@@ -45,6 +45,20 @@ if [ -d "$PD" ]; then
     echo "[$(date -Iseconds)] kalman_enable=$(cat "$PD/kalman_enable" 2>/dev/null)"
   echo "${PI_EN:-1}" > "$PD/pi_enable" 2>/dev/null && \
     echo "[$(date -Iseconds)] pi_enable=$(cat "$PD/pi_enable" 2>/dev/null)"
+  # C1 探针: 运行时覆盖 loss response beta (空=保留 profile 默认)
+  if [ -n "${BETA:-}" ]; then
+    echo "$BETA" > "$PD/beta" 2>/dev/null && \
+      echo "[$(date -Iseconds)] beta=$(cat "$PD/beta" 2>/dev/null)"
+  fi
+  if [ -n "${LOSS_THRESH:-}" ]; then
+    echo "$LOSS_THRESH" > "$PD/loss_thresh" 2>/dev/null && \
+      echo "[$(date -Iseconds)] loss_thresh=$(cat "$PD/loss_thresh" 2>/dev/null)"
+  fi
+  # 探针需要干净的 pacing floor (生产 floor 会掩盖低平台)
+  if [ -n "${MIN_PACING_RATE:-}" ]; then
+    echo "$MIN_PACING_RATE" > "$PD/min_pacing_rate" 2>/dev/null && \
+      echo "[$(date -Iseconds)] min_pacing_rate=$(cat "$PD/min_pacing_rate" 2>/dev/null)"
+  fi
 fi
 
 # ============ 启 netem ============
