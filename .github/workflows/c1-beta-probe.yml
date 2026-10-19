@@ -39,18 +39,22 @@ on:
         description: 'pacing floor bytes/s (探针固定 0)'
         required: false
         default: '0'
+      c1_floor_pct:
+        description: '丢包削减地板 %BDP (0=off; 公平性旋钮)'
+        required: false
+        default: '0'
 
 permissions:
   contents: read
 
 concurrency:
-  group: c1-beta-${{ inputs.beta }}
+  group: c1-beta-${{ inputs.beta }}-${{ inputs.label }}
   cancel-in-progress: false
 
 jobs:
   soak:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 360
     steps:
       - name: Checkout tcpboost repo
         uses: actions/checkout@v4
@@ -96,6 +100,7 @@ jobs:
              CC='bbrplusv3' SAMPLE_INTERVAL=30 \
              KALMAN_EN=1 PI_EN=1 \
              BETA='${{ inputs.beta }}' MIN_PACING_RATE='${{ inputs.min_pacing_rate }}' \
+             C1_FLOOR_PCT='${{ inputs.c1_floor_pct }}' \
              /bin/bash $GITHUB_WORKSPACE/scripts/soak_test_5h.sh"
 
       - name: Upload soak artifacts
