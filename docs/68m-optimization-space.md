@@ -163,9 +163,26 @@ C1/C2 的具体行号需在 7.2.11 `net/ipv4/tcp_bbr.c` 落地时按实际源码
 - **oBBR 教训**: 任何“丢包后更激进回填”都要检查与 v3 lower-bound 的双重响应；C1/C2 都必须只动一个旋钮，并记录 `inflight_hi/lo` 轨迹。
 - **数据修正影响历史结论**: Wave-1 排序不变但真值段数变化；ABC 的 +76% min 不复现。后续引用一律用修正后口径。
 
+## 8. 公平性标定战役 (2026-10-19 启动)
+
+**目标**: 给 `c1_floor_pct` 定 knee 值——吞吐预算内最小化饿死。
+
+**三臂** (同一 release 内核 `v7.2.11-tcpboost`=新构建含 C1b 代码, beta=76, 30m, 0.5%/150ms, 8 流, 并行):
+- base0 (floor=0): run `39255255666` — 同内核对照 (旧基线 396.3 来自无 C1 代码的 v7.2.11, 需重测控漂移)
+- floor30: run `39255260886`
+- floor50: run `39255265761`
+
+**预注册 knee 规则 (看数前钉死)**:
+1. 预算以 base0 臂为基准: `total_mean ≥ base0 × 0.95` 且 `min_stream_mean ≥ base0 × 0.97`。
+2. 预算内选 `starved_total_s` 最小者; 无达标臂 → knee 不存在, floor 维持 0, 公平性另寻机制。
+3. floor30/50 双达标且公平性随 floor 单调改善 → 补 floor70 一臂再定。
+4. 选中值跑 5h soak 出厂门禁 (probe workflow 已接 `c1_floor_pct`, timeout 360), 过门禁才准上队。
+
+判据口径: 逐秒 server log (分析器 `--dirs`), 饿死指标 = probe.json `starved` 段 (episodes/total_s/max_s)。
+
 ## 7. 建议顺序
 
-1. **P0 仪表 + baseline 30m**（同轮），拿到 cwnd/rt/rcv_space 后重算 68m 指标。
+1. **P0 仪表 + baseline 30m**（同轮），拿到 cwnd/rcv_space 后重算 68m 指标。
 2. **C1a `beta=25%` 30m → FAIL**（total −4.8%，未恢复 +28%）。
 3. **C1b `c1_floor_pct=50` 30m → FAIL**（total −17.4%，min −8.3%；但饿死段 6→2）。
 4. **C1/C2/C3 线 PARKED**（因果反转：深跌与高 total 正相关，"恢复慢"不是 total 瓶颈）；`c1_floor_pct` 留作公平性 opt-in。
