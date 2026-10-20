@@ -94,13 +94,6 @@ done
 
 echo "[3/9] 已去掉可调参数的 const 限定符"
 
-# C1: loss-cut floor 开关 (默认 0=off; 0-100 = 跌后 inflight_lo 不低于 BDP 的百分比)
-sed -i '/^static u32 bbr_beta = /a\
-static u32 bbrplusv3_c1_floor_pct;\t/* tcpboost-c1: loss-cut floor % of BDP (0=off) */' "$BBRPLUSV3_SRC"
-# C2: 声明必须在所有函数之前 (check_time_to_probe_bw 在文件中部先用) — 声明后置 = undeclared 编译错
-sed -i '/^static u32 bbr_beta = /a\
-static u32 bbrplusv3_c2_early_probe;\t/* tcpboost-c2: early re-probe (0=off) */' "$BBRPLUSV3_SRC"
-
 # ============================================
 # 4. 应用 BBRPlus aggressive 参数值（默认 profile）
 # ============================================
@@ -396,7 +389,6 @@ cat >> "$BBRPLUSV3_SRC" << 'BBRPLUSV3_ALGO_EOF'
  * ============================================ */
 
 static u64 bbrplusv3_min_pacing_rate;
-/* c2 声明在文件头部 bbr_beta 锚处插入 (声明须先于 1952 行的使用点) */
 
 /* tcpboost-4cf: 参数范围验证标志（首次 ACK 时验证一次） */
 static atomic_t bbrplusv3_params_checked = ATOMIC_INIT(0);
@@ -492,8 +484,6 @@ static void bbrplusv3_main(struct sock *sk, u32 ack, int flag,
 
 module_param_named(min_pacing_rate, bbrplusv3_min_pacing_rate, ullong, 0644);
 MODULE_PARM_DESC(min_pacing_rate, "Min pacing rate bytes/s (0=off, e.g. 1250000=10Mbps)");
-module_param_named(c2_early_probe, bbrplusv3_c2_early_probe, uint, 0644);
-MODULE_PARM_DESC(c2_early_probe, "Early re-probe when cruising below 1/2 max_bw (0=off, 1=on)");
 BBRPLUSV3_ALGO_EOF
 
 echo "[7b/9] 已注入 cong_control wrapper + min_pacing_rate floor"
@@ -541,78 +531,6 @@ sed -i '/u32 ecn_inflight_lo = ~0U;/a\
 \t\treturn;' "$BBRPLUSV3_SRC"
 
 echo "[7c-bis/9] 已注入 A4: PROBE_RTT 期间冻结 lower bound 更新"
-
-# ============================================
-# 7c-bis2. tcpboost-c1: 丢包削减地板 (68m 结果)
-# 机制: bbr_loss_lower_bounds() 的 *inflight 是 (1-beta)×inflight_lo,
-#       在 0.5% loss + 150ms 下会砍到远低于 BDP, 形成 11-18 Mbps 低平台 (68m)。
-# 改法: 丢包后 inflight_lo 不低于当前 BDP 的 c1_floor_pct% (默认 0=off)。
-# 依据: 68m 深跌 411 次, 9.5% 在 60s 内未恢复; 无 DRS/无规律锯齿。
-# 风险: 地板上移会保留更多 inflight, 可能增加队列/丢包 -> 默认 off, 单特性 A/B。
-# ============================================
-
-# 锚必须是跨行语句的第二行; 锚第一行会把代码插进 max_t( ... ) 中间
-sed -i '/bbr->inflight_lo \* loss_cut >> BBR_SCALE);/a\
-\t/* tcpboost-c1: loss-cut floor as % of current BDP (0=off) */\
-\tif (READ_ONCE(bbrplusv3_c1_floor_pct)) {\
-\t\tu32 c1_bdp = bbr_bdp(sk, bbr_max_bw(sk), BBR_UNIT);\
-\t\tu32 c1_floor = (u64)c1_bdp * READ_ONCE(bbrplusv3_c1_floor_pct) / 100;\
-\
-\t\t*inflight = max_t(u32, *inflight, c1_floor);\
-\t}' "$BBRPLUSV3_SRC"
-
-grep -q 'tcpboost-c1:' "$BBRPLUSV3_SRC" || {
-  echo "FATAL: c1 loss-floor injection failed (anchor changed?)"
-  exit 1
-}
-# 位置守卫: C1 块必须紧跟完整 max_t 语句 (第二行), 不能插进语句中间
-grep -A1 'bbr->inflight_lo \* loss_cut >> BBR_SCALE);' "$BBRPLUSV3_SRC" | \
-  grep -q 'tcpboost-c1:' || {
-  echo "FATAL: c1 loss-floor injected at wrong position"
-  exit 1
-}
-
-# ============================================
-# 7c-bis3. C2: 未恢复早重探测 (跌后平台加速回归, 仅 CRUISE 相位触发)
-# range 限定在 check_time_to_probe_bw 函数体内, 锚 = 函数内唯一的 u32 n;
-# ============================================
-sed -i '/bbr_check_time_to_probe_bw(struct sock/,/^}/ {
-  /^\tu32 n;$/a\
-  /* tcpboost-c2: cruise far below max_bw -> reprobe now (0=off) */\
-  if (READ_ONCE(bbrplusv3_c2_early_probe)) {\
-    if ((u64)bbr->bw_latest * 2 < (u64)bbr_max_bw(sk)) {\
-      bbr_start_bw_probe_refill(sk, 0);\
-      return true;\
-    }\
-  }
-}' "$BBRPLUSV3_SRC"
-
-grep -q 'tcpboost-c2' "$BBRPLUSV3_SRC" || {
-  echo "FATAL: c2 early-probe injection failed (anchor changed?)"
-  exit 1
-}
-# 声明唯一性守卫: 恰好 1 处 (声明早于使用点由 bbr_beta 锚位置保证)
-[ "$(grep -c '^static u32 bbrplusv3_c2_early_probe;' "$BBRPLUSV3_SRC")" = "1" ] || {
-  echo "FATAL: c2 static declaration count != 1"
-  exit 1
-}
-# 位置守卫: c2 触发必须在 check_time_to_probe_bw 函数体内 (非文件级误插)
-sed -n '/bbr_check_time_to_probe_bw(struct sock/,/^}/p' "$BBRPLUSV3_SRC" | \
-  grep -q 'tcpboost-c2' || {
-  echo "FATAL: c2 early-probe injected at wrong position"
-  exit 1
-}
-
-sed -i '/^module_param_named(min_pacing_rate,/i\
-module_param_named(c1_floor_pct, bbrplusv3_c1_floor_pct, uint, 0644);\
-MODULE_PARM_DESC(c1_floor_pct, "Loss-cut floor as % of BDP (0=off, default=0)");' "$BBRPLUSV3_SRC"
-
-grep -q 'module_param_named(c1_floor_pct' "$BBRPLUSV3_SRC" || {
-  echo "FATAL: c1 module_param injection failed"
-  exit 1
-}
-
-echo "[7c-bis2/9] 已注入 C1: 丢包削减地板 (默认 off)"
 
 # ============================================
 # 7c-ter. tcpboost-A5: STARTUP loss 退出禁用 + startup_max_ms 兜底

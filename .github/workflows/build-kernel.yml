@@ -55,14 +55,6 @@ on:
         description: '采样间隔秒 (30s 标准, 60s 减轻开销)'
         required: false
         default: '30'
-      c1_floor_pct:
-        description: 'C1 loss-cut floor % of BDP (0=off, 50=C1b probe)'
-        required: false
-        default: '0'
-      c2_early_probe:
-        description: 'C2 early re-probe below 1/2 max_bw (0=off, 1=on)'
-        required: false
-        default: '0'
 
 permissions:
   contents: read
@@ -766,8 +758,6 @@ jobs:
       SOAK_DELAY: ${{ inputs.soak_delay_ms || '75' }}
       SOAK_CC: ${{ inputs.soak_cc || 'bbrplusv3' }}
       SOAK_INTERVAL: ${{ inputs.soak_interval || '30' }}
-      C1_FLOOR_PCT: ${{ inputs.c1_floor_pct || '0' }}
-      C2_EARLY_PROBE: ${{ inputs.c2_early_probe || '0' }}
     steps:
       - name: Checkout tcpboost repo
         uses: actions/checkout@v4
@@ -816,8 +806,7 @@ jobs:
             "sysctl -w net.ipv4.tcp_rcv_ssthresh_unstick=1 && sysctl net.ipv4.tcp_rcv_ssthresh_unstick && \
              DURATION='$SOAK_DURATION' NSTREAMS='$SOAK_STREAMS' LOSS='$SOAK_LOSS' \
              DELAY_MS='$SOAK_DELAY' CC='$SOAK_CC' SAMPLE_INTERVAL='$SOAK_INTERVAL' \
-             KALMAN_EN='$KALMAN_EN' PI_EN='$PI_EN' C1_FLOOR_PCT='$C1_FLOOR_PCT' \
-             C2_EARLY_PROBE='$C2_EARLY_PROBE' \
+             KALMAN_EN='$KALMAN_EN' PI_EN='$PI_EN' \
              /bin/bash $GITHUB_WORKSPACE/scripts/soak_test_5h.sh"
 
       - name: Upload soak artifacts
