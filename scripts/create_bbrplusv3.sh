@@ -97,6 +97,9 @@ echo "[3/9] 已去掉可调参数的 const 限定符"
 # C1: loss-cut floor 开关 (默认 0=off; 0-100 = 跌后 inflight_lo 不低于 BDP 的百分比)
 sed -i '/^static u32 bbr_beta = /a\
 static u32 bbrplusv3_c1_floor_pct;\t/* tcpboost-c1: loss-cut floor % of BDP (0=off) */' "$BBRPLUSV3_SRC"
+# C2: 声明必须在所有函数之前 (check_time_to_probe_bw 在文件中部先用) — 声明后置 = undeclared 编译错
+sed -i '/^static u32 bbr_beta = /a\
+static u32 bbrplusv3_c2_early_probe;\t/* tcpboost-c2: early re-probe (0=off) */' "$BBRPLUSV3_SRC"
 
 # ============================================
 # 4. 应用 BBRPlus aggressive 参数值（默认 profile）
@@ -393,7 +396,7 @@ cat >> "$BBRPLUSV3_SRC" << 'BBRPLUSV3_ALGO_EOF'
  * ============================================ */
 
 static u64 bbrplusv3_min_pacing_rate;
-static uint bbrplusv3_c2_early_probe;
+/* c2 声明在文件头部 bbr_beta 锚处插入 (声明须先于 1952 行的使用点) */
 
 /* tcpboost-4cf: 参数范围验证标志（首次 ACK 时验证一次） */
 static atomic_t bbrplusv3_params_checked = ATOMIC_INIT(0);
@@ -586,6 +589,11 @@ sed -i '/bbr_check_time_to_probe_bw(struct sock/,/^}/ {
 
 grep -q 'tcpboost-c2' "$BBRPLUSV3_SRC" || {
   echo "FATAL: c2 early-probe injection failed (anchor changed?)"
+  exit 1
+}
+# 声明唯一性守卫: 恰好 1 处 (声明早于使用点由 bbr_beta 锚位置保证)
+[ "$(grep -c '^static u32 bbrplusv3_c2_early_probe;' "$BBRPLUSV3_SRC")" = "1" ] || {
+  echo "FATAL: c2 static declaration count != 1"
   exit 1
 }
 # 位置守卫: c2 触发必须在 check_time_to_probe_bw 函数体内 (非文件级误插)
