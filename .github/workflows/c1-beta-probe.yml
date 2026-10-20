@@ -1,0 +1,113 @@
+name: C1 beta probe (soak only)
+
+# 免内核构建: 直接下载已发布 v7.2.11-tcpboost deb, 只跑 QEMU soak。
+# 目的: beta=76 (基线) vs beta=64 (C1 更浅削减) 的 30m 配对。
+# 预注册判据见 docs/68m-optimization-space.md。
+
+on:
+  workflow_dispatch:
+    inputs:
+      beta:
+        description: 'bbr beta (BBR_UNIT=256; 76=30%, 64=25%)'
+        required: true
+        default: '64'
+      label:
+        description: 'artifact 标签 (baseline/c1)'
+        required: true
+        default: 'c1'
+      kernel_release:
+        description: 'GitHub release tag'
+        required: false
+        default: 'v7.2.11-tcpboost'
+      soak_duration:
+        description: 'soak 时长'
+        required: false
+        default: '30m'
+      soak_loss:
+        description: 'netem 丢包率'
+        required: false
+        default: '0.5%'
+      soak_delay_ms:
+        description: 'netem 单向延迟 ms'
+        required: false
+        default: '75'
+      soak_streams:
+        description: '并发流数'
+        required: false
+        default: '8'
+      min_pacing_rate:
+        description: 'pacing floor bytes/s (探针固定 0)'
+        required: false
+        default: '0'
+      c2_early_probe:
+        description: 'C2 早重探测 (0=off, 1=on)'
+        required: false
+        default: '0'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: c1-beta-${{ inputs.beta }}-${{ inputs.label }}
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout tcpboost repo
+        uses: actions/checkout@v4
+
+      - name: Install QEMU + virtme-ng + iperf3 + sysstat
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 iperf3 kmod curl bc sysstat
+          sudo pip3 install --break-system-packages virtme-ng
+
+      - name: Download released kernel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p artifact
+          gh release download "${{ inputs.kernel_release }}" \
+            -p 'linux-image-*.deb' -D artifact
+
+      - name: Install kernel deb and detect KVER
+        run: |
+          set -e
+          DEB="$(ls artifact/linux-image-*.deb | head -1)"
+          echo "DEB=$DEB"
+          sudo dpkg -i --force-all "$DEB" 2>&1 | tail -5 || true
+          PKG="$(dpkg -I "$DEB" | awk '/^ Package: linux-image-/{print $2; exit}')"
+          KVER="${PKG#linux-image-}"
+          echo "KVER=$KVER"
+          [ -n "$KVER" ] || { echo "FATAL: 提取 KVER 失败"; exit 1; }
+          test -f "/boot/vmlinuz-$KVER" || { echo "FATAL: vmlinuz 缺失"; exit 1; }
+          test -d "/lib/modules/$KVER" || { echo "FATAL: modules 缺失"; exit 1; }
+          echo "KVER=$KVER" >> "$GITHUB_ENV"
+
+      - name: Run soak in QEMU
+        run: |
+          chmod +x scripts/soak_*.sh
+          sudo mkdir -p /var/log/tcpboost-soak
+          sudo env "PATH=$PATH" vng --disable-kvm --memory 4G --cpus 4 \
+            --rwdir /var/log/tcpboost-soak \
+            --run "/boot/vmlinuz-$KVER" -- /bin/bash -c \
+            "sysctl -w net.ipv4.tcp_rcv_ssthresh_unstick=1 && \
+             DURATION='${{ inputs.soak_duration }}' NSTREAMS='${{ inputs.soak_streams }}' \
+             LOSS='${{ inputs.soak_loss }}' DELAY_MS='${{ inputs.soak_delay_ms }}' \
+             CC='bbrplusv3' SAMPLE_INTERVAL=30 \
+             KALMAN_EN=1 PI_EN=1 \
+             BETA='${{ inputs.beta }}' MIN_PACING_RATE='${{ inputs.min_pacing_rate }}' \
+             C2_EARLY_PROBE='${{ inputs.c2_early_probe }}' \
+             /bin/bash $GITHUB_WORKSPACE/scripts/soak_test_5h.sh"
+
+      - name: Upload soak artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-${{ inputs.label }}-beta${{ inputs.beta }}
+          path: /var/log/tcpboost-soak/
+          retention-days: 7
+          if-no-files-found: warn
