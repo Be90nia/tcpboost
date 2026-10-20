@@ -45,6 +45,11 @@ if [ -d "$PD" ]; then
     echo "[$(date -Iseconds)] kalman_enable=$(cat "$PD/kalman_enable" 2>/dev/null)"
   echo "${PI_EN:-1}" > "$PD/pi_enable" 2>/dev/null && \
     echo "[$(date -Iseconds)] pi_enable=$(cat "$PD/pi_enable" 2>/dev/null)"
+  # C2 探针: 未恢复早重探测 (0=off; 仅新内核有此参数, 旧内核静默跳过)
+  if [ -n "${C2_EARLY_PROBE:-}" ]; then
+    echo "$C2_EARLY_PROBE" > "$PD/c2_early_probe" 2>/dev/null && \
+      echo "[$(date -Iseconds)] c2_early_probe=$(cat "$PD/c2_early_probe" 2>/dev/null)"
+  fi
 fi
 
 # ============ 启 netem ============
