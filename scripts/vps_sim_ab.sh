@@ -18,7 +18,8 @@ DURATION=${DURATION:-24h}
 SEG_SEC=${SEG_SEC:-7200}
 LOSS=${LOSS:-0.5%}
 DELAY_MS=${DELAY_MS:-75}      # 单向; 双向 = 150ms RTT (与 CI 一致)
-RATE=${RATE:-100mbit}         # netem 瓶颈: 保护 CPU + 制造共享瓶颈
+RATE=${RATE:-100mbit}         # netem 瓶颈: none = 不限速 (CPU 限流时用)
+PER_STREAM_BW=${PER_STREAM_BW:-} # 每流 iperf3 限速 (如 60M); 空 = 不限速
 NSTREAMS=${NSTREAMS:-8}
 ROTATE_SEC=${ROTATE_SEC:-300}
 C2_VALS=${C2_VALS:-"0 1"}
@@ -71,8 +72,10 @@ ip netns exec "$NS" ip addr add 10.77.0.2/24 dev tb-n
 ip netns exec "$NS" ip link set tb-n up
 ip netns exec "$NS" ip link set lo up
 # 双向同损伤: host 侧 (去程) + netns 侧 (回程)
-tc qdisc add dev tb-h root netem delay "${DELAY_MS}ms" "${DELAY_MS}ms" loss "$LOSS" rate "$RATE" 2>/dev/null
-ip netns exec "$NS" tc qdisc add dev tb-n root netem delay "${DELAY_MS}ms" "${DELAY_MS}ms" loss "$LOSS" rate "$RATE" 2>/dev/null
+NETEM_ARGS="delay ${DELAY_MS}ms ${DELAY_MS}ms loss $LOSS"
+[ "$RATE" != "none" ] && NETEM_ARGS="$NETEM_ARGS rate $RATE"
+tc qdisc add dev tb-h root netem $NETEM_ARGS 2>/dev/null
+ip netns exec "$NS" tc qdisc add dev tb-n root netem $NETEM_ARGS 2>/dev/null
 log "netem 已加: tb-h/tb-n 双向 ${DELAY_MS}ms/$LOSS rate=$RATE (RTT=$((DELAY_MS * 2))ms)"
 
 # ---------- 全局 CC (业务也在用, 记录原值) ----------
@@ -137,7 +140,7 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     (
       while [ ! -f "$SEG_DIR/stop" ] && [ "$(date +%s)" -lt "$((NOW + THIS_SEC))" ]; do
         taskset -c "$CLIENT_CPUS" nice -n 19 ionice -c 3 \
-          iperf3 -c 10.77.0.2 -p "$p" -t "$ROTATE_SEC" >/dev/null 2>&1
+          iperf3 -c 10.77.0.2 -p "$p" -t "$ROTATE_SEC" ${PER_STREAM_BW:+-b "$PER_STREAM_BW"} >/dev/null 2>&1
         sleep 1
       done
     ) &
