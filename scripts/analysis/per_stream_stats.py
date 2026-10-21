@@ -36,7 +36,8 @@ def main() -> None:
               f"{np.percentile(x, 5):>8.2f} {np.median(x):>8.2f} {x.max():>8.2f} "
               f"{100 * (x < FLOOR_MBPS).mean():>6.1f}%")
     if allm:
-        m = np.array([a for a in allm if len(a) == min(len(b) for b in allm)])
+        L = min(len(b) for b in allm)
+        m = np.array([a[:L] for a in allm])
         tot = m.sum(axis=0)
         print(f"\nTOTAL  mean={tot.mean():.2f} Mbps  min-stream mean={m.min(axis=0).mean():.2f}  "
               f"ratio={m.min(axis=0).mean() / tot.mean() * 100:.1f}%  spread(max-min)={m.max(axis=0).mean() - m.min(axis=0).mean():.2f}")
