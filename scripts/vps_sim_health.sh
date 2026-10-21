@@ -14,14 +14,19 @@ NSEG=$(( $(wc -l < "$SEGCSV" 2>/dev/null || echo 1) - 1 ))
 CUR=$(ls -d "$RUN"/seg-* 2>/dev/null | sort | tail -1)
 CSV="$CUR/timeseries.csv"
 C2=$(cat /sys/module/tcp_bbrplusv3/parameters/c2_early_probe 2>/dev/null || echo "NA")
-UNIT=$(systemctl show tbsim24h --property=ActiveState --value 2>/dev/null || echo "none")
-CPU_US=$(systemctl show tbsim24h --property=CPUUsageNSec --value 2>/dev/null || echo 0)
-MEM_CUR=$(systemctl show tbsim24h --property=MemoryCurrent --value 2>/dev/null || echo 0)
+UNIT=$(pgrep -f "vps_sim_ab.sh" >/dev/null 2>&1 && echo "running" || echo "dead")
+SIMPID=$(pgrep -f "vps_sim_ab.sh" | head -1)
+if [ -n "$SIMPID" ]; then
+  CPU_S=$(awk '{print int(($14+$15)/100)}' "/proc/$SIMPID/stat" 2>/dev/null)
+  MEM_CUR=$(ps -o rss= -p "$SIMPID" 2>/dev/null | tr -d ' ')
+else
+  CPU_S=0; MEM_CUR=0
+fi
 LOAD=$(cut -d' ' -f1-3 /proc/loadavg)
 MEMUSED=$(free -m | awk '/^Mem:/{print $3"/"$2"MB"}')
 XR=$(systemctl is-active xr.service 2>/dev/null)
-CF=$(pgrep -c cloudflared 2>/dev/null || echo 0)
-IPERF=$(pgrep -c iperf3 2>/dev/null || echo 0)
+CF=$(pgrep -c cloudflared 2>/dev/null | head -1); CF=${CF:-0}
+IPERF=$(pgrep -c iperf3 2>/dev/null | head -1); IPERF=${IPERF:-0}
 QDISC=$(tc qdisc show dev tb-h 2>/dev/null | grep -c netem)
 NS=$(ip netns list 2>/dev/null | grep -c tbsim)
 DISK=$(df -h /var/log | tail -1 | awk '{print $4}')
@@ -44,7 +49,7 @@ for p in $(echo "${!RATE[@]}" | tr ' ' '\n' | sort); do
 done
 
 # ---- 告警判定 ----
-[ "$UNIT" = "active" ] || WARN+=("unit tbsim24h 非 active ($UNIT)")
+[ "$UNIT" = "running" ] || WARN+=("实验主进程不在 ($UNIT)")
 [ "$IPERF" -ge 12 ] || WARN+=("iperf3 进程只剩 $IPERF 个 (期望≥12: 8 server+8 client)")
 [ "$QDISC" = "1" ] || WARN+=("netem qdisc 丢失 (tb-h)")
 [ "$NS" = "1" ] || WARN+=("netns tbsim 丢失")
@@ -57,7 +62,7 @@ RUNSTART=$(date -d "${RUNNAME:0:8} ${RUNNAME:9:2}:${RUNNAME:11:2}:${RUNNAME:13:2
 [ "$NSEG" -eq 0 ] && [ "$RUNSTART" -gt 0 ] && [ $((NOW - RUNSTART)) -gt 10800 ] && WARN+=("运行>3h 仍无完整段 (进行中: $CUR)")
 
 TS=$(date -Iseconds)
-SUM="ts=$TS run=$(basename "$RUN") seg_done=$NSEG cur_seg=$(basename "$CUR") c2=$C2 unit=$UNIT iperf=$IPERF qdisc=$QDISC netns=$NS xr=$XR cf=$CF load=$LOAD mem=$MEMUSED mem_cgroup=$MEM_CUR cpu_cgroup_s=$((CPU_US / 1000000000)) disk_free=$DISK sample_stale_s=$STALE"
+SUM="ts=$TS run=$(basename "$RUN") seg_done=$NSEG cur_seg=$(basename "$CUR") c2=$C2 sim=$UNIT iperf=$IPERF qdisc=$QDISC netns=$NS xr=$XR cf=$CF load=$LOAD mem=$MEMUSED sim_rss_kb=$MEM_CUR cpu_sim_s=$CPU_S disk_free=$DISK sample_stale_s=$STALE"
 RATESTR=""
 for p in $(echo "${!RATE[@]}" | tr ' ' '\n' | sort); do RATESTR="$RATESTR $p=${RATE[$p]}"; done
 LINE="$SUM | rates:$RATESTR"

@@ -112,8 +112,15 @@ cpu_ticks() { awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8, $5}' /proc/stat; }
 SEG=0
 VALS=($C2_VALS)
 NVALS=${#VALS[@]}
-echo "seg,c2,start_epoch,end_epoch,elapsed_s" > "$OUT/segments.csv"
+MAX_SEGS=${MAX_SEGS:-0}   # 0 = 跑到 DURATION 为止; >0 = 跑够段数就收工
+# 续跑: 已有完整段则从其后接着跑 (watchdog 重启用)
+if [ -f "$OUT/segments.csv" ]; then
+  DONE=$(( $(wc -l < "$OUT/segments.csv") - 1 ))
+  if [ "$DONE" -gt 0 ]; then SEG=$DONE; log "续跑: 已有 $DONE 段完成, 从 seg$SEG 继续"; fi
+fi
+[ -f "$OUT/segments.csv" ] || echo "seg,c2,start_epoch,end_epoch,elapsed_s" > "$OUT/segments.csv"
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+  [ "$MAX_SEGS" -gt 0 ] && [ "$SEG" -ge "$MAX_SEGS" ] && { log "已达 $MAX_SEGS 段, 收工"; break; }
   NOW=$(date +%s)
   LEFT=$((DEADLINE - NOW))
   [ "$LEFT" -le 0 ] && break
