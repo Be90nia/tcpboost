@@ -52,7 +52,9 @@ done
 [ "$CF" -ge 1 ] || WARN+=("cloudflared 进程消失!")
 [ "$STALE" -gt 300 ] 2>/dev/null && WARN+=("采样器停摆: CSV 末行已过 ${STALE}s")
 [ -n "$ZERO_STREAMS" ] && WARN+=("零速流:$ZERO_STREAMS")
-[ "$NSEG" -eq 0 ] && WARN+=("尚无完整段 (进行中: $(basename "$CUR"))")
+RUNNAME=$(basename "$RUN")
+RUNSTART=$(date -d "${RUNNAME:0:8} ${RUNNAME:9:2}:${RUNNAME:11:2}:${RUNNAME:13:2}" +%s 2>/dev/null || echo 0)
+[ "$NSEG" -eq 0 ] && [ "$RUNSTART" -gt 0 ] && [ $((NOW - RUNSTART)) -gt 10800 ] && WARN+=("运行>3h 仍无完整段 (进行中: $CUR)")
 
 TS=$(date -Iseconds)
 SUM="ts=$TS run=$(basename "$RUN") seg_done=$NSEG cur_seg=$(basename "$CUR") c2=$C2 unit=$UNIT iperf=$IPERF qdisc=$QDISC netns=$NS xr=$XR cf=$CF load=$LOAD mem=$MEMUSED mem_cgroup=$MEM_CUR cpu_cgroup_s=$((CPU_US / 1000000000)) disk_free=$DISK sample_stale_s=$STALE"
