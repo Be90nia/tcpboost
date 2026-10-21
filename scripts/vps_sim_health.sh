@@ -4,7 +4,7 @@
 set -u
 OUT=/var/log/tcpboost-sim
 LOG="$OUT/health.log"
-RUN=$(ls -d "$OUT"/2026* 2>/dev/null | sort | tail -1)
+if [ -d "$OUT/current" ]; then RUN="$OUT/current"; else RUN=$(ls -d "$OUT"/2026* 2>/dev/null | sort | tail -1); fi
 NOW=$(date +%s)
 WARN=()
 
