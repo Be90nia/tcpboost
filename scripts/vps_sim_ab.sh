@@ -53,7 +53,10 @@ log "C2_VALS=[$C2_VALS] knob=$([ -w "$C2PATH" ] && echo present || echo absent)"
 cleanup() {
   log "收尾: 停流/删 netns/qdisc"
   pkill -f "iperf3 -c 10.77.0.2" 2>/dev/null
-  pkill -f "iperf3 -s -p $BASE_PORT" 2>/dev/null
+  for i in $(seq 0 $((NSTREAMS - 1))); do pkill -f "iperf3 -s -p $((BASE_PORT + i))" 2>/dev/null; done
+  sleep 2
+  pkill -9 -f "iperf3 -c 10.77.0.2" 2>/dev/null
+  for i in $(seq 0 $((NSTREAMS - 1))); do pkill -9 -f "iperf3 -s -p $((BASE_PORT + i))" 2>/dev/null; done
   ip netns del "$NS" 2>/dev/null
   tc qdisc del dev tb-h root 2>/dev/null
   ip link del tb-h 2>/dev/null
@@ -161,8 +164,11 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
 
   touch "$SEG_DIR/stop"
   pkill -f "iperf3 -c 10.77.0.2" 2>/dev/null
-  pkill -f "iperf3 -s -p $BASE_PORT" 2>/dev/null
-  wait 2>/dev/null
+  for i in $(seq 0 $((NSTREAMS - 1))); do pkill -f "iperf3 -s -p $((BASE_PORT + i))" 2>/dev/null; done
+  sleep 3
+  # 兜底: 段边界竞态重启的 client / 未响应 TERM 的 server (禁 wait: server 是无限进程, 会死锁)
+  pkill -9 -f "iperf3 -c 10.77.0.2" 2>/dev/null
+  for i in $(seq 0 $((NSTREAMS - 1))); do pkill -9 -f "iperf3 -s -p $((BASE_PORT + i))" 2>/dev/null; done
   echo "$SEG,$C2,$NOW,$(date +%s),$(( $(date +%s) - NOW ))" >> "$OUT/segments.csv"
   log "seg$SEG 结束: c2=$C2"
   SEG=$((SEG + 1))

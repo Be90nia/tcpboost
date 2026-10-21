@@ -45,7 +45,7 @@ done
 
 # ---- 告警判定 ----
 [ "$UNIT" = "active" ] || WARN+=("unit tbsim24h 非 active ($UNIT)")
-[ "$IPERF" -ge 8 ] || WARN+=("iperf3 进程只剩 $IPERF 个 (期望≥8)")
+[ "$IPERF" -ge 12 ] || WARN+=("iperf3 进程只剩 $IPERF 个 (期望≥12: 8 server+8 client)")
 [ "$QDISC" = "1" ] || WARN+=("netem qdisc 丢失 (tb-h)")
 [ "$NS" = "1" ] || WARN+=("netns tbsim 丢失")
 [ "$XR" = "active" ] || WARN+=("业务 xr.service 非 active!")
